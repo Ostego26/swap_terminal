@@ -58,7 +58,7 @@ from chains.solana_units import SOL_DECIMALS, base_units_to_amount
 from chains.wallet_hint import which_wallets_are_on_disk
 from chains.xrp import XRPAdapter
 from chains.xrp_signing import reserve_drops
-from config import Config
+from config import Config, bitcoin_family_rpc
 from db import SCHEMA
 from microfortnights import format_duration
 from modules.htlc_assets import MODE_BROKERED_ONLY, settlement_verdict
@@ -1055,7 +1055,14 @@ def check_bitcoin_like(asset: str, adapters, pays_out: bool) -> None:
         record(FAIL, asset, f"no {asset} adapter in this process -- {why_unconfigured(asset, Config.RPC)}")
         return
 
-    port = Config.RPC[asset]["port"]
+    # bitcoin_family_rpc() RATHER THAN Config.RPC[asset], 2026-10-09. `asset` is a
+    # `str`, and a TypedDict subscripted with a variable key resolves to nothing a
+    # checker can verify -- so `Config.RPC[asset]["port"]` typechecked while being
+    # a KeyError for SOL, XRP and ICP, whose entries have no `port` at all. This
+    # function is called with "BTC" and "LTC" from main()'s table and its docstring
+    # is about a Bitcoin-derived chain; the accessor makes that a refusal that names
+    # the chain instead of an assumption two callers up.
+    port = bitcoin_family_rpc(asset)["port"]
     connect, state, detail = chain_precheck(asset, port)
     record(state, f"{asset} network", detail)
     if not connect:
@@ -1089,7 +1096,11 @@ def check_bitcoin_like(asset: str, adapters, pays_out: bool) -> None:
     # .get() AND NOT [..], because an absent key and an empty value mean the same
     # thing here -- no named wallet was configured for this chain -- and config.py
     # always defines the key while a seeded RPC mapping in a test need not.
-    asked_for = str(Config.RPC[asset].get("wallet") or "")
+    # ... and config.BitcoinFamilyRpc does not change that: a TypedDict is a plain
+    # dict at runtime, so a seeded entry really can be missing the key. What the
+    # declaration DOES remove is the reason `str()` was wrapped around it -- the
+    # field is a `str`, so only the `or ""` is still doing work.
+    asked_for = str(bitcoin_family_rpc(asset).get("wallet") or "")
     custody = (
         f" Serving {name or '(unnamed)'}, and {asset}_RPC_WALLET is unset, so this endpoint has no "
         f"/wallet/<name> path and the daemon routes to its DEFAULT wallet -- the one a bare CLI call "
@@ -1288,14 +1299,31 @@ def check_pricing(pair: tuple[str, str] | None = None) -> None:
     )
     assets = sorted({asset for pair in pairs for asset in pair})
     usd = {asset: prices.get(f"{asset}_USD") for asset in assets}
-    missing = [asset for asset, price in usd.items() if not price]
     shown = ", ".join(f"{asset} ${price}" for asset, price in usd.items())
+    # ONE TRUTHINESS TEST, AND THE DIVISION READS FROM ITS RESULT (2026-10-09).
+    #
+    # This used to be `missing = [... if not price]` and then
+    # `usd[a] / usd[b]` on the far side of the early return -- two statements of
+    # one rule ("a price that is falsy is not a price"), with the division's
+    # safety resting on the reader remembering that the first one had already
+    # fired. fetch_usd_prices() returns a bare dict, so .get() yields `None` for
+    # an absent asset and `None / None` is a TypeError inside a preflight whose
+    # whole job is to not raise -- the shape main()'s per-check wrapper exists to
+    # catch, which would have reported "pricing (check crashed)" rather than the
+    # sentence below naming which asset had no price.
+    #
+    # `priced` is the filter, `missing` is derived from it, and the division reads
+    # `priced`. A price that disappears between the two is now impossible rather
+    # than merely unlikely, and there is one place to change the rule if a zero
+    # price should ever be reported differently (rule 8).
+    priced = {asset: price for asset, price in usd.items() if price}
+    missing = [asset for asset in usd if asset not in priced]
     if missing:
         record(FAIL, "pricing",
                f"no USD price for {', '.join(missing)}  <- every checked pair needs BOTH legs priced, or "
                f"create_quote() raises and the browser renders the exception. Read: {shown or '(none)'}")
         return
-    rates = ", ".join(f"1 {a} = {rate_text(usd[a] / usd[b])} {b}" for a, b in pairs)
+    rates = ", ".join(f"1 {a} = {rate_text(priced[a] / priced[b])} {b}" for a, b in pairs)
     record(PASS, "pricing", f"{shown}  ->  {rates or '(no checked pair to rate)'}  <- before fees")
 
 
@@ -1412,7 +1440,17 @@ def main(argv: list[str] | None = None) -> int:
         ("LTC", lambda: check_bitcoin_like("LTC", adapters, pays_out=(pair is None or pair[1] == "LTC"))),
         ("pricing", lambda: check_pricing(pair)),
     ):
-        if name in CHECKED_LEGS and name not in legs:
+        # `pair is not None and` IS THE SCOPE'S OWN PRECONDITION, SAID WHERE IT IS
+        # USED (2026-10-09). legs_to_check(None) returns CHECKED_LEGS whole, so
+        # `name not in legs` cannot be true for an unscoped run and this branch is
+        # reachable only under a --pair. That was already the case and was readable
+        # only by going to legs_to_check() -- while the line below subscripts
+        # `pair`, which is `tuple[str, str] | None`. Stating the precondition here
+        # costs one comparison and means the skip message cannot outlive the
+        # contract it depends on: if legs_to_check() ever returns a subset for None,
+        # this prints nothing new instead of raising TypeError inside the loop that
+        # runs every check.
+        if pair is not None and name in CHECKED_LEGS and name not in legs:
             record(SKIP, name, f"not checked: --pair {pair[0]}:{pair[1]} has no {name} leg")
             continue
         try:

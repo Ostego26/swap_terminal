@@ -47,6 +47,7 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
@@ -458,7 +459,7 @@ def check_gridcoin_testnet(console: Console, allow_mainnet: bool = False) -> dic
 
 
 
-def selected_chains(args) -> list[tuple[str, str, object]]:
+def selected_chains(args) -> list[tuple[str, str, Callable[[Console], dict]]]:
     """The chains to run, in order, as (asset, title, runner).
 
     A table rather than a chain of `if wanted[...]` blocks. main() was over the
@@ -466,6 +467,20 @@ def selected_chains(args) -> list[tuple[str, str, object]]:
     and rule 12 is explicit that the fix is to extract the decision rather than
     raise the ceiling -- here the decision is "which chains, in what order",
     which is data.
+
+    THE RUNNER'S TYPE WAS `object` AND THAT IS WHAT main() THEN CALLS. Written
+    2026-10-09: `object` is not callable, so `run(console)` in main()'s loop was
+    an unchecked call through a value declared to have no behavior at all. Every
+    one of the five entries below is in fact `(Console) -> dict` -- two lambdas
+    closing over `args`, and fund_xrp_testnet/check_solana_devnet by name, which
+    have exactly that signature -- and main() relies on both halves: it passes
+    its Console and appends the result into `results`, which report() reads as a
+    list of dicts.
+
+    Saying so means a runner added with the wrong shape fails here rather than at
+    the call, which on this tool is after a daemon has already been started and
+    blocks mined. `object` was not a weaker claim than this one; it was a claim
+    that the opposite is true.
     """
     everything = [
         ("BTC", f"regtest: start daemon, make a wallet, mine {args.blocks} blocks",

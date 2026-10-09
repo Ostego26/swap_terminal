@@ -58,7 +58,7 @@ from pathlib import Path
 from chains.registry import build_adapters, missing_settings
 from chains.solana import SolanaAdapter
 from chains.xrp import XRPAdapter
-from config import Config
+from config import Config, bitcoin_family_rpc
 from db import db_session
 from log_setup import configure_logging
 from microfortnights import format_duration
@@ -102,7 +102,16 @@ def endpoint_lines() -> list[str]:
     """
     lines = []
     for asset in ("BTC", "LTC", "GRC"):
-        rpc = Config.RPC[asset]
+        # bitcoin_family_rpc() RATHER THAN Config.RPC[asset], 2026-10-09. The
+        # subscript works today only because this tuple is a literal a checker can
+        # read, and that is the fragile half: the tuple is INLINE here -- one of the
+        # five places ("BTC", "LTC", "GRC") is spelled, see config.RpcSettings for
+        # the list -- so a chain added to it is one edit away from `rpc["host"]` and
+        # `rpc["port"]` on an entry that has neither. SOL, XRP and ICP all lack both,
+        # and the two lines they get instead are appended separately below for
+        # exactly that reason. The accessor refuses by name and says which shapes
+        # exist, rather than raising KeyError('host') out of a startup banner.
+        rpc = bitcoin_family_rpc(asset)
         # wallet_label() RATHER THAN `or "(default wallet)"`, 2026-10-03. This line
         # and services/admin_view._endpoint_text() spelled that same phrase for the
         # same question (rule 8's two copies), and both said something true that
@@ -113,7 +122,14 @@ def endpoint_lines() -> list[str]:
         # 0.001 fee: the desk's deposit address and the operator's own coins were
         # in one wallet, and the banner line that could have said so said
         # "(default wallet)".
-        wallet = wallet_label(asset, str(rpc["wallet"] or ""))
+        # NO str() AND NO `or ""`, 2026-10-09: config.BitcoinFamilyRpc declares
+        # `wallet` a `str` and config.py builds it with _env("<ASSET>_RPC_WALLET",
+        # ""), which returns "" for unset, empty or whitespace-only. The wrapper was
+        # getting an `object` past wallet_label()'s `str` parameter and not guarding
+        # anything -- unlike the two `.get("wallet") or ""` reads in swap_readiness
+        # and wallet_custody, which are reached with test-seeded partial entries and
+        # keep theirs. This one reads the table config.py built.
+        wallet = wallet_label(asset, rpc["wallet"])
         confirmations = getattr(Config, f"{asset}_MIN_CONFIRMATIONS")
         # AN UNCONFIGURED CHAIN SAYS SO, matching what SOL and XRP say below.
         #

@@ -66,7 +66,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from config import Config
-from modules.address_network import address_network, decode_segwit_address
+from microfortnights import format_duration
+from modules.address_authority import expected_network
+from modules.address_network import TESTNET, address_network, decode_segwit_address
 from modules.pubkey_address import PublicKeyRefused, address_from_public_key
 
 from swap_terminal.chains.icp import ICPCallFailed, dfx_transport
@@ -180,15 +182,77 @@ def comparability(derived: str, today: str) -> tuple[str, str]:
 def main() -> int:
     """Announce the target first, then print both columns. Rule 14 throughout."""
     canister_id = os.environ.get(_CANISTER_VARIABLE, "")
-    icp = Config.RPC.get("ICP") or {}
-    service = icp.get("service") or "icp-replica"
-    timeout = float(icp.get("timeout") or 60.0)
-    network = Config.NETWORK if hasattr(Config, "NETWORK") else "testnet"
+    # NO .get() AND NO CONVERSIONS: config.IcpRpc declares `service` a `str` and
+    # `timeout` a `float`, and config.py defines both for every process
+    # (_env("ICP_DFX_SERVICE", "icp-replica") and _env_float("ICP_CALL_TIMEOUT",
+    # "60")), so the `or` fallbacks and the float() were there to get `object`
+    # values past canister_public_key()'s signature rather than to defend against
+    # anything config.py can produce.
+    icp = Config.RPC["ICP"]
+    service = icp["service"]
+    timeout = icp["timeout"]
+
+    # `Config.NETWORK` DID NOT EXIST AND HAD NEVER EXISTED. Until 2026-10-09 this
+    # line read
+    #
+    #     network = Config.NETWORK if hasattr(Config, "NETWORK") else "testnet"
+    #
+    # and the hasattr() was the whole defect: config.Config has no NETWORK
+    # attribute, nothing in this tree sets one, so the condition was always False
+    # and the value was always the literal "testnet". A reader -- and I did read it
+    # this way -- takes that line as "respects the configured network, defaulting to
+    # testnet", which is a sentence about a setting that does not exist. The
+    # expression was its own documentation and the documentation was false.
+    #
+    # WHICH MATTERS BECAUSE `network` PICKS THE VERSION BYTE. It is passed to
+    # modules/pubkey_address.address_from_public_key(), which keys
+    # P2PKH_VERSION_FOR on (asset, network): GRC/mainnet is 0x3E and GRC/testnet is
+    # 0x6F, so the wrong value here does not fail -- it prints a well-formed address
+    # for the other network, and comparability() below then reports "different
+    # networks" and the row says nothing. On a host whose daemons are on mainnet
+    # ports, every row of this report was an n/a for a reason nothing on screen
+    # named.
+    #
+    # DERIVED PER ASSET FROM THE ONE AUTHORITY, not from a constant and not from a
+    # second port table. modules/address_authority.expected_network() answers
+    # "which network does this process believe it is on for this asset" from the
+    # chain's configured RPC port through network_target.classify(), which is the
+    # same function the workers' startup banner, swap_readiness and the address
+    # checks all use (rule 8/11). Per asset rather than once, because the three
+    # chains are three independent daemons: nothing stops BTC being on regtest while
+    # GRC is on mainnet, and address_from_public_key() already takes the network per
+    # call.
+    #
+    # TESTNET WHEN IT IS NOT ESTABLISHED, and that direction is deliberate.
+    # expected_network() returns None for an unconfigured port and for an
+    # unrecognized one -- its own docstring refuses to call a custom -rpcport "not
+    # mainnet" -- and this file's header is emphatic that these addresses are
+    # derivations of a LOCAL dfx_test_key that controls nothing on any real chain.
+    # Guessing mainnet would print an address in the format an operator might fund;
+    # guessing testnet prints one that is visibly throwaway, which is the cheaper
+    # way to be wrong.
+    #
+    # dict(Config.RPC) because expected_network() takes a plain `dict` and
+    # config.RPC is a TypedDict (config.RpcSettings), which the typing spec lets a
+    # caller read generically only as a Mapping. Same entries, same objects: it
+    # reads one port per asset and nothing else.
+    table = dict(Config.RPC)
+    networks = {asset: expected_network(asset, table) or TESTNET for asset in _P2PKH_CHAINS}
 
     print("canister threshold key vs the desk's current addresses -- READ ONLY, nothing is changed")
     print(f"  canister   {canister_id or f'(unset -- export {_CANISTER_VARIABLE})'}")
-    print(f"  dfx service {service}  timeout {timeout}s")
-    print(f"  network    {network}  <- which column of P2PKH_VERSION_FOR is authoritative below")
+    # format_duration() RATHER THAN f"{timeout}s", 2026-10-09. CLAUDE.md rule 6:
+    # every timing this system REPORTS is in microfortnights, with the seconds in
+    # parentheses where an operator may also need to read the env var that sets it
+    # -- which is exactly this line, against ICP_CALL_TIMEOUT. Measured while
+    # fixing it: this was the ONLY `timeout {...}s` left outside tests/ in the
+    # whole tree, and the other five root tools in this bucket (fund_desk,
+    # swap_readiness, wallet_custody, solana_chain_check, pay_test_deposit) all
+    # already import format_duration. One outlier, not a convention.
+    print(f"  dfx service {service}  timeout {format_duration(timeout)}")
+    print(f"  network    {', '.join(f'{a} {n}' for a, n in networks.items())}  <- the row of "
+          f"P2PKH_VERSION_FOR each chain below is derived from, read from that chain's configured "
+          f"RPC port. An unset or unrecognized port is NOT ESTABLISHED and falls back to testnet")
     if not canister_id:
         print(
             f"\nREFUSED, nothing read: {_CANISTER_VARIABLE} is unset. Its value is environment "
@@ -223,7 +287,7 @@ def main() -> int:
     verdicts = {}
     for asset in _P2PKH_CHAINS:
         try:
-            derived = address_from_public_key(key, asset, network)
+            derived = address_from_public_key(key, asset, networks[asset])
         except PublicKeyRefused as error:
             derived = f"(refused: {error})"
         today = current[asset]
@@ -247,7 +311,8 @@ def main() -> int:
         f"NOTHING WAS CHANGED. Moving the desk to a canister-derived address would move where funds "
         f"live, which is armed state and the operator's decision -- this file only shows the "
         f"comparison. The key is a LOCAL replica key and controls nothing on any real chain, so the "
-        f"{network} addresses above are derivations rather than accounts with a balance."
+        f"{'/'.join(sorted(set(networks.values())))} addresses above are derivations rather than "
+        f"accounts with a balance."
     )
     return 0
 

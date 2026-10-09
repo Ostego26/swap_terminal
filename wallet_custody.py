@@ -141,7 +141,7 @@ from chains.base import AddressOwnership
 from chains.gridcoin import GridcoinAdapter
 from chains.registry import build_adapters, why_unconfigured
 from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR, derived_payout_account
-from config import Config
+from config import Config, bitcoin_family_rpc
 from db import connect_db
 from gridcoin_credentials import (
     OPERATOR_PORT_VARIABLE,
@@ -459,7 +459,17 @@ def script_chain_lines(asset: str, adapters: dict, row: dict | None) -> list[tup
             f"{asset}: no adapter in this process, so no daemon was asked and nothing about this "
             f"chain's custody was established -- {why_unconfigured(asset, Config.RPC)}"
         ))]
-    port = Config.RPC[asset]["port"]
+    # bitcoin_family_rpc() RATHER THAN Config.RPC[asset], 2026-10-09, and the
+    # difference is whether the Bitcoin-family assumption in this function's first
+    # line is CHECKED or merely written. `asset` is a `str` here, and a TypedDict
+    # subscripted with a variable key resolves to nothing a checker can verify --
+    # so `Config.RPC[asset]["port"]` typechecked while being, for SOL, XRP or ICP,
+    # a KeyError on a table entry that has no `port` at all. The accessor does the
+    # literal lookup per chain and refuses anything else by name (see its
+    # docstring: SCRIPT_CHAINS is a module constant three hundred lines from this
+    # loop, and a fourth chain added to it without noticing the shape difference
+    # crashes a custody report).
+    port = bitcoin_family_rpc(asset)["port"]
     connect, why_port = may_read_a_wallet(asset, port)
     if not connect:
         return [(f"{asset} wallet", NOT_ESTABLISHED, (
@@ -471,8 +481,16 @@ def script_chain_lines(asset: str, adapters: dict, row: dict | None) -> list[tup
     info, read_error, loaded = read_script_chain(asset, adapter)
     # .get() AND NOT [..]: an absent key and an empty value both mean "no named
     # wallet was configured for this chain", which is what the verdict reads, and
-    # a KeyError here would kill a report over a missing dict key.
-    configured = str(Config.RPC[asset].get("wallet") or "")
+    # a KeyError here would kill a report over a missing dict key. config.py always
+    # defines `wallet`, so the absent case is a test that seeded a partial entry --
+    # which several do, and which config.BitcoinFamilyRpc cannot and does not
+    # prevent: a TypedDict is a plain dict at runtime.
+    #
+    # `str(... or "")` kept for that same reason and not for the type. The field is
+    # declared `str` now, so the conversion is dead for every value config.py
+    # produces; what it still carries is the `or ""` for a seeded entry whose
+    # `wallet` is missing, where .get() returns None.
+    configured = str(bitcoin_family_rpc(asset).get("wallet") or "")
     verdict = script_chain_verdict(asset, configured, info, read_error, loaded)
     elapsed = format_duration(time.monotonic() - started)
     lines = [(f"{asset} wallet", verdict.state, f"{verdict.why}  [{why_port}; read in {elapsed}]")]
@@ -662,7 +680,13 @@ def solana_lines() -> list[tuple[str, str, str]]:
     being asked here -- are these two variables two different accounts -- is
     answerable with no endpoint at all.
     """
-    verdict = solana_account_verdict(Config.SOL_DEPOSIT_ACCOUNT, str(Config.RPC["SOL"]["hot_wallet"] or ""))
+    # NO str() AND NO `or ""` ON hot_wallet, 2026-10-09: config.SolanaRpc declares
+    # it `str` and config.py builds it with _env("SOL_HOT_WALLET", ""), which
+    # returns "" for an unset or whitespace-only variable rather than None. The
+    # wrapper was there to get an `object` past solana_account_verdict()'s `str`
+    # parameter, and reading it as a None guard -- which is how it reads -- would
+    # have been reading a defense that was never defending anything.
+    verdict = solana_account_verdict(Config.SOL_DEPOSIT_ACCOUNT, Config.RPC["SOL"]["hot_wallet"])
     return [("SOL accounts", verdict.state, verdict.why)]
 
 

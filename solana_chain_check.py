@@ -65,7 +65,7 @@ import textwrap
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, TypedDict
 
 REPO_ROOT = Path(__file__).resolve().parent
 APP_ROOT = REPO_ROOT / "swap_terminal"
@@ -168,7 +168,35 @@ def make_runner(failures: list[str]):
     return run
 
 
-def print_banner(rpc: dict, address: str, address_why: str = "") -> None:
+class BannerSettings(TypedDict):
+    """The three settings print_banner() reads, and the reason it has its own shape.
+
+    IT WAS `rpc: dict` AND THAT COST TWO KeyErrors IN ONE TEST FILE, which
+    tests/test_solana_chain_check_units.py records at its own call site:
+
+        Built one by hand earlier in this file and print_banner raised KeyError on
+        'mint'; it raised again here on 'min_commitment_rank'. A hand-built config
+        tests the hand-built config.
+
+    A bare `dict` parameter says "any dict", so a caller that assembles one by hand
+    -- a test, an operator tool, a future caller with a URL and nothing else -- gets
+    a KeyError from inside the banner, after the first line has already printed.
+    Three required keys is the actual contract and now the declared one, so a short
+    dict fails where it is written.
+
+    A SUBSET OF config.SolanaRpc RATHER THAN SolanaRpc ITSELF, deliberately. The
+    full six-field entry is assignable to this (a TypedDict may carry extra keys),
+    so main() passes its copy of Config.RPC["SOL"] unchanged -- while a caller with
+    only these three is still legal, which is what the seeded banner tests are and
+    what keeps this function testable without a whole chain configuration.
+    """
+
+    url: str
+    mint: str
+    min_commitment_rank: int
+
+
+def print_banner(rpc: BannerSettings, address: str, address_why: str = "") -> None:
     """Everything that decides the answer, before anything runs (rule 14).
 
     `address_why` says WHERE the address came from -- typed, configured, or defaulted. A default
@@ -1210,15 +1238,26 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    rpc = dict(Config.RPC["SOL"])
+    # .copy() RATHER THAN dict(), 2026-10-09, and the difference is the type that
+    # comes back. Config.RPC["SOL"] is a config.SolanaRpc now, and a TypedDict's
+    # .copy() returns the same TypedDict while dict() returns a plain dict whose
+    # values are `object` -- which is what made every read below unverifiable and
+    # `SolanaAdapter(**rpc)` uncheckable against the six parameters it is built
+    # for. Still a shallow copy of the same keys, and still copied for the same
+    # reason: --mint overwrites one of them and must not edit the process's config.
+    rpc = Config.RPC["SOL"].copy()
     if args.mint:
         rpc["mint"] = args.mint
     # SOL_DEPOSIT_ACCOUNT comes off Config DIRECTLY and not out of rpc[], because it is not an
     # RPC parameter -- it is custody configuration, and config.py keeps it as its own attribute
     # for that reason. Passed here so the ADDRESS section aims at the account the deposit
     # watcher actually scans; see resolve_address() for the run that read the wrong one.
+    # rpc["hot_wallet"] AND NOT .get(...) or "": config.SolanaRpc declares it a
+    # `str` and this dict is a copy of config.py's own entry, where
+    # _env("SOL_HOT_WALLET", "") already answers "" for unset. The `or ""` was
+    # getting an `object` past resolve_address()'s `str` parameter.
     address, address_why = resolve_address(
-        args.address, rpc.get("hot_wallet") or "", Config.SOL_DEPOSIT_ACCOUNT)
+        args.address, rpc["hot_wallet"], Config.SOL_DEPOSIT_ACCOUNT)
 
     started = time.monotonic()
     print_banner(rpc, address, address_why)

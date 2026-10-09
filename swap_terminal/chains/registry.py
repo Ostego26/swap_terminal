@@ -42,9 +42,16 @@ mainnet wallet and not the testnet wallet" -- which is the shape CLAUDE.md rule
 13 warns about: nothing crashed, nothing warned, and the only symptom was
 somebody noticing.
 
-All five are now conditional on the values that cannot be defaulted, and the
+All six are now conditional on the values that cannot be defaulted, and the
 test is _REQUIRED_SETTINGS below -- one entry per chain, so there is one table to
 read rather than a sentence that has to be kept in step with it.
+
+(It said "all five" until 2026-10-09, counted when there were five. ICP landed
+on 2026-10-06 and took the count to six -- BTC, LTC, GRC, SOL, XRP, ICP -- which
+is exactly the drift the sentence above warns about in its own second clause: a
+number in prose beside a table that grew. _REQUIRED_SETTINGS has six entries and
+build_adapters() constructs six shapes; the table is the authority and this
+count is the thing that aged.)
 
 THAT SENTENCE USED TO READ "the one value that cannot be defaulted ... a URL for
 SOL and XRP, a port for BTC, LTC, GRC", AND IT WAS WRONG BY TWO VARIABLES PER
@@ -106,6 +113,19 @@ from .xrp import XRPAdapter
 
 # The three Bitcoin-derived chains, whose Config.RPC entries all have the same
 # six keys and are splatted straight into RPCAdapter's matching signature.
+#
+# THE SAME THREE ARE DECLARED AS TYPES IN config.RpcSettings, which annotates
+# BTC, LTC and GRC as config.BitcoinFamilyRpc and the other three as their own
+# shapes (added 2026-10-09). Named here rather than imported from there on
+# purpose: this module's header promises it reads "the RPC mapping it is handed.
+# Nothing else: no environment, no file", and importing config would both break
+# that and make `from config import Config` drag the whole adapter stack --
+# requests included -- into every process that reads a setting. So the two are
+# deliberately separate and each names the other (rule 8's "the difference
+# belongs in a comment at BOTH sites"): config.RpcSettings is the shape, this is
+# the constructor per asset, and config.bitcoin_family_rpc() is the accessor
+# that gives a VARIABLE-keyed caller the Bitcoin-family six with a refusal
+# attached.
 _BITCOIN_DERIVED = {
     "BTC": BitcoinAdapter,
     "LTC": LitecoinAdapter,
@@ -113,7 +133,55 @@ _BITCOIN_DERIVED = {
 }
 
 
-def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
+def _settings(rpc: Mapping[str, object], asset: str) -> Mapping:
+    """One chain's settings out of the table, or {} when the table has no entry.
+
+    WHY THE TABLE IS TYPED `Mapping[str, object]` AND NOT `Mapping[str, Mapping]`,
+    which is what these three functions took until 2026-10-09. config.Config.RPC
+    is now a TypedDict (config.RpcSettings), so each of its six values has the
+    exact shape of the __init__ it is splatted into -- and the typing spec lets a
+    TypedDict be read generically as `Mapping[str, object]` and NOTHING ELSE. A
+    `Mapping[str, Mapping]` parameter would refuse the very table this module
+    exists to consume, and the twenty-odd `build_adapters(Config.RPC)` call sites
+    across the tree would each have to launder it on the way in.
+
+    So the outer value type gives up the "each entry is a mapping" claim, and
+    this function makes it again as a REAL check rather than an annotation --
+    which is more than the old signature did, because `Mapping[str, Mapping]`
+    with a bare inner `Mapping` was `Mapping[Any, Any]` and checked nothing about
+    the keys or the values anyway.
+
+    THREE OUTCOMES, AND THE MIDDLE ONE IS THE POINT:
+
+      no entry at all     {}. Every caller treats that as unconfigured --
+                          missing_settings() names the variables to export and
+                          build_adapters() skips the chain -- which is the whole
+                          refusal path this module's header is about.
+      a mapping           itself, unchanged, for the caller to splat or read.
+      anything else       TypeError naming the asset and what was found. Today
+                          that case reaches `cls(**entry)` and raises
+                          "argument after ** must be a mapping, not str", which
+                          names neither the chain nor the table it came from.
+
+    The return type is a bare `Mapping` because `**` needs a mapping whose value
+    type is permissive: the four entries have four different shapes and this is
+    the one function in the tree whose job is to be generic across them. The
+    per-shape checking lives at the literal table in config.py and at the
+    `**Config.RPC["SOL"]`-style call sites, which is where a reader can act on it.
+    """
+    entry = rpc.get(asset)
+    if entry is None:
+        return {}
+    if not isinstance(entry, Mapping):
+        raise TypeError(
+            f"the RPC table's {asset!r} entry is a {type(entry).__name__}, not a mapping of settings, "
+            f"so no {asset} adapter could be built. config.Config.RPC's entries are dicts built for "
+            f"one adapter __init__ each -- see config.RpcSettings. Nothing was constructed."
+        )
+    return entry
+
+
+def build_adapters(rpc: Mapping[str, object]) -> dict:
     """Construct every configured chain adapter. Opens no socket.
 
     `rpc` is Config.RPC, or app.config["RPC"], which is a copy of it.
@@ -132,6 +200,16 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
     dict is built for the signature. Both are `**splatted` here, so a key added
     to one config entry without a matching parameter fails loudly at
     construction rather than being ignored.
+
+    AND SINCE 2026-10-09 THAT CONTRACT IS CHECKED RATHER THAN DESCRIBED. The two
+    paragraphs above were prose, and "fails loudly at construction" meant at
+    RUNTIME, on whichever of this tree's ten splat sites ran first -- a worker's
+    startup or an operator tool, never a test. config.py now declares the four
+    shapes as TypedDicts (config.BitcoinFamilyRpc, SolanaRpc, XrpRpc, IcpRpc) and
+    config.RpcSettings maps each asset to the one it uses, so the literal table
+    is checked field by field where it is written. This function is still generic
+    and still splats -- see _settings() above for why the parameter is
+    `Mapping[str, object]` -- but a renamed key no longer gets as far as here.
     """
     # `and rpc[asset].get("port")` is the fix for 2026-09-26. These three used to
     # be constructed unconditionally, because config.Config always had an entry
@@ -153,27 +231,37 @@ def build_adapters(rpc: Mapping[str, Mapping]) -> dict:
     # call. See _REQUIRED_SETTINGS BELOW in this file for the run that measured
     # it -- this said "above", which is the one direction a reader cannot find it
     # in, since the table is defined after this function rather than before it.
+    # _settings() RATHER THAN rpc[asset], AND IT IS NOT A WRAPPER FOR ITS OWN
+    # SAKE: the table is now a TypedDict (config.RpcSettings, 2026-10-09) and the
+    # typing spec only lets one be read generically as Mapping[str, object], so
+    # the per-entry "this is a mapping of settings" check moved from the
+    # parameter annotation into that function, where it is enforced instead of
+    # merely written. Its docstring has the three outcomes.
     adapters = {
-        asset: cls(**rpc[asset])
+        asset: cls(**_settings(rpc, asset))
         for asset, cls in _BITCOIN_DERIVED.items()
         if asset in rpc and not missing_settings(rpc, asset)
     }
-    solana = rpc.get("SOL")
     # Configured means "has a URL". See this module's header for why an
     # unconfigured Solana adapter is left out entirely rather than constructed
     # and left to warn on every inventory refresh.
-    if solana and solana.get("url"):
+    #
+    # The `solana and` that used to guard this is gone because _settings()
+    # already answers "no entry" with {}, and {}.get("url") is None: one test
+    # rather than two for one question.
+    solana = _settings(rpc, "SOL")
+    if solana.get("url"):
         adapters["SOL"] = SolanaAdapter(**solana)
 
     # XRP is conditional on its URL, exactly as SOL is, and for the same
     # reason: an endpoint is the one value that cannot be defaulted.
-    xrp = rpc.get("XRP")
-    if xrp and xrp.get("url"):
+    xrp = _settings(rpc, "XRP")
+    if xrp.get("url"):
         adapters["XRP"] = XRPAdapter(**xrp)
     # ICP is gated on missing_settings() rather than on one key, because it needs
     # TWO values and either one alone is useless: a ledger with no owner cannot
     # derive a deposit address, and an owner with no ledger has nothing to ask.
-    icp = rpc.get("ICP")
+    icp = _settings(rpc, "ICP")
     if icp and not missing_settings(rpc, "ICP"):
         # THE TRANSPORT IS BUILT HERE, NOT INSIDE THE ADAPTER (rule 10). How the
         # ledger is reached is deployment configuration -- which compose service, or
@@ -250,7 +338,7 @@ _REQUIRED_SETTINGS: dict[str, tuple[tuple[str, str | None], ...]] = {
 }
 
 
-def missing_settings(rpc: Mapping[str, Mapping], asset: str) -> list[str]:
+def missing_settings(rpc: Mapping[str, object], asset: str) -> list[str]:
     """The environment variables this chain needs and does not have. [] is configured.
 
     Names rather than keys, because the answer goes to a person who has to export
@@ -284,7 +372,7 @@ def missing_settings(rpc: Mapping[str, Mapping], asset: str) -> list[str]:
     fail. Callers that need a name for such a chain fall back to
     configuring_variable(), which never raises.
     """
-    entry = rpc.get(asset) or {}
+    entry = _settings(rpc, asset)
     names = []
     for key, variable in _REQUIRED_SETTINGS.get(asset, ()):
         if not entry.get(key):
@@ -320,7 +408,7 @@ def unconfigured_chains(adapters: Mapping[str, object], *assets: str) -> list[st
     return [asset for asset in assets if asset not in adapters]
 
 
-def why_unconfigured(asset: str, rpc: Mapping[str, Mapping] | None = None) -> str:
+def why_unconfigured(asset: str, rpc: Mapping[str, object] | None = None) -> str:
     """One sentence an operator can act on, for a chain with no adapter.
 
     PASS `rpc` WHENEVER YOU HAVE IT. Without it this can only name the chain's

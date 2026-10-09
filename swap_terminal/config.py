@@ -41,7 +41,7 @@ anything: setting it afterwards is too late, the value is already baked in.
 
 import os
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, TypedDict
 
 from network_target import UNCONFIGURED_PORT
 
@@ -138,6 +138,190 @@ def fee_sweep_destination(asset: str) -> str:
     strip: a trailing newline from a copy-paste is not part of an address.
     """
     return _env(FEE_SWEEP_DESTINATION_TEMPLATE.format(asset=asset), "").strip()
+
+
+# ---------------------------------------------------------------------------
+# THE SHAPE OF Config.RPC, WRITTEN AS TYPES BECAUSE IT WAS ALREADY WRITTEN AS
+# PROSE AND PROSE IS NOT CHECKED BY ANYTHING.
+#
+# Config.RPC was `dict[str, dict[str, object]]` until 2026-10-09, and the
+# comment at its "SOL" entry made a contract out of that:
+#
+#     Each dict is built for the __init__ signature it is splatted into --
+#     which is the contract RPCAdapter already had -- and chains/registry.py is
+#     the single place that does the splatting.
+#
+# True, load-bearing, and verified by NOBODY. With `object` as the value type
+# every reader of this table got `object` back, so:
+#
+#   - `GridcoinAdapter(**Config.RPC["GRC"])` could not be checked against
+#     RPCAdapter.__init__(user, password, host, port, wallet, timeout) at all.
+#     Renaming a key here -- `wallet` to `wallet_name`, say -- was a runtime
+#     TypeError found by whichever of the ten splat sites ran first, which on
+#     this tree means a worker's startup or an operator tool, not a test.
+#   - every arithmetic or string use of a value needed a conversion wrapper to
+#     get past the `object`: `int(Config.RPC.get("GRC", {}).get("port") or 0)`
+#     in fund_desk.py, `str(Config.RPC[asset].get("wallet") or "")` in two
+#     files, `float(icp.get("timeout") or 60.0)` in a third. Those read as
+#     defensive handling of an unknown value. They were not: _env_int() already
+#     returns an int and _env() already returns a str. They were there to
+#     satisfy `object`, and they hid the one case that IS worth defending
+#     against (a test seeding a partial entry) among several that are not.
+#
+# A TypedDict per __init__ SIGNATURE, not per chain, because that is what the
+# old comment says the contract is and because three chains share one:
+#
+#   BitcoinFamilyRpc   BTC, LTC, GRC -> chains/base.RPCAdapter.__init__
+#   SolanaRpc          SOL           -> chains/solana.SolanaAdapter.__init__
+#   XrpRpc             XRP           -> chains/xrp.XRPAdapter.__init__
+#   IcpRpc             ICP           -> NOT one __init__ (see IcpRpc below)
+#
+# WHAT THIS NOW CHECKS, which is the reason for the change rather than the
+# squiggles it also removes:
+#
+#   - the literal table below is checked field by field against these four
+#     shapes, so a misspelled or missing key fails the checker HERE rather than
+#     at construction on a live host;
+#   - `**Config.RPC["SOL"]` is checked against SolanaAdapter's six parameters,
+#     in every file that does it, so the splat contract the old comment asserts
+#     is now the thing a checker enforces;
+#   - `Config.RPC["GRC"]["port"]` is an `int` and `["wallet"]` is a `str` at
+#     every reader, so the conversions listed above are redundant rather than
+#     load-bearing -- and the ones that remain are the ones that mean something.
+#
+# WHAT IT DELIBERATELY DOES NOT DO. These are not runtime validation: a
+# TypedDict is a plain dict at runtime and nothing here inspects a value. The
+# values come from _env/_env_int/_env_float above, which is where a bad value is
+# refused -- see the empty-variable measurement at the top of this file. Nor do
+# they make the table immutable: tests replace whole entries through monkeypatch
+# to seed an unconfigured chain, which is how most of this file's refusal paths
+# are exercised, and that still works exactly as it did.
+class BitcoinFamilyRpc(TypedDict):
+    """A Bitcoin JSON-RPC connection: BTC, LTC and GRC, splatted into RPCAdapter.
+
+    The six fields are chains/base.RPCAdapter.__init__'s six parameters, in its
+    order, and that function's own `noqa: PLR0913` comment says why there are
+    six rather than one object ("they arrive as **Config.RPC[asset], a dict
+    built for exactly this signature").
+
+    `port` is an int and defaults to UNCONFIGURED_PORT (0), which is the
+    sentinel chains/registry.build_adapters() skips on -- see this file's header
+    for the 2026-09-26 incident where these three defaulted to MAINNET ports
+    instead and the operator's live Gridcoin staking wallet was polled on a loop.
+    """
+
+    user: str
+    password: str
+    host: str
+    port: int
+    wallet: str
+    timeout: float
+
+
+class SolanaRpc(TypedDict):
+    """A Solana RPC endpoint, splatted into chains/solana.SolanaAdapter.
+
+    DIFFERENT KEYS FROM THE BITCOIN FAMILY ON PURPOSE, and the long comment at
+    the "SOL" entry below is the argument: a Solana endpoint is one URL with no
+    HTTP authentication and no wallet path, so expressing it as
+    user/password/host/port would mean four empty strings and a reassembly step
+    that can silently produce "http://:0".
+
+    `mint` empty means native SOL rather than an SPL token, and `hot_wallet` is
+    a PUBLIC key -- nothing in chains/solana.py reads, loads or derives a
+    private key, which tests/test_solana_adapter.py checks by tokenizing that
+    file rather than by trusting this sentence.
+    """
+
+    url: str
+    commitment: str
+    timeout: float
+    mint: str
+    hot_wallet: str
+    min_commitment_rank: int
+
+
+class XrpRpc(TypedDict):
+    """A rippled JSON-RPC endpoint, splatted into chains/xrp.XRPAdapter.
+
+    `min_confirmations` must be 1 and chains/xrp_units.py refuses any other
+    value at construction: the XRP Ledger does not reorganize, so a payment is
+    either in a validated ledger or it is not and there is no depth to
+    accumulate. It is typed `int` rather than `Literal[1]` because that refusal
+    is the authority -- a Literal here would move the refusal into the type
+    system, where an operator who exported XRP_MIN_CONFIRMATIONS=2 would get a
+    silent nothing instead of that module's sentence saying why 2 is wrong.
+    """
+
+    url: str
+    min_confirmations: int
+    timeout: float
+
+
+class IcpRpc(TypedDict):
+    """The ICP ledger and the dfx transport settings. NOT one __init__ signature.
+
+    THE ONE ENTRY THAT IS NOT A SPLAT, said here because every other docstring
+    in this block promises one. chains/icp.ICPAdapter.__init__ takes
+    (ledger_canister_id, owner_principal, call) -- a CALLABLE, not transport
+    settings -- since 2026-10-07, when adding `network_url` took it to six
+    parameters and ruff's PLR0913 refused. That lint was pointing at a layering
+    error (rule 10): how the ledger is reached is deployment configuration, not
+    something the adapter decides. So chains/registry.build_adapters() reads the
+    three transport fields here, builds the transport with
+    chains/icp.dfx_transport(), and passes the first two fields plus that
+    callable.
+
+    Which means this TypedDict describes what the REGISTRY reads, and the fields
+    divide in two:
+
+      ledger_canister_id, owner_principal   the adapter's first two arguments
+      service, timeout, network_url         dfx_transport()'s three
+
+    Every default is empty, and that is the point rather than caution -- see the
+    "ICP" entry below for why writing the mainnet ledger id or ic0.app as a
+    default would hand a checkout with nothing configured an adapter pointed at
+    the real ledger.
+    """
+
+    ledger_canister_id: str
+    owner_principal: str
+    service: str
+    timeout: float
+    network_url: str
+
+
+# THERE IS DELIBERATELY NO `ChainRpc = BitcoinFamilyRpc | SolanaRpc | XrpRpc |
+# IcpRpc` UNION HERE, and the absence is the decision rather than an oversight.
+# A union of the four reads like the obvious name for "any one chain's settings",
+# and nothing can use it: every real consumer needs either the EXACT per-asset
+# shape (so it can splat into one constructor, or read `["port"]`) or a generic
+# `Mapping` it can iterate without knowing the shape at all --
+# chains/registry._settings() is the second kind and says so. A union gives
+# neither: `**(A | B)` is ambiguous between two signatures and `["port"]` is an
+# error on the half that has no port. It was written, found to have no caller,
+# and removed rather than left as a name a reader has to go and check (rule 9).
+class RpcSettings(TypedDict):
+    """The whole per-chain table, keyed by asset, one value type per key.
+
+    THIS IS ALSO THE REPO'S ONLY TYPE-CHECKED STATEMENT OF WHICH CHAINS SHARE
+    THE BITCOIN JSON-RPC SHAPE. ("BTC", "LTC", "GRC") is spelled in at least
+    five other places -- wallet_custody.SCRIPT_CHAINS,
+    modules/atomic_swapper.SUPPORTED_ASSETS, chains/registry._BITCOIN_DERIVED,
+    workers/common.endpoint_lines()'s loop and
+    modules/htlc_assets.SCRIPT_HTLC_ASSETS -- which is rule 8's standing
+    complaint and is not fixed here. What IS true is that the three annotations
+    below are the only one of those spellings a checker reads, so
+    bitcoin_family_rpc() below derives its membership from this declaration
+    rather than carrying one more copy of the tuple.
+    """
+
+    BTC: BitcoinFamilyRpc
+    LTC: BitcoinFamilyRpc
+    SOL: SolanaRpc
+    GRC: BitcoinFamilyRpc
+    XRP: XrpRpc
+    ICP: IcpRpc
 
 
 class Config:
@@ -956,7 +1140,7 @@ class Config:
     # brief-escrow model the operator described, that window is the whole exposure.
     SOL_DEPOSIT_ACCOUNT = _env("SOL_DEPOSIT_ACCOUNT", "").strip()
 
-    RPC: ClassVar[dict[str, dict[str, object]]] = {
+    RPC: ClassVar[RpcSettings] = {
         "BTC": {
             "user": _env("BTC_RPC_USER", ""),
             "password": _env("BTC_RPC_PASS", ""),
@@ -1105,3 +1289,61 @@ class Config:
             "network_url": _env("ICP_DFX_NETWORK_URL"),
         },
     }
+
+
+#: What bitcoin_family_rpc() refuses with. Its own class rather than KeyError so
+#: a caller can tell "this asset is not a Bitcoin-derived chain" from the
+#: KeyError a genuinely absent dict key raises -- the two want opposite
+#: responses, and chains/registry.unconfigured_chains()'s docstring records what
+#: a bare `str(KeyError("GRC"))` reaching an operator looks like ("No swap was
+#: created: 'GRC'", which is the repr of the key and nothing else).
+class NotABitcoinFamilyChain(KeyError):
+    """`asset` has no Bitcoin JSON-RPC settings in Config.RPC. Nothing was read."""
+
+
+def bitcoin_family_rpc(asset: str) -> BitcoinFamilyRpc:
+    """Config.RPC[asset] for a Bitcoin-derived chain, REFUSING anything else.
+
+    WHY A FUNCTION AND NOT A SUBSCRIPT. Four call sites index this table with a
+    VARIABLE asset and then read a Bitcoin-family key off the result --
+    `["port"]` in swap_readiness.check_bitcoin_like() and
+    wallet_custody.script_chain_lines(), `.get("wallet")` in the same two, and
+    `["host"]`/`["port"]` in workers/common.endpoint_lines(). Every one of them
+    is looping over ("BTC", "LTC", "GRC") and nothing else: both of those
+    functions' docstrings say so in words ("one Bitcoin-derived chain", "Every
+    (check, state, why) for one Bitcoin-derived chain"), and their callers pass
+    literal assets from that set.
+
+    WHAT WAS WRONG WITH THE SUBSCRIPT, and it is a live hazard rather than a
+    typing inconvenience. `Config.RPC[asset]["port"]` is a KeyError on SOL, XRP
+    and ICP -- none of which HAS a port -- and nothing at the call site says so.
+    These loops are one added asset away from it: the tuple at the top of
+    workers/common.endpoint_lines() is inline, SCRIPT_CHAINS is a module
+    constant three hundred lines from its loop, and a chain added to either
+    without noticing the shape difference is a crash in a startup banner or a
+    custody report. This makes the refusal explicit, names the chain, and says
+    which shapes exist.
+
+    THE MEMBERSHIP IS DERIVED FROM RpcSettings, not written again. The three
+    branches below are legal only because RpcSettings declares BTC, LTC and GRC
+    as BitcoinFamilyRpc; change one of those annotations and this function stops
+    type-checking rather than quietly returning the wrong shape. That is why
+    there is no ("BTC", "LTC", "GRC") tuple in this file -- rule 8 counts copies,
+    and a copy a checker enforces against its source is not one.
+
+    A LITERAL BRANCH PER CHAIN rather than a loop, because a TypedDict can only
+    be subscripted with a literal key: a variable key is exactly the thing that
+    cannot be checked, which is the whole reason this function exists. Three
+    branches for three chains is the price of the check being real.
+    """
+    if asset == "BTC":
+        return Config.RPC["BTC"]
+    if asset == "LTC":
+        return Config.RPC["LTC"]
+    if asset == "GRC":
+        return Config.RPC["GRC"]
+    raise NotABitcoinFamilyChain(
+        f"{asset} is not a Bitcoin-derived chain, so it has no user/password/host/port/wallet/timeout "
+        f"settings. BTC, LTC and GRC do; SOL is one url plus a commitment, XRP is one url, and ICP is "
+        f"a canister id plus a dfx transport. Nothing was read."
+    )

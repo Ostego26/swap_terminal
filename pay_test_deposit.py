@@ -542,6 +542,28 @@ def transfer_command(keypair: str, account: str, amount, tag) -> list[str]:
     ]
 
 
+def report_refusals(refusals: list[Refusal]) -> int:
+    """Print every refusal and return 1. The ONE place that block is written.
+
+    Extracted 2026-10-09 when main() gained a second return on the same block --
+    the "no SOL swap is awaiting a deposit" exit, which previously reached this
+    print by falling through the swap section rather than by returning. Two copies
+    of an operator-facing block is rule 8's two copies: they agree today and the
+    next edit to the wording lands in one of them.
+
+    THE COUNT CARRIES ITS DENOMINATOR IMPLICITLY AND THE SENTENCE CARRIES THE REST
+    (rule 14): "NOTHING was sent and nothing was written" is the part an operator
+    needs, and it must not be reachable from a path that DID send. It is not --
+    every caller returns this value straight out of main(), before transfer_command()
+    is built.
+    """
+    print(f"\n  REFUSED: {len(refusals)} reason(s). NOTHING was sent and nothing was written.")
+    for refusal in refusals:
+        print(f"    ! {refusal.what}")
+        print(f"      -> {refusal.fix}")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """An `argv` parameter because every other root tool here has one.
 
@@ -554,7 +576,15 @@ def main(argv: list[str] | None = None) -> int:
     test must monkeypatch sys.argv, and a bare parse_args() under pytest reads
     pytest's own arguments, which cost swap_readiness.py two tests the same day.
     """
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # `__doc__ and ...` RATHER THAN `__doc__.splitlines()[0]`, 2026-10-09. A
+    # module's __doc__ is `str | None`, and None is not hypothetical: python -OO
+    # strips every docstring, so on an optimized interpreter the old line was an
+    # AttributeError on the --help path of a tool whose whole job is to refuse
+    # safely. market_context_report.py:119 already spells it exactly this way; this
+    # is that spelling rather than a second one (rule 8), and argparse's
+    # `description` is itself `str | None`, so None means "no description" rather
+    # than a crash.
+    parser = argparse.ArgumentParser(description=__doc__ and __doc__.splitlines()[0])
     parser.add_argument("--keypair", required=True,
                         help="path to the SENDING devnet keypair. Never read by this process; "
                              "handed to the Solana CLI, which signs.")
@@ -583,37 +613,54 @@ def main(argv: list[str] | None = None) -> int:
         open_count = open_sol_swap_count(db)
     refusals.extend(swap_refusals(swap, seen))
 
-    if swap:
-        chosen = (
-            f"named by --swap; {open_count} SOL swap(s) are open"
-            if args.swap
-            else f"the NEWEST of {open_count} open SOL swap(s), picked by created_at DESC. Pass --swap "
-                 f"with an id to choose"
-        )
-        print(f"  swap            {swap['id']}  created {swap.get('created_at')}")
-        print(f"  chosen          {chosen}")
-        print(f"  quote           {quote_age_line(swap, utc_now_iso())}")
-        print(f"  memo tag        {swap.get('deposit_tag')}  <- the whole memo, undecorated")
-        print(f"  amount          {swap.get('expected_input_amount')} SOL  <- read from the row, so it "
-              f"cannot disagree with the quote")
-        print(f"  payout          {swap.get('payout_address')}")
-        ownership = ownership_refusal(str(swap.get("payout_address") or ""))
-        if ownership:
-            refusals.append(ownership)
-        else:
-            for line in ownership_lines(str(swap.get("payout_address") or "")):
-                print(line)
-        funding = sender_funding(args.keypair, float(swap["expected_input_amount"]))
-        print(f"  sender funded   {funding.line}")
-        if funding.refusal:
-            refusals.append(funding.refusal)
+    # ONE EXIT FOR "THERE IS NO SWAP", AND IT IS WHY EVERYTHING BELOW CAN READ THE
+    # ROW (2026-10-09). This used to be `if swap:` wrapped around the whole block
+    # below, with the refusal print and `return 1` further down -- so the send at
+    # the bottom subscripted `swap["expected_input_amount"]` on a value typed
+    # `dict | None`, and the reason that is safe lived in swap_refusals(): it
+    # returns the "no SOL swap is awaiting a deposit" refusal for None, so
+    # `refusals` is never empty when `swap` is None and the return below always
+    # fires first.
+    #
+    # That is a real invariant and it was stated nowhere -- a reader (or a checker)
+    # had to go and read another function to learn that the subscript cannot raise,
+    # and a future edit to swap_refusals() that dropped that first branch would
+    # turn the send path into a TypeError with no test in between. Returning here
+    # says it once, where it is relied on.
+    #
+    # THE OUTPUT IS UNCHANGED, which is the point of putting it here rather than
+    # earlier: `refusals` already carries the environment refusals plus the no-swap
+    # one, and report_refusals() prints the identical block the old code printed
+    # when it fell through to it with the swap section skipped.
+    if swap is None:
+        return report_refusals(refusals)
+
+    chosen = (
+        f"named by --swap; {open_count} SOL swap(s) are open"
+        if args.swap
+        else f"the NEWEST of {open_count} open SOL swap(s), picked by created_at DESC. Pass --swap "
+             f"with an id to choose"
+    )
+    print(f"  swap            {swap['id']}  created {swap.get('created_at')}")
+    print(f"  chosen          {chosen}")
+    print(f"  quote           {quote_age_line(swap, utc_now_iso())}")
+    print(f"  memo tag        {swap.get('deposit_tag')}  <- the whole memo, undecorated")
+    print(f"  amount          {swap.get('expected_input_amount')} SOL  <- read from the row, so it "
+          f"cannot disagree with the quote")
+    print(f"  payout          {swap.get('payout_address')}")
+    ownership = ownership_refusal(str(swap.get("payout_address") or ""))
+    if ownership:
+        refusals.append(ownership)
+    else:
+        for line in ownership_lines(str(swap.get("payout_address") or "")):
+            print(line)
+    funding = sender_funding(args.keypair, float(swap["expected_input_amount"]))
+    print(f"  sender funded   {funding.line}")
+    if funding.refusal:
+        refusals.append(funding.refusal)
 
     if refusals:
-        print(f"\n  REFUSED: {len(refusals)} reason(s). NOTHING was sent and nothing was written.")
-        for refusal in refusals:
-            print(f"    ! {refusal.what}")
-            print(f"      -> {refusal.fix}")
-        return 1
+        return report_refusals(refusals)
 
     command = transfer_command(args.keypair, os.environ["SOL_DEPOSIT_ACCOUNT"].strip(),
                                swap["expected_input_amount"], swap["deposit_tag"])

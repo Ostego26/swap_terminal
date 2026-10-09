@@ -554,7 +554,15 @@ def grc_endpoints():
             f"Required is the custody separation working, not a fault to route around."
         )
 
-    desk_port = int(Config.RPC.get("GRC", {}).get("port") or 0)
+    # NO int() AND NO `or 0`, 2026-10-09: config.BitcoinFamilyRpc declares `port`
+    # an `int` and config.py builds it with _env_int("GRC_RPC_PORT",
+    # str(UNCONFIGURED_PORT)), which is 0 for an unset or empty variable -- so the
+    # `or 0` was defending against a value _env_int cannot produce and the int()
+    # was there to get an `object` past the comparisons below. `["GRC"]` rather
+    # than `.get("GRC", {})` for the same reason: config.RpcSettings now states
+    # that the key is always there, which the test suite relies on too -- the
+    # fixture that drives this function replaces Config.RPC with a GRC-only table.
+    desk_port = Config.RPC["GRC"]["port"]
     for whose, port, variable in (
         ("the operator's", endpoint.port, OPERATOR_PORT_VARIABLE),
         ("the desk's", desk_port, "GRC_RPC_PORT"),
@@ -778,14 +786,41 @@ def staking_verdict(unlocked_until: object, now_epoch: float) -> tuple[bool, str
             "this wallet is NOT ENCRYPTED -- getwalletinfo reports no unlocked_until -- so there "
             "is nothing to unlock and nothing was ever locked. Staking is unaffected"
         )
+    # ONE SENTENCE FOR BOTH WAYS OF NOT BEING A NUMBER, and the split is so a
+    # reader can see which is which (2026-10-09). This was a bare
+    # `float(unlocked_until)` under `except (TypeError, ValueError)`, which
+    # handled both and said which neither to a reader nor to a checker:
+    # `unlocked_until` is typed `object` -- honestly, because it is whatever this
+    # daemon's getwalletinfo reply put in that field -- and `float(object)` is not
+    # a call any checker can approve.
+    #
+    # The two cases are genuinely different and only one of them can reach
+    # float():
+    #
+    #   not int/float/str   TypeError. A dict, a list, a bytes -- shapes a JSON
+    #                       reply can carry and this field has no business
+    #                       holding. Refused by the type test, before the call.
+    #   a str that is not   ValueError, and only float() can tell: "1800000000"
+    #   a number            is a number and "not a number" is not, and no type
+    #                       test distinguishes them.
+    #
+    # So TypeError is gone from the except rather than left as a second guard for
+    # a case the line above it now refuses -- an except clause for an unreachable
+    # exception reads as a defense and is dead code (rule 9). bool passes the type
+    # test because bool IS an int in Python, and float(True) is 1.0 exactly as it
+    # was before: a `true` in that field still ends up reported as locked, via the
+    # "in the PAST" branch below.
+    not_a_number = (
+        f"getwalletinfo reported unlocked_until={unlocked_until!r}, which is not a number, so "
+        f"whether this wallet is open was NOT established. Absence of a readable answer is not "
+        f"an answer"
+    )
+    if not isinstance(unlocked_until, (int, float, str)):
+        return False, not_a_number
     try:
         until = float(unlocked_until)
-    except (TypeError, ValueError):
-        return False, (
-            f"getwalletinfo reported unlocked_until={unlocked_until!r}, which is not a number, so "
-            f"whether this wallet is open was NOT established. Absence of a readable answer is not "
-            f"an answer"
-        )
+    except ValueError:
+        return False, not_a_number
     if until <= 0:
         return False, (
             "unlocked_until is 0, so the wallet is ENCRYPTED AND LOCKED. It is not staking, and the "
@@ -973,7 +1008,20 @@ def icp_plan(console_say, target: float, minter_identity: str) -> dict:
     itself: a mint can always cover the shortfall, which is exactly what makes it a
     mint and not a transfer.
     """
-    icp = dict(Config.RPC.get("ICP", {}))
+    # THE REFUSAL IS READ BEFORE THE SETTINGS ARE, 2026-10-09, and that order is
+    # what lets the entry be read with a literal key. These two statements used to
+    # be the other way round, with `dict(Config.RPC.get("ICP", {}))` first: the
+    # `.get` with a default existed only so the line could not raise before
+    # missing_settings() had a chance to produce the sentence below, and the
+    # `dict()` copy was never mutated. Refusing first makes both unnecessary, and
+    # it matches this file's own stated order -- grc_plan()'s docstring: "resolve
+    # the environment, refuse a wrong network BEFORE constructing anything."
+    #
+    # It also keeps working on a table that has no ICP entry at all, which is what
+    # tests/test_fund_desk.py seeds (a GRC-only Config.RPC): missing_settings()
+    # reads through _settings(), which answers {} for an absent asset, so both
+    # variables come back missing and this returns before `Config.RPC["ICP"]` is
+    # evaluated.
     missing = missing_settings(Config.RPC, "ICP")
     if missing:
         return {"refusal": (
@@ -983,6 +1031,7 @@ def icp_plan(console_say, target: float, minter_identity: str) -> dict:
             f"icp-replica cat /repo/.dfx/local/canister_ids.json"
         )}
 
+    icp = Config.RPC["ICP"]
     destination = account_identifier(icp["owner_principal"])
     if not is_account_identifier(destination):
         return {"refusal": (
@@ -998,8 +1047,14 @@ def icp_plan(console_say, target: float, minter_identity: str) -> dict:
     # which means this tool must run where docker is on PATH: the host, not the web
     # container. Passing network_url here would produce a dfx that signs as an empty
     # anonymous account and a BadFee-shaped failure that says nothing about why.
-    service = icp.get("service", "icp-replica")
-    timeout = float(icp.get("timeout", 60.0))
+    # NO DEFAULTS AND NO float(), 2026-10-09: config.IcpRpc declares `service` a
+    # `str` and `timeout` a `float`, and config.py defines both for every process
+    # ("icp-replica" and ICP_CALL_TIMEOUT defaulting to 60). The two fallbacks were
+    # reachable only through the `.get("ICP", {})` that is now gone, and the
+    # float() was converting an `object`. dfx_transport() takes (service, timeout)
+    # in that order and both are now checked against its signature.
+    service = icp["service"]
+    timeout = icp["timeout"]
     console_say(f"transport   docker compose exec -T {service} dfx, with --identity "
                 f"{minter_identity}  <- identities live in the replica container, so this must run "
                 f"on the HOST (docker on PATH), not inside the web container")
