@@ -43,6 +43,22 @@ rpcallowip=172.18.0.0/16
 **Costs while open**: every pair sourcing or paying out in BTC or LTC refuses at
 `create_swap`, after the quote. Deposits on those chains are not watched.
 
+**RE-MEASURED 2026-10-09 FROM INSIDE THE CONTAINER** (`swap_stack.py chains`),
+because I had read `/admin`'s "configured / tradeable YES" as a reachability fact
+and told the operator finding 1 "may be resolved." It is not. Configured is not
+reachable, and the two live in different columns for that reason:
+
+    BTC  did not answer: ... port=18443 ... [Errno 111] Connection refused
+    LTC  did not answer: ... port=19443 ... [Errno 111] Connection refused
+    GRC  did not answer: 403 Client Error: Forbidden
+    XRP  answered
+
+Only XRP answers. Three of four are unreachable, and BTC/LTC fail DIFFERENTLY
+from GRC: `Connection refused` means the socket is not accepting at all (bound
+loopback-only -> `rpcbind`), where GRC's `403` means it accepted and declined the
+caller by IP (-> `rpcallowip` alone). Different remedies, and the report was
+truncating off the word that distinguished them until C27 below.
+
 ### 2. GRC rejects the container's RPC with 403
 **Measured**: `did not answer: 403 Client Error: Forbidden for url:
 http://host.docker.internal:25779/`. Socket open, RPC refused — so `rpcallowip`,
@@ -422,6 +438,8 @@ by grepping for the NAME rather than the import graph (rule 2).
 
 | | what | commit |
 |---|---|---|
+| C27 | The cause of a chain failure was truncated off the report. `str(detail)[:150]` kept the HEAD of requests' message — where the host and port are, which the row and the config already say — and dropped the TAIL, which is where `[Errno 111] Connection refused` or `timed out` sits. Those two have DIFFERENT remedies (`rpcbind` vs a firewall rule), so the report named neither, and it cost a live diagnosis on 2026-10-09: BTC and LTC read as the same failure as GRC's 403 when they are not. `probe_failure_detail()` keeps both ends and says how many characters it dropped between them; a message short enough to read (GRC's 403, at 72 chars) is untouched | `this commit` |
+| C28 | `chains`' exit line ended in a dangling `"; "` on every non-zero exit — a conditional tail that rendered empty. A report that trails off reads as output that was cut short, which is the ambiguity rule 14 forbids for a blank region. One sentence per case now | `this commit` |
 | C25 | A report line is wrapped by whoever WROTE it, and these had no author at the print site: `COULD NOT READ` quoted docker's stderr verbatim. Measured on one `status` run — four lines at 326/332/336/495 columns, all one call site, each broken by the terminal at an arbitrary column with NO indent so the continuation ran back under the label column and read as a new field. New `say_wrapped()` wraps values at 96 columns under their label. **13 lines over 150 columns → 6, widest 495 → 285**; the 6 remaining are in `supervisor.py` (4) and `workers/common.py` (1), untouched this pass (rule 12) | `this commit` |
 | C26 | The surface map told a reader with ONE missing id that neither was read, and a reader with BOTH missing that one was. `its URL would be <shape> -- the id is the missing part` appended a singular gloss to every branch while `shape` itself carried `-- neither id was read` in only the third — two `--` clauses, one of them wrong in two branches out of three. Which ids are missing decides what the operator goes and looks up, so it is named per branch now | `this commit` |
 | C21 | Every web-probe refusal reported as `unrecognized probe outcome`. `probe_serving_port()` stored `readiness_verdict()`'s rendered SENTENCE and `serving_verdict()` fed it back INTO `readiness_verdict()`, where a `str` is neither an `int` nor an `OSError` and fell through to the fail-closed branch — so the most ordinary outcome a web probe has fired the "nobody anticipated this" path, with the careful two-readings advice coming back out inside a `repr()`. Found by running the new `chains` action; `serving_verdict()` had **no direct test**, which is why four tests of `readiness_verdict()` stayed green through it | `this commit` |

@@ -33,6 +33,7 @@ from pathlib import Path
 import pytest
 
 import swap_stack
+from swap_terminal import stack_authority
 from swap_terminal.stack_authority import (
     CANDID_UI_CANISTER_NAME,
     CANISTER_SURFACES,
@@ -65,6 +66,7 @@ from swap_terminal.stack_authority import (
     pids_owning_inodes,
     port_is_free,
     probe_detail,
+    probe_failure_detail,
     proc_net_tcp_tables,
     process_name,
     readiness_verdict,
@@ -2186,6 +2188,103 @@ def test_the_probe_refuses_a_url_it_was_never_meant_to_open():
     for refused in ("file:///etc/passwd", "http://evil.example/", "ftp://127.0.0.1:4943/"):
         with pytest.raises(ValueError, match="loopback only"):
             swap_stack.wait_for_http(refused, 0.1, announce=False)
+
+
+#: requests/urllib3's message for a refused connection, as it reached the
+#: operator's screen on 2026-10-09 via /api/admin/chains. COPIED, NOT WRITTEN:
+#: the defect below was that a real message's cause sits past character 150, and
+#: a hand-shortened example would have been cut in a place I chose.
+_REAL_REFUSAL = (
+    "did not answer: HTTPConnectionPool(host='host.docker.internal', port=18443): "
+    "Max retries exceeded with url: /wallet/desk_hot (Caused by "
+    "NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f1a>: "
+    "Failed to establish a new connection: [Errno 111] Connection refused'))"
+)
+
+#: And a timeout, which is the OTHER cause and has a different remedy. Same head,
+#: different tail -- which is exactly why the head is not enough.
+_REAL_TIMEOUT = (
+    "did not answer: HTTPConnectionPool(host='host.docker.internal', port=19443): "
+    "Max retries exceeded with url: /wallet/desk_hot (Caused by "
+    "ConnectTimeoutError(<urllib3.connection.HTTPConnection object at 0x7f1b>, "
+    "'Connection to host.docker.internal timed out. (connect timeout=30)'))"
+)
+
+
+def test_the_cause_of_a_chain_failure_survives_into_the_report():
+    """It did not, and that cost a diagnosis on 2026-10-09.
+
+    The line was `str(detail)[:150]`, and on the operator's run it printed
+
+        BTC: did not answer: HTTPConnectionPool(host='host.docker.internal',
+             port=18443): Max retries exceeded with url: /wallet/desk_hot
+             (Caused by NewConnectionE
+
+    stopping mid-word. requests puts the host and port at the HEAD and the cause
+    at the TAIL, so keeping the first 150 characters preserved what the reader
+    already knew -- the row names the chain, the config names the port -- and
+    discarded `[Errno 111] Connection refused`, the only part that decides what
+    they change. Refused means bound loopback-only and wants rpcbind; timed out
+    means a firewall is dropping packets and wants a ufw rule. Two remedies, and
+    the report named neither.
+    """
+    for text, cause in ((_REAL_REFUSAL, "Connection refused"), (_REAL_TIMEOUT, "timed out")):
+        shown = probe_failure_detail(text)
+        assert cause in shown, (
+            f"the cause is what the operator acts on and it was cut off: {shown}"
+        )
+        assert "18443" in shown or "19443" in shown, f"and the port must survive too: {shown}"
+        assert len(shown) < len(text), "a message this long must be shortened, not printed whole"
+
+
+def test_a_shortened_message_says_that_it_was_shortened():
+    """An elision that does not announce itself reads as the whole message.
+
+    MUTATION: drop the `[+N chars]` marker and just join the two ends. The line
+    then reads as one continuous sentence that happens to be ungrammatical, which
+    is indistinguishable from a daemon returning nonsense.
+    """
+    shown = probe_failure_detail(_REAL_REFUSAL)
+    assert "chars]" in shown, f"no elision marker, so a severed message reads as a whole one: {shown}"
+    dropped = len(_REAL_REFUSAL) - 2 * stack_authority._DETAIL_END
+    assert f"+{dropped} chars" in shown, (
+        f"the marker must say HOW MUCH was dropped (rule 14), not merely that something was: {shown}"
+    )
+
+
+def test_a_short_failure_is_printed_whole_with_no_marker():
+    """GRC's 403 is 72 characters. The common case must be untouched."""
+    grc = "did not answer: 403 Client Error: Forbidden for url: http://host.docker.internal:25779/"
+    assert probe_failure_detail(grc) == grc, "a message short enough to read was cut anyway"
+    assert "chars]" not in probe_failure_detail(grc)
+
+
+def test_a_missing_reason_is_named_rather_than_blank():
+    """Rule 14: a blank is ambiguous between "no reason" and "the lookup broke"."""
+    for absent in (None, "", 0):
+        assert probe_failure_detail(absent) == "(no reason given)", absent
+
+
+def test_both_causes_reach_the_verdict_and_not_just_the_boilerplate():
+    """End to end, through the real verdict rather than the helper alone.
+
+    The helper being right is not the claim; the claim is that an operator
+    reading chain_reachability_verdict()'s output can tell the two remedies
+    apart. A mutation restoring `[:150]` at the call site passes every test
+    above and fails this one.
+    """
+    rows = [
+        {"asset": "BTC", "probed": True, "reachable": False, "detail": _REAL_REFUSAL},
+        {"asset": "LTC", "probed": True, "reachable": False, "detail": _REAL_TIMEOUT},
+        {"asset": "XRP", "probed": True, "reachable": True, "detail": "answered"},
+    ]
+    status, _headline, detail = chain_reachability_verdict(
+        chain_probe_envelope(rows, "2026-10-09T00:00:00+00:00", 3)
+    )
+    assert status == "unreachable", status
+    said = " ".join(detail)
+    assert "Connection refused" in said, f"BTC's cause did not reach the report: {said}"
+    assert "timed out" in said, f"LTC's cause did not reach the report: {said}"
 
 
 def test_only_a_reachable_verdict_exits_zero():

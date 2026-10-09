@@ -1640,13 +1640,19 @@ def cmd_chains(files: tuple[str, ...]) -> int:
     # SAY WHAT THE EXIT CODE MEANS NEXT TO IT (rule 14): the operator reads the
     # screen, and a script reads the code. Neither should have to open this file.
     code = chain_exit_code(status)
-    say(f"  exit {code}            {status} -- 0 only when every probeable chain answered; "
-        f"{'' if code else 'nothing further to do'}")
+    # ONE SENTENCE PER CASE, not one sentence with a hole in it. The conditional
+    # tail rendered empty on every non-zero exit, which left the line ending in a
+    # dangling "; " -- visible on the operator's own 2026-10-09 run. A report that
+    # trails off reads as output that was cut short, which is the same ambiguity
+    # rule 14 forbids for a blank region.
     if code:
+        say(f"  exit {code}            {status} -- 0 only when every probeable chain answered")
         say("                    a NON-ZERO here is not always a fault: `none_asked` means no")
         say("                    adapter has a read-only probe, and `unknown` means the endpoint")
         say("                    could not be read. Neither is an all-clear, which is why neither")
         say("                    is 0 -- the headline above says which one you have.")
+    else:
+        say(f"  exit {code}            {status} -- every probeable chain answered; nothing to do")
     return code
 
 

@@ -1275,6 +1275,54 @@ def chain_exit_code(status: str) -> int:
     return CHAIN_EXIT_CODES[status]
 
 
+#: How much of a chain probe's failure text survives into the report, per end.
+#:
+#: TWO ENDS, NOT THE FIRST N CHARACTERS, and that is the whole point of this
+#: constant existing. The line used to read `str(detail)[:150]`, which on the
+#: operator's own 2026-10-09 run printed
+#:
+#:     BTC: did not answer: HTTPConnectionPool(host='host.docker.internal',
+#:          port=18443): Max retries exceeded with url: /wallet/desk_hot (Caused
+#:          by NewConnectionE
+#:
+#: and stopped there. requests/urllib3 put the host and port at the HEAD of that
+#: message and the actual cause at the TAIL -- `[Errno 111] Connection refused`
+#: or `timed out`. Those two causes have DIFFERENT REMEDIES: refused means the
+#: daemon is bound loopback-only and needs rpcbind, timed out means a firewall is
+#: dropping the packets and needs a ufw rule. Keeping the first 150 characters
+#: preserved the half the reader already knew (which chain, which port -- the row
+#: says the chain and the config says the port) and discarded the only half that
+#: decides what they go and change.
+#:
+#: That is rule 14's "state what the number means, next to the number" failing by
+#: omission: the number was there and the word that interpreted it was cut off.
+_DETAIL_END = 76
+
+
+def probe_failure_detail(detail: object, end: int = _DETAIL_END) -> str:
+    """One chain's failure text, short enough to read and still carrying its cause.
+
+    Keeps `end` characters from each side and says how many were dropped between
+    them, because an elision that does not announce itself reads as the whole
+    message -- the reader cannot tell a complete sentence from a severed one, and
+    a severed one is exactly what cost the BTC/LTC diagnosis above.
+
+    A SHORT MESSAGE IS RETURNED WHOLE, with no marker. GRC's refusal is
+    `403 Client Error: Forbidden for url: http://host.docker.internal:25779/` at
+    72 characters, so the common case of a daemon refusing cleanly is untouched;
+    only requests' nested-exception prose is long enough to need cutting.
+
+    `(no reason given)` for an absent detail rather than an empty string, because
+    rule 14 is explicit that a blank is ambiguous between "no reason" and "the
+    reason lookup broke".
+    """
+    text = str(detail) if detail else "(no reason given)"
+    dropped = len(text) - 2 * end
+    if dropped <= len(" [+ chars] "):
+        return text
+    return f"{text[:end]} [+{dropped} chars] {text[-end:]}"
+
+
 def chain_reachability_verdict(body: object, trouble: str = "") -> tuple[str, str, list[str]]:
     """Can the container reach its chain daemons? Pure; takes /api/admin/chains' body.
 
@@ -1354,7 +1402,7 @@ def chain_reachability_verdict(body: object, trouble: str = "") -> tuple[str, st
         f"*** {len(refused)} CHAIN(S) THE CONTAINER CANNOT REACH: "
         f"{', '.join(row['asset'] for row in refused)} ***"
     ), [
-        *(f"  {row['asset']}: {str(row.get('detail') or '(no reason given)')[:150]}" for row in refused),
+        *(f"  {row['asset']}: {probe_failure_detail(row.get('detail'))}" for row in refused),
         "",
         *detail,
     ]
