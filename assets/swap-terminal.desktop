@@ -18,4 +18,17 @@ Icon=__SWAP_TERMINAL_ICON__
 Terminal=true
 Categories=Office;Finance;
 Keywords=swap;crypto;gridcoin;xrp;
-StartupNotify=true
+# StartupNotify=false, AND IT IS THE DIFFERENCE THAT MADE THE ICONS DEAD.
+#
+# Measured on the operator's own machine 2026-10-09. These were written with
+# StartupNotify=true and clicking them did nothing. Their
+# ~/Desktop/mammon-restart.desktop has worked since September and differs in
+# exactly two ways -- this line, and Exec invoking /bin/bash explicitly.
+#
+# With StartupNotify=true the desktop waits for the launched application to send
+# a startup-notification completion. A terminal emulator opening a shell script
+# never sends one, so the launch sits pending and then silently gives up: the
+# click registers and nothing appears. Terminal=true and StartupNotify=true are
+# close to mutually exclusive for this reason, and every launcher on that desktop
+# that actually works says false.
+StartupNotify=false

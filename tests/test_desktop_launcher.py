@@ -284,6 +284,149 @@ def test_the_browser_command_never_carries_no_sandbox(tmp_path):
 # =============================================================================
 
 
+def _directives(entry: str) -> dict[str, str]:
+    """A .desktop's key=value pairs, with comments and the group header dropped.
+
+    WRITTEN BECAUSE THREE ASSERTIONS HERE MATCHED PROSE INSTEAD. `"StartupNotify=true"
+    not in entry` was true of the template's own explanatory COMMENT, which quotes
+    the wrong value to explain why it is wrong -- so the assertion failed on a
+    correct file. The same shape as the menu-line test earlier today, and the
+    third instance in one session: an assertion true of something ADJACENT to
+    what it claims.
+
+    A .desktop is an ini file. Reading it as one costs four lines and makes
+    "StartupNotify is false" a different statement from "the string
+    StartupNotify=false appears somewhere in this file".
+    """
+    values = {}
+    for line in entry.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "[")):
+            continue
+        key, _, value = stripped.partition("=")
+        values[key.strip()] = value.strip()
+    return values
+
+
+def test_no_launcher_asks_for_a_startup_notification_it_cannot_send():
+    """THE DEFECT THAT MADE THE ICONS DEAD, measured on the operator's own desktop.
+
+    They were written with StartupNotify=true and clicking them did nothing. The
+    one launcher on that desktop which has worked since September --
+    ~/Desktop/mammon-restart.desktop -- differs in exactly two ways, and this is
+    the first: it says false.
+
+    With StartupNotify=true the desktop waits for the launched application to
+    send a startup-notification completion. A terminal emulator opening a shell
+    script never sends one, so the launch sits pending and then silently gives
+    up: the click registers and nothing appears. Terminal=true and
+    StartupNotify=true are close to mutually exclusive for that reason.
+
+    MUTATION: set either template back to true. The icons go dead again and
+    nothing else in the suite notices, which is why this is asserted on every
+    launcher rather than reviewed.
+    """
+    entries = [
+        install_desktop_icon.rendered_desktop_entry("/p", Path("/l.py"), Path("/i.svg")),
+        *(
+            install_desktop_icon.rendered_action_entry(a, n, c, Path("/b/swapterm"), Path("/i.svg"))
+            for a, n, c in install_desktop_icon.ACTION_ENTRIES
+        ),
+    ]
+    for entry in entries:
+        values = _directives(entry)
+        name = values.get("Name", "(no Name)")
+        assert values.get("StartupNotify") == "false", (
+            f"{name} has StartupNotify={values.get('StartupNotify')!r}; a Terminal=true launcher "
+            f"running a shell script never sends the completion, and the click silently does "
+            f"nothing"
+        )
+        # And both halves of the measured pattern, not just the one that was
+        # easier to spot: Terminal=true is what makes the output visible at all.
+        assert values.get("Terminal") == "true", (
+            f"{name} would run with no terminal, so its output is lost"
+        )
+
+
+def test_the_action_launchers_run_the_wrapper_through_bash_by_absolute_path():
+    """The second difference from the launcher that works on that desktop.
+
+    `Exec=/bin/bash /path/swapterm up` rather than `Exec=/path/swapterm up`
+    removes three dependencies that are true today and guaranteed by nothing: the
+    wrapper's execute bit surviving a copy, its shebang resolving under the
+    desktop's PATH, and the DE choosing to exec the file rather than hand it to
+    something else. A .desktop Exec= is not a shell and resolves no PATH of ours,
+    so the interpreter is named absolutely.
+    """
+    for action, name, comment in install_desktop_icon.ACTION_ENTRIES:
+        entry = install_desktop_icon.rendered_action_entry(
+            action, name, comment, Path("/home/op/.local/bin/swapterm"), Path("/i.svg")
+        )
+        assert _directives(entry)["Exec"] == (
+            f"{install_desktop_icon.BASH} /home/op/.local/bin/swapterm {action}"
+        ), f"{action}: {_directives(entry)['Exec']}"
+        assert install_desktop_icon.BASH.startswith("/"), (
+            "the interpreter must be an absolute path; a .desktop Exec resolves no PATH"
+        )
+
+
+def test_the_trust_step_is_only_printed_on_a_desktop_that_needs_it():
+    """Advice for a desktop you are not running is noise, and noise gets skipped.
+
+    The installer printed four GNOME `gio set metadata::trusted` commands at an
+    operator running LXQt, where pcmanfm-qt reads the execute bit and no such
+    metadata exists. Rule 14's argument is exactly this: a block that does not
+    apply trains the reader to skip the block that does.
+
+    THREE CASES, and the third is the one that was missing. Saying NOTHING on an
+    unknown desktop would be worse than the noise -- an operator on GNOME whose
+    icons do nothing and who was told nothing has no way to find the reason -- so
+    the unknown case names the symptom without asserting it applies.
+    """
+    desktop = Path("/home/op/Desktop")
+
+    def prose(lines: list[str]) -> str:
+        """The lines as one string with whitespace collapsed.
+
+        BECAUSE THESE SENTENCES ARE HAND-WRAPPED and a phrase can straddle the
+        break: "...this is was not" / "established. IF these icons..." joined
+        with a space is "was not   established", so a plain substring match for
+        "not established" fails on text that says exactly that. Collapsing
+        whitespace makes the assertion about the SENTENCE rather than about where
+        the author happened to break the line.
+        """
+        return " ".join(" ".join(lines).split())
+
+    def runnable_gio(lines: list[str]) -> list[str]:
+        """The gio commands, as opposed to prose that mentions gio.
+
+        The LXQt case SAYS "the GNOME `gio set metadata::trusted` dance does not
+        apply here" -- so a substring match on "gio set" is true of the message
+        that exists to say the step is unnecessary. A command the operator is
+        meant to run is an indented line that STARTS with it.
+        """
+        return [line.strip() for line in lines if line.strip().startswith("gio set")]
+
+    lxqt = install_desktop_icon.trust_note("LXQt", desktop, ("up",))
+    assert runnable_gio(lxqt) == [], f"GNOME commands printed on LXQt: {runnable_gio(lxqt)}"
+    assert "NO trust step" in prose(lxqt), lxqt
+
+    # Colon-separated and multi-valued, which is how Ubuntu reports it.
+    gnome = install_desktop_icon.trust_note("ubuntu:GNOME", desktop, ("up",))
+    assert len(runnable_gio(gnome)) == 1, f"the trust step was NOT printed on GNOME: {gnome}"
+    said = prose(gnome)
+    assert "Allow Launching" in said, said
+    assert "not over ssh" in said, f"gio needs the session bus and this does not say so: {said}"
+
+    unknown = install_desktop_icon.trust_note("", desktop, ("up",))
+    assert len(runnable_gio(unknown)) == 1, (
+        "an unknown desktop is given no command, so a GNOME user whose icons are dead is stuck"
+    )
+    assert "was not established" in prose(unknown), (
+        f"the unknown case must not assert that the step applies (rule 17): {unknown}"
+    )
+
+
 def test_every_action_is_an_icon_or_explicitly_not_one():
     """THE DEFECT THIS PINS WAS SHIPPED AND THE OPERATOR READ IT.
 
@@ -423,7 +566,10 @@ def test_the_action_icons_go_through_the_installed_command_not_their_own_python(
             action, name, comment, Path("/home/op/.local/bin/swapterm"), Path("/i.svg")
         )
         assert "__SWAPTERM" not in text, f"{action}: an unreplaced token remains"
-        assert f"Exec=/home/op/.local/bin/swapterm {action}" in text, text
+        # THROUGH BASH NOW -- see test_the_action_launchers_run_the_wrapper_through_
+        # bash_by_absolute_path. The claim here is unchanged: the icon goes to the
+        # installed wrapper and not to its own python.
+        assert _directives(text)["Exec"].endswith(f"/home/op/.local/bin/swapterm {action}"), text
         assert "swap_stack.py" not in text, (
             f"{action}'s Exec names swap_stack.py directly, which is a second way to start "
             f"the stack and will drift from the wrapper"

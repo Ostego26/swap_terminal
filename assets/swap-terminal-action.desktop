@@ -12,6 +12,12 @@ Comment=__SWAPTERM_COMMENT__
 # and the two sentences above it, so three near-identical .desktop files would be
 # rule 8's copies-that-drift -- the kind where somebody fixes the Icon= line in one
 # of them. The installer's ACTION_ENTRIES table is the only place the three differ.
+# Exec RUNS THE WRAPPER THROUGH /bin/bash EXPLICITLY, matching the one launcher
+# measured to work on the operator's LXQt desktop
+# (~/Desktop/mammon-restart.desktop, September). It does not depend on the
+# wrapper's execute bit surviving a copy, on its shebang resolving under the
+# desktop's PATH, or on the DE choosing to exec rather than interpret it -- three
+# things that are true today and are not guaranteed by anything.
 Exec=__SWAPTERM_EXEC__
 Icon=__SWAPTERM_ICON__
 # Terminal=true DELIBERATELY, and more so here than for the GUI launcher. `up` prints
@@ -23,4 +29,17 @@ Icon=__SWAPTERM_ICON__
 Terminal=true
 Categories=Office;Finance;
 Keywords=swap;crypto;gridcoin;xrp;__SWAPTERM_ACTION__;
-StartupNotify=true
+# StartupNotify=false, AND IT IS THE DIFFERENCE THAT MADE THE ICONS DEAD.
+#
+# Measured on the operator's own machine 2026-10-09. These were written with
+# StartupNotify=true and clicking them did nothing. Their
+# ~/Desktop/mammon-restart.desktop has worked since September and differs in
+# exactly two ways -- this line, and Exec invoking /bin/bash explicitly.
+#
+# With StartupNotify=true the desktop waits for the launched application to send
+# a startup-notification completion. A terminal emulator opening a shell script
+# never sends one, so the launch sits pending and then silently gives up: the
+# click registers and nothing appears. Terminal=true and StartupNotify=true are
+# close to mutually exclusive for this reason, and every launcher on that desktop
+# that actually works says false.
+StartupNotify=false

@@ -77,6 +77,10 @@ COMMAND_TARGET = BIN_DIR / "swapterm"
 #: opens a terminal, prints a report and exits gives the operator no time to read
 #: it: the window closes with the process. They belong at a shell prompt, which is
 #: what `swapterm` is for.
+#: The interpreter the action launchers run the wrapper through. An absolute
+#: path, because a .desktop Exec= is not a shell and resolves no PATH of ours.
+BASH = "/bin/bash"
+
 NO_ICON: tuple[str, ...] = ("status", "chains")
 
 ACTION_ENTRIES: tuple[tuple[str, str, str], ...] = (
@@ -142,7 +146,12 @@ def rendered_action_entry(action: str, name: str, comment: str, command: Path, i
         ACTION_TEMPLATE.read_text()
         .replace("__SWAPTERM_NAME__", name)
         .replace("__SWAPTERM_COMMENT__", comment)
-        .replace("__SWAPTERM_EXEC__", f"{command} {action}")
+        # /bin/bash EXPLICITLY -- see the template's comment above its Exec line.
+        # The wrapper is a bash script; running it through the interpreter by name
+        # removes three unstated dependencies (its execute bit, its shebang, and
+        # the DE's choice to exec it) and matches the one launcher measured to
+        # work on the operator's desktop.
+        .replace("__SWAPTERM_EXEC__", f"{BASH} {command} {action}")
         .replace("__SWAPTERM_ICON__", str(icon))
         .replace("__SWAPTERM_ACTION__", action)
     )
@@ -303,17 +312,58 @@ def write_desktop_shortcuts(actions: dict[str, str]) -> list[str]:
         target.write_text(text)
         target.chmod(0o755)
         lines.append(f"  wrote {target}")
-    lines += [
-        "",
-        "  GNOME ONLY: a .desktop on the desktop does nothing until it is trusted.",
-        '  Either right-click it and choose "Allow Launching", or run this INSIDE your',
-        "  desktop session (not over ssh):",
-    ]
-    lines += [
+    lines += trust_note(os.environ.get("XDG_CURRENT_DESKTOP", ""), desktop, tuple(actions))
+    return lines
+
+
+#: Desktop environments that refuse to launch an untrusted .desktop on the desktop.
+#:
+#: GNOME AND ITS SHELLS ONLY. Measured 2026-10-09: the operator runs LXQt, where
+#: pcmanfm-qt reads the execute bit and no `metadata::trusted` at all -- and this
+#: installer printed four `gio set` commands at them anyway. Advice for a desktop
+#: you are not running is noise, and rule 14's whole argument is that noise in a
+#: report trains the reader to skip the block that matters. XDG_CURRENT_DESKTOP is
+#: colon-separated and can hold several names ("ubuntu:GNOME"), so this matches
+#: any component.
+TRUST_REQUIRING_DESKTOPS = ("GNOME", "UNITY", "CINNAMON")
+
+
+def trust_note(desktop_env: str, desktop: Path, actions: tuple[str, ...]) -> list[str]:
+    """What to say about the trust step, for THIS desktop environment. Pure.
+
+    Three cases, and the third is the one that was missing: a desktop that needs
+    the step, a desktop that does not, and not knowing. Saying nothing at all
+    would be worse than the noise -- an operator on GNOME whose icons do nothing
+    and who was told nothing has no way to find the reason -- so the unknown case
+    names the symptom and the remedy without asserting that it applies.
+    """
+    names = {part.strip().upper() for part in desktop_env.split(":") if part.strip()}
+    gio_lines = [
         f'      gio set "{desktop / f"swap-terminal-{action}.desktop"}" metadata::trusted true'
         for action in actions
     ]
-    return lines
+    if not names:
+        return [
+            "",
+            "  XDG_CURRENT_DESKTOP is unset, so which desktop environment this is was not",
+            "  established. IF these icons do nothing when clicked, GNOME-derived desktops",
+            "  require marking them trusted first; others read the execute bit, which is set:",
+            *gio_lines,
+        ]
+    if names & set(TRUST_REQUIRING_DESKTOPS):
+        return [
+            "",
+            f"  {'/'.join(sorted(names))}: a .desktop on the desktop does nothing until it is",
+            '  trusted. Either right-click it and choose "Allow Launching", or run this INSIDE',
+            "  your desktop session (not over ssh -- gio needs the session bus):",
+            *gio_lines,
+        ]
+    return [
+        "",
+        f"  {'/'.join(sorted(names))} reads the execute bit, which is set on all of these, so",
+        "  there is NO trust step to run -- the GNOME `gio set metadata::trusted` dance does",
+        "  not apply here and is not printed.",
+    ]
 
 
 def _icon_words() -> list[str]:
