@@ -285,7 +285,7 @@ def _claimed_hrp(raw: str) -> str | None:
     return None
 
 
-def address_network(address: str) -> tuple[str, str]:
+def address_network(address: object) -> tuple[str, str]:
     """(network, why) for a base58check address, from its version byte.
 
     Returns UNKNOWN with an explanation rather than raising, and rather than defaulting to
@@ -297,6 +297,10 @@ def address_network(address: str) -> tuple[str, str]:
     `why` is written to be printed. The operator reads the screen, not this source (rule 14),
     and "0x3e is GRC mainnet" is the sentence that settles an argument about an address.
     """
+    # `address: object` AND NOT `address: str`: this function's first act is to refuse a wrong
+    # type by name, so the narrow annotation was a claim the guard below contradicts.
+    # The reasoning, and what the trade costs, is written once at
+    # chains/xrp_rpc_map.call_for() -- which carries the precedent in its own signature.
     if not isinstance(address, str) or not address.strip():
         return UNKNOWN, f"not a non-empty string: {address!r}"
     raw = address.strip()
@@ -602,7 +606,7 @@ def _bech32_network(raw: str) -> tuple[str, str] | None:
     return BECH32_HRPS[hrp], f"{decoded.encoding} hrp {hrp!r} is {BECH32_HRPS[hrp]} ({decoded.why})"
 
 
-def is_testnet_address(address: str) -> bool:
+def is_testnet_address(address: object) -> bool:
     """True only when the version byte SAYS testnet. UNKNOWN is not testnet.
 
     The boolean every one of the six replaced checks wanted. It is False for an undecodable
@@ -610,6 +614,10 @@ def is_testnet_address(address: str) -> bool:
     which is the general form of the thing that broke here (rule 2's "I could not find a
     caller is not there is no caller").
     """
+    # `address: object` AND NOT `address: str`: this function's first act is to refuse a wrong
+    # type by name, so the narrow annotation was a claim the guard below contradicts.
+    # The reasoning, and what the trade costs, is written once at
+    # chains/xrp_rpc_map.call_for() -- which carries the precedent in its own signature.
     return address_network(address)[0] == TESTNET
 
 

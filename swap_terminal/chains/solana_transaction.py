@@ -508,7 +508,7 @@ def _interpret_transfer(keys: list[str], program_index: int, account_indexes: li
     return int.from_bytes(data[4:TRANSFER_DATA_BYTES], "little")
 
 
-def parse_transfer_transaction(wire: bytes) -> dict:
+def parse_transfer_transaction(wire: bytes | bytearray) -> dict:
     """Read a signed native transfer back out of its own bytes.
 
     THIS IS A CHECK ON OUR OWN ARTIFACT, NOT A GENERAL DECODER, and it is

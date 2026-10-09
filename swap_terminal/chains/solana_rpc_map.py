@@ -385,7 +385,7 @@ class MissingArgument(ValueError):
 
 
 def call_for(bitcoin_method: str, argument: object = None,
-                    address: str = "") -> tuple[str, list]:
+                    address: object = "") -> tuple[str, list]:
     """(method, POSITIONAL params) for one translated call. Sends nothing.
 
     A LIST, not a dict, because Solana's params are positional with the options object LAST --
@@ -401,6 +401,10 @@ def call_for(bitcoin_method: str, argument: object = None,
     or from configuration; this module reads no environment and no config, so it cannot quietly
     answer about the hot wallet when the operator meant a customer's account.
     """
+    # `address: object` AND NOT `address: str`: this function's first act is to refuse a wrong
+    # type by name, so the narrow annotation was a claim the guard below contradicts.
+    # The reasoning, and what the trade costs, is written once at
+    # chains/xrp_rpc_map.call_for() -- which carries the precedent in its own signature.
     entry = equivalent_of(bitcoin_method)
     if entry is None:
         raise ValueError(refuse_without_equivalent(bitcoin_method))

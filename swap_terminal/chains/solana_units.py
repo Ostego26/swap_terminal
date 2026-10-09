@@ -388,7 +388,7 @@ def describe_commitment(rank: int, minimum: int, slot_depth: int | None = None) 
     )
 
 
-def validate_min_commitment_rank(minimum: int) -> int:
+def validate_min_commitment_rank(minimum: object) -> int:
     """Return `minimum` if it is a rung on the ladder; raise otherwise.
 
     WHY THIS REFUSES INSTEAD OF CLAMPING. An operator who sets
@@ -403,6 +403,10 @@ def validate_min_commitment_rank(minimum: int) -> int:
     level earlier: this configuration can only do nothing, so it is refused at
     the moment it is read rather than obeyed silently forever.
     """
+    # `minimum: object` AND NOT `minimum: int`: this function's first act is to refuse a wrong
+    # type by name, so the narrow annotation was a claim the guard below contradicts.
+    # The reasoning, and what the trade costs, is written once at
+    # chains/xrp_rpc_map.call_for() -- which carries the precedent in its own signature.
     ladder = ", ".join(f"{value}={name}" for name, value in COMMITMENT_RANKS.items())
     if not isinstance(minimum, int) or isinstance(minimum, bool):
         raise ValueError(f"SOL_MIN_CONFIRMATIONS must be an integer rung on the commitment ladder ({ladder}), got {minimum!r}")

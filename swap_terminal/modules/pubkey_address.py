@@ -84,7 +84,7 @@ class PublicKeyRefused(ValueError):
     """
 
 
-def address_from_public_key(public_key: bytes, asset: str, network: str) -> str:
+def address_from_public_key(public_key: object, asset: str, network: str) -> str:
     """The P2PKH address `public_key` controls on `asset`/`network`.
 
     UNCOMPRESSED KEYS ARE REFUSED RATHER THAN ACCEPTED, and the refusal is the
@@ -94,6 +94,10 @@ def address_from_public_key(public_key: bytes, asset: str, network: str) -> str:
     question the caller did not ask. ICP's ecdsa_public_key returns the compressed
     form, and so does every `validateaddress` reply this tree has read.
     """
+    # `public_key: object` AND NOT `public_key: bytes`: this function's first act is to refuse a wrong
+    # type by name, so the narrow annotation was a claim the guard below contradicts.
+    # The reasoning, and what the trade costs, is written once at
+    # chains/xrp_rpc_map.call_for() -- which carries the precedent in its own signature.
     if not isinstance(public_key, (bytes, bytearray)):
         raise PublicKeyRefused(
             f"public_key must be bytes, got {type(public_key).__name__}. Nothing was derived."

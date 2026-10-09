@@ -419,7 +419,7 @@ class SignedSpend:
         )
 
 
-def build_hashlock_spend(*, secret: bytes, **kwargs) -> SignedSpend:
+def build_hashlock_spend(*, secret: bytes | None, **kwargs) -> SignedSpend:
     """Build, size the fee for, and SIGN a spend of the contract's HASHLOCK branch.
 
     A thin wrapper over build_branch_spend() that exists so the call sites which

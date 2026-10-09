@@ -326,7 +326,7 @@ class MissingArgument(ValueError):
     """
 
 
-def call_for(bitcoin_method: str, argument: object = None, account: str = "") -> tuple[str, dict]:
+def call_for(bitcoin_method: str, argument: object = None, account: object = "") -> tuple[str, dict]:
     """(rippled method, params) for one translated call. Sends nothing.
 
     RAISES RATHER THAN GUESSING, and that is the whole reason this is a function.
@@ -341,6 +341,40 @@ def call_for(bitcoin_method: str, argument: object = None, account: str = "") ->
     config, so it cannot silently answer about the hot wallet when the operator meant
     a customer's account.
     """
+    # `account: object`, NOT `account: str`, AND THE PRECEDENT IS IN THIS SIGNATURE.
+    #
+    # Look at the three parameters. `argument` has been `object` since this function
+    # was written, for exactly the reason below. `account` was `str` and is validated
+    # by the identical `isinstance(...) or not ....strip()` line four rows down. One
+    # function, two parameters, one rule, two spellings of it -- rule 8's shape at its
+    # smallest, and the kind nothing ever fails on.
+    #
+    # THE RULE, WRITTEN ONCE HERE AND POINTED AT FROM THE OTHER SIX SITES: when a
+    # function's own first act is to REFUSE a wrong type BY NAME, a narrow annotation
+    # is a claim the body contradicts one line later. It makes the guard read as dead
+    # code to anyone -- human or checker -- who trusts the signature, and it makes the
+    # test that pins the refusal impossible to write without a suppression. The honest
+    # type of a validating boundary is `object`, because `object` is what it genuinely
+    # accepts: it takes anything and answers with a named refusal, which is HANDLING
+    # the input rather than failing on it.
+    #
+    # WHAT THIS COSTS, because it is not free and pretending otherwise is the wrong
+    # comment: an honest caller passing the wrong type is no longer caught at
+    # type-check time. That trade is right HERE and at the five sites below because
+    # every one of them reads a value from OUTSIDE the program -- an operator's
+    # environment variable, a customer-typed address, a CLI argument -- where the
+    # runtime refusal is the real guard and the annotation was never going to be.
+    #
+    # IT IS NOT RIGHT EVERYWHERE, and chains/solana_transaction.parse_transfer_transaction()
+    # is the counter-example this pass deliberately left alone: its input is an artifact
+    # this program just produced, handed to it by chains/solana_signing.py, so widening
+    # it to `object` would remove real checking on a signing path to satisfy one test.
+    # That one went `bytes` -> `bytes | bytearray` instead, which is simply the truth
+    # (the body accepts both), and the test finding is named rather than silenced.
+    #
+    # The six sites, 2026-10-09: this one; modules/address_network.address_network and
+    # .is_testnet_address; modules/pubkey_address.address_from_public_key;
+    # chains/solana_units.validate_min_commitment_rank; chains/solana_rpc_map.call_for.
     entry = equivalent_of(bitcoin_method)
     if entry is None:
         raise ValueError(refuse_without_equivalent(bitcoin_method))
