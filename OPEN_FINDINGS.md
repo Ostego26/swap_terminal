@@ -91,7 +91,7 @@ written would be a proposal. Less urgent since the firewall fix — this only ha
 when a daemon *drops* rather than refuses — but a daemon can wedge while
 listening.
 
-### 8. pyright reports 488 findings across 94 files — 87 was a subset
+### 8. pyright: 488 → 6, and the six are decisions — DONE
 Surfaced by `f01e85c`, which removed 53 FALSE import errors that were burying
 them. The first inventory here counted `*.py` AT THE ROOT ONLY and said 87
 across 18 files. **That denominator was wrong, and it was wrong in the direction
@@ -155,14 +155,31 @@ Commits `8287f1c`, `7ced839`, `35a1e77`, `8425058`, `97a1321`, `8f78ad7`,
 `e7195cf`, `7e41762`, plus `e12d539`, `da4a3fa`, `f903e0b`, `533b6ba`.
 Full suite after: **4109 passed, 3 skipped, 0 failed.**
 
-Almost every remainder is ONE shape: a production function declares a concrete
+**Round two landed the Protocols: 85 → 6** (`fa8f564`, `f5eb911`). Almost every
+round-one remainder was ONE shape — a production function declaring a concrete
 class for a parameter whose body uses two or three of its members, so a
 deliberately-partial test stub is refused. Five agents converged on `Protocol`
-independently; several built one, pyright-proved it against a probe with the real
-signatures, and stopped because the file belonged to another bucket. Those are
-being landed now as a second round — merged first, because three of them were the
-same Protocol under three different names, and shipping all three would be rule 8
-created on purpose.
+independently, and three of them had designed the SAME protocol under three
+different names; merging that before handing it out is why only one shipped.
+
+Four of the five round-two agents were killed mid-run by a weekly rate limit,
+after editing and before self-verifying. Their tree passed 4110 tests and ruff and
+measured 7; the verification they never did, and the last finding, are in
+`f5eb911`.
+
+**The six that remain are each a decision, not a backlog:**
+
+| where | why it stays |
+|---|---|
+| `identity.py:442,471`, `htlc_spend.py:344`, `keys.py:286` | the `ecdsa` stub — **yours**, see #15 |
+| `transactions.py:360` | pandas attaches `DatetimeIndex.normalize` from a decorator. Typing the parameter `Any` makes it VANISH; that clean zero was given back, because both callers pass an `Index`. A true type with one honest finding beats a false type with none |
+| `test_solana_transaction.py:411` | `parse_transfer_transaction`'s input is an artifact this program just produced. Widening to `object` would remove real checking on a **signing path** to satisfy one test asserting a refusal |
+
+Measured along the way and worth keeping: **pyright does not error on a TypedDict
+subscripted with a `str` variable — it silently yields `Unknown`**, so five
+findings would have gone to zero with nothing checked. And **pyright does not
+credit `__getattr__` toward structural matching**, which is why
+`SaysEachLineOnce`'s three forwarders are now spelled out.
 
 The subset where a `None` actually reaches a use — the class that raises at
 runtime — is still the part worth reading first:
