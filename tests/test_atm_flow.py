@@ -38,7 +38,14 @@ from chains.amount_solve import (
     quantize_down,
 )
 from chains.icp_account import account_identifier, subaccount_from_index
+from config import Config
 from db import SCHEMA, dict_factory
+from modules.htlc_assets import (
+    WORD_BROKERED,
+    WORD_COVERED,
+    WORD_PROVEN,
+    settlement_verdict,
+)
 from test_web_surfaces import DEPOSIT_ACCOUNTS, StubAdapter
 from valid_addresses import GRC_PAYOUT, base58_testnet
 
@@ -288,9 +295,60 @@ def test_a_valid_address_reaches_the_review_which_names_the_counterparty(client)
     body = page.get_data(as_text=True)
     assert asking(page) == "Is this right?"
     assert "Who you are trading with" in body
-    assert "CUSTODIALLY" in body, "the settlement verdict's own word must reach the screen"
-    assert "holds your funds" in body
+    # THE MODULE'S OWN SENTENCE, CHARACTER FOR CHARACTER, rather than a word out of
+    # it. This used to assert `"CUSTODIALLY" in body` and `"holds your funds" in
+    # body` -- two words out of two DIFFERENT sentences, one from the operator pill
+    # and one hand-written in the template beneath it, and the pairing is what made
+    # the defect invisible: the pill rendered "RUN GREEN -- atomic_swap.py (P2SH
+    # HTLC on both legs); this terminal settles it CUSTODIALLY, with no hashlock"
+    # to a customer and the assertion was satisfied by its last clause.
+    #
+    # Comparing against settlement_verdict()'s own output makes the template unable
+    # to compose a sentence of its own without failing here, which is the property
+    # the change is for (rule 8: five hand-written copies of this fact existed).
+    assert settlement_verdict("ICP", "GRC")["customer"] in body, (
+        "the review composed its own custody sentence instead of rendering the one the module derives"
+    )
+    assert "holding your funds" in body, "the screen must still say who holds the money"
     assert 'name="confirmed" value="1"' in body, "the commit button is on the review and nowhere else"
+
+
+def test_the_review_shows_a_customer_none_of_the_settlement_machinery(client):
+    """The operator pill must not be what a customer reads before pressing commit.
+
+    MEASURED, NOT ASSERTED FROM TASTE. templates/_atm_confirm.html rendered
+    `settlement.headline` -- which modules/htlc_assets.settlement_verdict() builds
+    for "a column, a pill or a matrix cell" -- and across Config.ALLOWED_PAIRS that
+    put one of three posture words, a driver FILENAME, a script type and, for the
+    pairs with no driver, a git sha in front of someone about to send money:
+
+        RUN GREEN -- atomic_swap.py (P2SH HTLC on both legs); this terminal
+            settles it CUSTODIALLY, with no hashlock
+        BROKERED ONLY -- SOL has no HTLC (c4ea027); ICP has no HTLC driver here;
+            this terminal settles it CUSTODIALLY, with no hashlock
+
+    Counted the same day: 30 of 30 pairs settle custodially, under 18 BROKERED
+    ONLY, 9 COVERED NOT RUN and 3 RUN GREEN. The custody did not vary; the part
+    being shown did.
+
+    THE BANNED WORDS ARE DERIVED FROM THE MODULE, not typed here, so a fourth
+    posture word or a third driver cannot arrive and go unchecked -- the same
+    reasoning tests/test_customer_page_layout.py gives for asserting over the
+    configuration's own variable names.
+    """
+    body = post(
+        client, from_asset="ICP", to_asset="GRC", amount="0.001", amount_side="send",
+        payout_address=GRC_PAYOUT,
+    ).get_data(as_text=True)
+
+    posture_words = {WORD_BROKERED, WORD_COVERED, WORD_PROVEN}
+    drivers = {verdict["driver"] for verdict in
+               (settlement_verdict(a, b) for a, b in Config.ALLOWED_PAIRS) if verdict["driver"]}
+    assert posture_words and drivers, "this assertion would be vacuous with nothing to ban"
+
+    for word in posture_words | drivers | {"P2SH", "HTLC", "hashlock"}:
+        assert word not in body, f"the review screen shows a customer {word!r}"
+    assert not re.search(r"\((?:[0-9a-f]{7,40})\)", body), "a git sha reached the review screen"
 
 
 def test_going_back_from_the_review_returns_to_the_address_question(client):

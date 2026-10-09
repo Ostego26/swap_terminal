@@ -47,6 +47,12 @@ from db import SCHEMA, dict_factory
 # docstring says it exists so the next gate pair_view grows is added in one
 # place. A second copy here would agree on the day it was written and drift the
 # first time that gate changes, which is the failure mode that rule is about.
+from modules.htlc_assets import (
+    WORD_BROKERED,
+    WORD_COVERED,
+    WORD_PROVEN,
+    settlement_verdict,
+)
 from services.admin_view import PAGE_SECTIONS, chain_rows, pair_assets, pair_matrix, pair_rows
 from services.pair_view import CUSTOMER_STATES, allowed_pair_rows
 from services.swap_view import ATTRIBUTION_MODELS
@@ -1581,6 +1587,98 @@ def test_no_operator_facing_remedy_text_reaches_the_customer_page(client, monkey
         assert phrase not in body, f"the customer page names {phrase!r}, which its reader cannot act on"
     for asset in client.application.config["RPC"]:
         assert f"{asset}_RPC" not in body, f"{asset}'s RPC settings are named to a customer"
+
+
+def test_no_operator_vocabulary_reaches_any_screen_of_the_flow(client, monkeypatch):
+    """THE GUARD ABOVE, ASKED OF ALL FIVE SCREENS INSTEAD OF ONLY THE FIRST.
+
+    WHY THIS EXISTS AS A SECOND TEST RATHER THAN A WIDER FIRST ONE. The test above
+    GETs `/` and that is the only screen a GET can reach -- screens 2 through 5 are
+    POST-only, because each one carries the answers so far. So it was structurally
+    unable to see four fifths of the flow, and it passed for two days while two
+    separate leaks shipped behind it:
+
+        screen 2  SOL has no adapter in this process: SOL_RPC_URL is unset (or 0)
+                  in the environment this process was started with. Nothing in the
+                  serving path reads a .env, so it has to be exported in the shell
+                  that starts the server...
+
+        screen 5  RUN GREEN -- atomic_swap.py (P2SH HTLC on both legs); this
+                  terminal settles it CUSTODIALLY, with no hashlock
+
+    Measured 2026-10-09 by walking the real handler: three of the five screens
+    carried something a customer cannot act on, under two different fixtures. The
+    first leak is a DISCLOSURE as well as a readability problem -- it tells an
+    unauthenticated reader on the public port which RPC settings are unset on this
+    host -- which is the same objection the test above was written for.
+
+    THE BANNED SET IS DERIVED, NOT TYPED, for the reason that one gives: a chain
+    added later must not be able to leak a variable name this test never heard of,
+    and a fourth settlement posture word must not arrive unchecked. The RPC names
+    come from the app's own config, the posture words and driver filenames from
+    modules/htlc_assets, and the git sha is a shape rather than a list.
+
+    TWO FIXTURES, BECAUSE THE TWO LEAKS NEED DIFFERENT WORLDS. Everything up is the
+    state a customer usually meets; two chains up and four down is what makes
+    screen 2 render refused options at all, which is where the remedy text lived.
+    One fixture would have found one of the two.
+    """
+    config = client.application.config
+    posture = {WORD_BROKERED, WORD_COVERED, WORD_PROVEN}
+    drivers = {
+        verdict["driver"]
+        for verdict in (settlement_verdict(a, b) for a, b in config["ALLOWED_PAIRS"])
+        if verdict["driver"]
+    }
+    settings = {f"{asset}_RPC" for asset in config["RPC"]}
+    banned = posture | drivers | settings | {
+        "_RPC_PORT", "_RPC_USER", "_RPC_PASS", "_RPC_URL", "_DEPOSIT_ACCOUNT",
+        ".env", "export ", "adapter", "P2SH", "HTLC", "hashlock",
+        "swap_terminal/", "services/", "routes/", "workers/",
+    }
+    assert posture and drivers and settings, "the banned set is empty; this test would be vacuous"
+    sha = re.compile(r"\((?:[0-9a-f]{7,40})\)")
+
+    def visible(markup: str) -> str:
+        """Rendered text only: a word inside a Jinja comment or a <script> is not on screen."""
+        without = re.sub(r"<(script|style).*?</\1>", " ", markup, flags=re.DOTALL)
+        without = re.sub(r"<!--.*?-->", " ", without, flags=re.DOTALL)
+        return html.unescape(re.sub(r"\s+", " ", re.sub("<[^>]+>", " ", without)))
+
+    # THE WALK ASSERTS WHERE IT IS, AND THAT IS THE POSITIVE CONTROL FOR THE WHOLE
+    # TEST. A POST the flow REFUSES redraws the SAME screen with a refusal, 200 and
+    # all, so a walk that only checked for banned words would quietly inspect screen
+    # 3 three times and report five clean screens. That is not hypothetical: the
+    # screenshot script written against this flow on 2026-10-09 omitted
+    # `amount_side`, rendered "How much?" for screen 4, and would have been filed as
+    # "screen 4 renders" had it not printed the heading beside the result. A second
+    # run hit the capacity ceiling and did it again for a different reason.
+    question = re.compile(r'<h1 id="atm-question" class="atm-question">(.*?)</h1>', re.DOTALL)
+
+    for label, up in (("every chain up", ("BTC", "GRC", "LTC", "SOL", "XRP")), ("only BTC and GRC up", ("BTC", "GRC"))):
+        fully_reachable(client, monkeypatch, *up)
+        answers: dict[str, str] = {}
+        for expected, fields in (
+            ("What are you sending?", {}),
+            ("What do you want back?", {"from_asset": "BTC"}),
+            ("How much?", {"to_asset": "GRC"}),
+            ("Where should it go?", {"amount": "0.0002", "amount_side": "send"}),
+            ("Is this right?", {"payout_address": GRC_PAYOUT}),
+        ):
+            answers.update(fields)
+            body = (client.get("/") if not answers else client.post("/", data=dict(answers))).get_data(as_text=True)
+            asked = question.search(body)
+            assert asked and asked.group(1).strip() == expected, (
+                f"[{label}] the walk expected {expected!r} and the page is asking "
+                f"{(asked.group(1).strip() if asked else '(no question heading)')!r} -- "
+                f"a step was refused, so every screen after it was never inspected"
+            )
+            text = visible(body)
+            for word in sorted(banned):
+                assert word not in text, (
+                    f"[{label}] the {expected!r} screen shows a customer {word!r}, which they cannot act on"
+                )
+            assert not sha.search(text), f"[{label}] the {expected!r} screen shows a customer a git sha"
 
 
 def test_every_reason_that_left_the_customer_page_is_on_the_operator_page(client, monkeypatch):

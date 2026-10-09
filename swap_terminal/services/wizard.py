@@ -263,6 +263,48 @@ def source_lamps(rows: list[dict]) -> list[dict]:
     return lamps
 
 
+def unavailable_note() -> str:
+    """Why a greyed destination is greyed, in words a CUSTOMER can act on.
+
+    WHAT IT REPLACES, AND IT WAS A DISCLOSURE PROBLEM AS WELL AS A READABILITY ONE.
+    destinations_for() used to pass `row["reason"]` straight through, so screen 2
+    rendered, to an unauthenticated reader, on the public port:
+
+        BTC -> SOL: SOL has no adapter in this process: SOL_RPC_URL is unset (or 0)
+        in the environment this process was started with. Nothing in the serving
+        path reads a .env, so it has to be exported in the shell that starts the
+        server -- a value set only in a file, or only in another shell, does not
+        reach here.
+
+    That is the same text tests/test_customer_page_layout.py::
+    test_no_operator_facing_remedy_text_reaches_the_customer_page was written to
+    keep off the customer page, and it kept passing because it only GETs `/` --
+    screen 2 is reachable only by a POST. The guard was right and could not see here.
+
+    NOTHING LEAVES THE SYSTEM'S REPORTING, which is rule 14's condition and was
+    checked before this was written rather than assumed. Measured 2026-10-09 with
+    two chains up and four down: screen 2 could show 16 distinct reasons, and every
+    one is on /admin -- the four per-chain causes verbatim, and the other twelve as
+    the two per-chain halves they are concatenated from ("<source cause> Also:
+    <destination cause>"). A first pass at that check compared whole strings and
+    scored twelve as missing; the halves were there all along.
+
+    ONE SENTENCE FOR EVERY CAUSE, and the alternative was considered and refused.
+    Naming the side -- "GRC cannot be paid out right now" -- reads better and is
+    not always true: the same greyed tile is produced by the SOURCE being unable to
+    take a deposit, and a sentence blaming the destination would then be wrong on a
+    screen whose whole job is to tell a customer what is possible. "This direction"
+    is true under every cause, and the direction is already the tile's label.
+
+    NO ARGUMENT, DELIBERATELY. It takes neither asset because it says nothing about
+    either, and a parameter nothing reads is a parameter a later reader will wire a
+    claim into. If a cause ever becomes worth distinguishing FOR A CUSTOMER -- "this
+    pair is retired" against "this pair is down" -- that is a new return value from
+    the row, not a sentence assembled here.
+    """
+    return "this direction is not available right now. Pick another destination, or try again later"
+
+
 def destinations_for(rows: list[dict], from_asset: str) -> list[dict]:
     """Step 2's options: what `from_asset` can become, with each one's own verdict.
 
@@ -284,7 +326,7 @@ def destinations_for(rows: list[dict], from_asset: str) -> list[dict]:
                 "symbol": symbol_for(row["to_asset"]),
                 "symbol_title": symbol_title_for(row["to_asset"]),
                 "color_class": color_class_for(row["to_asset"]),
-                "reason": "" if row["serviceable"] else (row.get("reason") or "this direction cannot be quoted now"),
+                "reason": "" if row["serviceable"] else unavailable_note(),
             }
             for row in out
         ),

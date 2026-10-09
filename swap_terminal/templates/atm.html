@@ -239,13 +239,21 @@
       </table>
 
       {#- WHO HOLDS THE MONEY, said once here as well as on the review screen.
-          Measured 2026-10-07: all 30 pairs settle CUSTODIALLY in this terminal, and
-          three of them have an atomic path that has run green and is not used. A
-          customer comparing directions is entitled to know that the answer does not
-          vary by pair. -#}
-      <p class="panel-note">Every pair above settles the same way: this desk takes your coin and pays
-         you from its own wallet. There is no hashlock and nothing is atomic &mdash; between your
-         deposit confirming and your payout broadcasting, this desk holds your funds.</p>
+          Measured 2026-10-07 and again 2026-10-09: all 30 pairs settle CUSTODIALLY in
+          this terminal, and three of them have an atomic path that has run green and
+          is not used. A customer comparing directions is entitled to know that the
+          answer does not vary by pair.
+
+          THE SENTENCE IS NO LONGER WRITTEN HERE. It was, and so was the review
+          screen's, and the two differed already: this one said "there is no hashlock
+          and nothing is atomic" and that one did not mention it at all. Two
+          statements of one fact on two screens of one flow, each able to drift, on
+          the subject of who is holding the customer's money. Both are now
+          modules/htlc_assets.custodial_customer_note(), whose docstring counts the
+          five copies that existed and says why this one is not keyed on settlement
+          mode. The word "hashlock" went with the rewrite: a reader who knows the term
+          does not need the sentence, and a reader who does not is told nothing by it. -#}
+      <p class="panel-note">Every pair above settles the same way. {{ custodial_note }}</p>
     </details>
   </section>
   {% endif %}

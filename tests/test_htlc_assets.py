@@ -81,9 +81,11 @@ from modules.htlc_assets import (
     PROVEN_SCRIPT_PAIRS,
     SCRIPT_DRIVER,
     SCRIPT_HTLC_ASSETS,
+    WORD_BROKERED,
     WORD_COVERED,
     WORD_PROVEN,
     XRP_FIRST,
+    custodial_customer_note,
     has_proven_run,
     script_client_classes,
     settlement_line,
@@ -807,4 +809,68 @@ def test_the_admin_page_states_once_that_every_pair_is_custodial():
     assert "cell.settlement_headline" in markup, "the per-pair half must reach the cell"
     assert re.search(r"aria-label=.*settlement_headline", markup, re.IGNORECASE), (
         "a tooltip alone is invisible to a keyboard user and to a screen reader"
+    )
+
+
+def test_the_customer_sentence_does_not_vary_with_the_settlement_mode():
+    """The one key on the verdict that must NOT follow `mode`, `driver` or `proven`.
+
+    THIS IS THE SUBTLE HALF OF THE 2026-10-09 CHANGE and the one a later reader is
+    most likely to "fix" in the wrong direction, so it is pinned rather than only
+    commented. `mode` says which mechanism COULD settle a pair. It does not say how
+    a swap opened through this terminal IS settled, which is custodially, always --
+    BROKERED_PATH_NOTE records the grep (nothing in services/, workers/ or routes/
+    imports either driver) and routes/atm.py's commit path contains no HTLC,
+    hashlock or preimage.
+
+    So a customer sentence keyed on `mode` would begin claiming atomicity the day
+    somebody marked a pair script-HTLC-capable while the ATM still settled it
+    custodially -- on the screen where a customer decides whether to send money.
+
+    ASSERTED ACROSS ALL THREE MODES AT ONCE, over pairs whose verdicts genuinely
+    differ, so the test cannot pass by accident on a tree where every pair happens
+    to share a mode.
+    """
+    pairs = (GRC_TO_XRP, BTC_TO_LTC, GRC_TO_SOL)
+    verdicts = {pair: settlement_verdict(*pair) for pair in pairs}
+    assert len({verdict["mode"] for verdict in verdicts.values()}) > 1, (
+        "every pair here shares a mode, so mode-independence is untested"
+    )
+
+    for pair, verdict in verdicts.items():
+        assert verdict["customer"] == custodial_customer_note(*pair), (
+            f"{pair}'s customer sentence is not the one custodial_customer_note() derives"
+        )
+        # The sentence differs between pairs ONLY in the two asset names. Strip
+        # those and every pair must read identically, whatever its mode.
+        skeleton = verdict["customer"].replace(pair[0], "<FROM>").replace(pair[1], "<TO>")
+        assert skeleton == (
+            custodial_customer_note("<FROM>", "<TO>")
+        ), f"{pair} ({verdict['mode']}) says something its mode decided"
+
+
+def test_the_customer_sentence_names_no_mechanism_no_file_and_no_posture_word():
+    """What may not reach a customer, over the module's own vocabulary.
+
+    DERIVED FROM THE MODULE RATHER THAN TYPED, so a fourth posture word or a third
+    driver cannot arrive and go unchecked -- the identical argument
+    settlement_verdict()'s own `headline` gets right for the operator surfaces.
+
+    THE HEADLINE IS ASSERTED TO STILL CONTAIN THEM, which is the half that stops
+    this being a request to strip the vocabulary everywhere. An operator reading a
+    matrix cell needs the driver filename; that is what the cell is for.
+    """
+    banned = {WORD_BROKERED, WORD_COVERED, WORD_PROVEN, "P2SH", "HTLC", "hashlock",
+              "atomic_swap.py", "atomic_swap_xrp.py", "CUSTODIALLY"}
+    for pair in (GRC_TO_XRP, BTC_TO_LTC, GRC_TO_SOL):
+        note = custodial_customer_note(*pair)
+        for word in banned:
+            assert word not in note, f"{pair}'s customer sentence names {word!r}"
+        assert not re.search(r"\((?:[0-9a-f]{7,40})\)", note), f"{pair}'s customer sentence carries a git sha"
+
+    # The operator form keeps every one of them, or the two lengths have collapsed
+    # into one and the operator surfaces have quietly lost the driver.
+    operator = settlement_verdict("BTC", "GRC")["headline"]
+    assert "atomic_swap.py" in operator and "CUSTODIALLY" in operator, (
+        "the operator pill lost the driver or the custody clause; this change was not supposed to touch it"
     )

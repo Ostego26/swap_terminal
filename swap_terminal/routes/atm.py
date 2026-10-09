@@ -80,6 +80,7 @@ from chains.amount_solve import (
 from db import get_db
 from flask import Blueprint, current_app, redirect, render_template, request, url_for
 from modules.address_authority import check_address
+from modules.htlc_assets import custodial_customer_note
 from services.pair_view import (
     CUSTOMER_STATES,
     allowed_pair_rows,
@@ -279,6 +280,14 @@ def render_step(answers: dict, error: str = "") -> str:
              if row["from_asset"] == from_asset and row["to_asset"] == answers.get("to_asset")),
             None,
         ),
+        # THE CUSTODY SENTENCE FOR THE WHOLE-TABLE PANEL ON SCREEN 1, where no pair
+        # is chosen yet. The per-pair one rides on `settlement` above and both come
+        # out of modules/htlc_assets.custodial_customer_note(), which is the point:
+        # templates/atm.html and templates/_atm_confirm.html each used to compose
+        # their own, from nothing, and the two could disagree about who holds the
+        # money on two screens of one flow. See that function's docstring for the
+        # five copies this replaces and the 30-of-30 measurement behind it.
+        "custodial_note": custodial_customer_note(),
     }
     return render_template("atm.html", **context)
 

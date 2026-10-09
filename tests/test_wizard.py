@@ -39,6 +39,7 @@ from services.wizard import (
     screen_furniture,
     source_lamps,
     step_by_number,
+    unavailable_note,
 )
 from valid_addresses import GRC_PAYOUT
 
@@ -139,13 +140,33 @@ def test_a_coin_with_no_working_outbound_direction_is_not_selectable():
     assert "0 of 2" in lamp["detail"], "rule 14: the count goes next to the lamp, not only in a tooltip"
 
 
-def test_an_unavailable_destination_is_shown_greyed_with_its_reason_not_hidden():
+def test_an_unavailable_destination_is_shown_greyed_with_a_reason_a_customer_can_act_on():
     """Rule 14 one level up: absent and unavailable must look different.
 
     A customer who came to get ICP out and finds ICP simply missing from step 2
     cannot tell "this terminal does not do that pair" from "that direction is down
     right now". Those deserve different reactions, so the option is returned with
-    selectable False and the cause attached.
+    selectable False and a sentence attached.
+
+    REWRITTEN 2026-10-09, AND THE INVARIANT GOT STRONGER RATHER THAN WEAKER (rule
+    2). It used to assert `"dfx identity" in by_asset["ICP"]["reason"]` -- that the
+    ROW'S OWN reason reached the screen. It did, and that was the defect: the row's
+    reason is operator text, and screen 2 was rendering
+
+        SOL has no adapter in this process: SOL_RPC_URL is unset (or 0) in the
+        environment this process was started with. Nothing in the serving path
+        reads a .env, so it has to be exported in the shell that starts the server
+
+    to an unauthenticated reader on the public port. So what is asserted now is
+    both halves: a sentence IS attached, and the operator text is NOT it.
+
+    THE SEEDED REASON IS THE POSITIVE CONTROL and is why this cannot pass vacuously.
+    `ICP_ASYMMETRY`'s row carries "dfx identity"; if destinations_for() ever goes
+    back to passing `row["reason"]` through, the absence assertion fails. Asserting
+    only `option["reason"] != ""` would pass under that reversion and under a stub
+    that returns any string at all -- which is the shape of three mutations that
+    survived earlier in this session because "nothing was found" and "nothing was
+    looked at" produced the same green.
     """
     options = destinations_for(ICP_ASYMMETRY, "GRC")
     by_asset = {option["asset"]: option for option in options}
@@ -154,18 +175,54 @@ def test_an_unavailable_destination_is_shown_greyed_with_its_reason_not_hidden()
     assert by_asset["LTC"]["selectable"] is True
     assert by_asset["LTC"]["reason"] == ""
     assert by_asset["ICP"]["selectable"] is False
-    assert "dfx identity" in by_asset["ICP"]["reason"], "the row's own reason reaches the screen"
+    assert by_asset["ICP"]["reason"] == unavailable_note(), (
+        "a refused option carries the customer sentence, not whatever the row recorded"
+    )
+    assert "dfx identity" not in by_asset["ICP"]["reason"], (
+        "the row's operator reason reached the customer screen again"
+    )
 
     # Selectable options sort first, so the working choices are what a customer
     # meets at the top rather than interleaved with dead ones.
     assert [option["asset"] for option in options] == ["LTC", "ICP"]
 
 
-def test_a_destination_with_no_reason_recorded_still_says_something():
-    """An empty reason must not render as a blank -- `(none)` is a result, a gap is not."""
-    options = destinations_for([row("GRC", "XRP", serviceable=False, reason="")], "GRC")
-    assert options[0]["selectable"] is False
-    assert options[0]["reason"], "a refused option with no recorded reason still needs a sentence"
+def test_the_customer_sentence_names_no_mechanism_and_no_setting():
+    """What unavailable_note() may NOT contain, over the vocabulary that leaked.
+
+    A list and not one string, because the leak was not one word: screen 2 rendered
+    variable names for four different chains, the phrase ".env", and the word
+    "adapter", and a test pinning any one of them would have passed while the
+    others shipped. Measured 2026-10-09: sixteen distinct reasons were reachable.
+    """
+    note = unavailable_note()
+    assert note, "a refused option with no recorded reason still needs a sentence"
+    for forbidden in ("_RPC", ".env", "export", "adapter", "process", "unset", "environment"):
+        assert forbidden not in note, f"the customer sentence names {forbidden!r}, which its reader cannot act on"
+    assert "not available right now" in note, "it has to say the direction is down, not merely be short"
+
+
+def test_every_refused_destination_gets_the_same_sentence_whatever_the_cause():
+    """One sentence per cause was considered and refused; this pins that decision.
+
+    Naming the side -- "GRC cannot be paid out right now" -- reads better and is not
+    always true, because the same greyed tile is produced by the SOURCE being unable
+    to take a deposit. A sentence blaming the destination would then be wrong on the
+    screen whose whole job is telling a customer what is possible.
+
+    So: three rows with three different recorded causes, one sentence. If a later
+    change makes the cause customer-visible again, this fails and the reasoning
+    above is what has to be argued with.
+    """
+    rows = [
+        row("GRC", "ICP", serviceable=False, reason="ICP has no adapter in this process"),
+        row("GRC", "LTC", serviceable=False, reason="LTC cannot sign: no key loaded"),
+        row("GRC", "XRP", serviceable=False, reason=""),
+    ]
+    sentences = {option["reason"] for option in destinations_for(rows, "GRC")}
+    assert sentences == {unavailable_note()}, (
+        f"three different causes produced {len(sentences)} different customer sentences"
+    )
 
 
 def test_the_flow_asks_for_exactly_what_is_missing_and_in_order():

@@ -76,14 +76,33 @@
 
 {#- WHO YOU ARE TRADING WITH, from the row's own settlement verdict rather than a
     sentence written here. `settlement` is None only if the pair vanished between
-    screens, which is a state worth printing rather than hiding (rule 14). -#}
+    screens, which is a state worth printing rather than hiding (rule 14).
+
+    `settlement.customer` AND NOT `settlement.headline`, WHICH IS A FIX AND NOT A
+    RENAME. The headline is the operator pill -- it is built for a matrix cell and
+    it rendered, verbatim, to a customer about to press "Create the swap":
+
+        RUN GREEN -- atomic_swap.py (P2SH HTLC on both legs); this terminal
+        settles it CUSTODIALLY, with no hashlock
+
+    Three things wrong with that on this screen. It names a file in this repository
+    and a script type the reader cannot act on. "RUN GREEN" is a posture token that
+    reads as reassurance. And the ONE clause that matters to them -- that the
+    settlement is custodial -- is third, behind two that sound like the opposite.
+    A pair whose driver is missing showed them a git sha instead
+    ("SOL has no HTLC (c4ea027)").
+
+    Measured 2026-10-09 across Config.ALLOWED_PAIRS: 30 of 30 settle custodially,
+    under three different leading words. So the word varied, the custody did not,
+    and the varying part was the part being shown.
+
+    The paragraph that used to sit under it was a hand-written second statement of
+    the same fact, which is now the same source as screen 1's -- see
+    modules/htlc_assets.custodial_customer_note(). -#}
 {% if settlement %}
 <div class="atm-counterparty">
   <h2>Who you are trading with</h2>
-  <p>{{ settlement.headline }}</p>
-  <p class="atm-note">This desk takes your {{ answers.from_asset }} and pays you {{ answers.to_asset }}
-     from its own wallet. Between your deposit confirming and your payout being broadcast, this desk
-     holds your funds.</p>
+  <p>{{ settlement.customer }}</p>
 </div>
 {% else %}
 <p class="atm-error" role="alert">This pair's settlement could not be read just now, so this screen

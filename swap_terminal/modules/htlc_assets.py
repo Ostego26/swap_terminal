@@ -458,6 +458,74 @@ WORD_BROKERED = "BROKERED ONLY"
 BROKERED_PATH_SHORT = "this terminal settles it CUSTODIALLY, with no hashlock"
 
 
+def custodial_customer_note(from_asset: str = "", to_asset: str = "") -> str:
+    """The same fact as BROKERED_PATH_SHORT and BROKERED_PATH_NOTE, for a CUSTOMER.
+
+    THE THIRD LENGTH, and the reason there is one is that the other two had already
+    been copied by hand into three templates. Counted 2026-10-09 by grepping the
+    tree for "no hashlock":
+
+        modules/htlc_assets.BROKERED_PATH_SHORT   the pill, for a matrix cell
+        modules/htlc_assets.BROKERED_PATH_NOTE    the paragraph, with its provenance
+        templates/atm.html:247                    hand-written, customer, screen 1
+        templates/_atm_confirm.html               hand-written, customer, screen 5
+        templates/admin.html:924                  hand-written, operator
+
+    Five statements of one fact, three of them written from nothing in a template.
+    That is rule 8 at its most expensive shape: they agree the day they are written,
+    nothing fails when they stop agreeing, and the one that drifts is on the screen
+    where a customer decides whether to send money. The two customer copies are now
+    this function; admin.html's is deliberately left (see below).
+
+    WHY THIS IS NOT DERIVED FROM `mode`, WHICH IS THE SUBTLE PART AND THE ONE THAT
+    WOULD BE EASY TO GET WRONG LATER. settlement_verdict()'s `mode` says which
+    mechanism COULD settle a pair -- a P2SH HTLC, an XRP escrow, or nothing. It does
+    NOT say how a swap opened through this terminal IS settled, which is custodially,
+    always: grepped 2026-10-03 and recorded in BROKERED_PATH_NOTE, nothing in
+    services/, workers/ or routes/ imports either driver, and routes/atm.py's own
+    commit path contains no HTLC, hashlock or preimage.
+
+    Measured 2026-10-09 over Config.ALLOWED_PAIRS: 30 of 30 headlines end in
+    BROKERED_PATH_SHORT, under three different leading words -- 18 BROKERED ONLY,
+    9 COVERED NOT RUN, 3 RUN GREEN. So the word varies and the custody does not, and
+    a customer note keyed on `mode` would start claiming atomicity the day somebody
+    marked a pair script-HTLC-capable while the ATM still settled it custodially.
+    When an atomic path IS wired into the flow, THIS function is what has to change,
+    and it is one place.
+
+    WHAT IT SAYS AND WHY EACH CLAUSE IS IN IT. A customer about to press a button
+    needs three things, none of which is a mechanism name: who holds the coin, that
+    nothing automatic gives it back, and who fixes it if it does not arrive. The
+    words "hashlock", "atomic", "HTLC", "P2SH" and the two driver filenames are
+    deliberately absent -- a reader who knows what a hashlock is does not need the
+    sentence, and a reader who does not is told nothing by its absence being named.
+
+    ONE FUNCTION AND NOT TWO CONSTANTS, because the review screen knows the pair and
+    the reference panel on screen 1 is about every pair at once. Two constants is how
+    the five copies above started.
+
+    admin.html KEEPS ITS OWN PARAGRAPH on purpose: it is operator-voice, it names
+    both drivers and the grep that proves neither is called, and that provenance is
+    exactly what this sentence removes. It is still a hand-written copy and is still
+    able to drift -- named here rather than fixed, because rewriting the operator
+    page's wording is a separate change to a separate audience.
+    """
+    source = from_asset.strip().upper()
+    destination = to_asset.strip().upper()
+    # "your BTC ... your GRC" when the pair is known, "your coin ... you" when the
+    # sentence is about every pair at once. The no-asset form is a SHORTER sentence
+    # rather than a vaguer one: "pays what you asked for" was the first version and
+    # it reads as a hedge where the point is that the desk pays you directly.
+    takes = f"your {source}" if source else "your coin"
+    pays = f"pays your {destination}" if destination else "pays you"
+    return (
+        f"This desk takes {takes} and {pays} out of its own wallet. Nothing in this "
+        f"swap returns your coin automatically if the payout does not happen: between your "
+        f"deposit confirming and your payout being sent, this desk is holding your funds, "
+        f"and a person resolves anything that goes wrong."
+    )
+
+
 def settlement_verdict(from_asset: str, to_asset: str) -> dict:
     """Everything decided about how this directed pair settles. The only derivation.
 
@@ -645,6 +713,14 @@ def settlement_verdict(from_asset: str, to_asset: str) -> dict:
             if driver
             else f"{word} -- {detail} {BROKERED_PATH_NOTE}"
         ),
+        # THE THIRD LENGTH, FOR A CUSTOMER, and it is deliberately the only key
+        # here that does not vary with `mode`, `driver`, `protocol` or `proven`.
+        # custodial_customer_note()'s docstring carries the reasoning and the
+        # 30-of-30 measurement behind it. It is on this dict rather than composed
+        # by the template because templates/_atm_confirm.html composing its own
+        # sentence from the same facts is precisely how the five hand-written
+        # copies that function names got there.
+        "customer": custodial_customer_note(source, destination),
     }
 
 
