@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import sys
 import time
+from typing import Protocol
 
 from microfortnights import format_duration
 
@@ -95,6 +96,53 @@ def redact(_secret: bytes) -> str:
     parameter is underscore-prefixed because using it would be the defect.
     """
     return "<preimage withheld: see secret_hash>"
+
+
+class ConsoleLike(Protocol):
+    """What `funding_steps.Run.console` is actually used for: four methods, not six.
+
+    WHY THIS EXISTS. `Run.console` was declared `Console`, the concrete class below,
+    and `operator_panel.py:2122` assigns a WRAPPER into it --
+    `regtest/operator_panel.SaysEachLineOnce`, which prints a given line once and
+    then stops repeating it, so a page redraw does not restate the same five
+    payment lines. pyright refused the assignment. Not a defect: that wrapper
+    defines `say` and `should_say` and forwards everything else through
+    `__getattr__`, so nothing raises -- but `inspect.getmembers` cannot see a
+    `__getattr__` name, which is what made the surface look incomplete on a first
+    reading of it.
+
+    THE FOUR MEMBERS WERE COUNTED, NOT GUESSED. Grepped `funding_steps.py` for
+    what it reaches off a console: `say` five times, `elapsed` twice, `step` once,
+    `check` once. `banner` and `summary` are never called on it. Declaring the
+    concrete class there OVER-PROMISES by two methods, which is the same defect
+    `step_console.StepNarrator` documents at length for the other console.
+
+    MAKING THE WRAPPER SUBCLASS Console WOULD BE WRONG, and that is worth saying
+    because it is the shorter fix. `SaysEachLineOnce` holds a DIFFERENT console
+    instance and delegates to it; inheriting would give it Console's own `results`
+    list and step counter alongside the one it wraps, so `summary()` would read the
+    empty inherited state rather than the real one. A wrapper that inherits from
+    what it wraps has two of everything.
+
+    POSITIONAL-ONLY, AND HERE IT IS LOAD-BEARING RATHER THAN TIDY:
+    `SaysEachLineOnce.say` names its parameter `line`, and `Console.say` names it
+    `text`. pyright matches parameter NAMES for an ordinary parameter, so without
+    `/` the wrapper would not satisfy a protocol written against `Console`'s
+    spelling -- the exact case `step_console.py` measured the same day.
+
+    THIS IS NOT step_console.StepReporter AND THE TWO MUST NOT BE MERGED. There are
+    two classes named `Console` in this tree, and their `check()` disagrees about
+    what a verdict is: this one takes `outcome: str` and returns `str`, the other
+    takes `ok: bool` and returns `bool`. See this module's OK/FAIL constants and
+    `step_console.Console.check`'s refusal, which exists because crossing them
+    printed OK and exited 0. One protocol over both would have to accept either,
+    which is how that crossing becomes legal again.
+    """
+
+    def say(self, text: str, /) -> None: ...
+    def step(self, number: int, chain: str, title: str, /) -> None: ...
+    def check(self, label: str, got: object, expected: object, outcome: str, /) -> str: ...
+    def elapsed(self) -> str: ...
 
 
 class Console:

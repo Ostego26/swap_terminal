@@ -299,7 +299,15 @@ from modules.htlc_timelock import (  # noqa: E402 -- same
     lock_hours_for_role,
 )
 from modules.script_leg import ScriptLegKeys, mint_leg_keys  # noqa: E402 -- same
-from step_console import Console  # noqa: E402 -- same
+
+# Console is what main() builds: it owns the step count, the banner and the summary.
+# StepNarrator (say) and StepReporter (say + check) are what the helpers below declare,
+# each naming only what its own body calls. Declaring the concrete class in a function
+# that uses two of its six members over-promises, and the bill arrives as a test recorder
+# implementing exactly those two being refused -- 19 pyright errors on 2026-10-09, every
+# one that shape. The reasoning, the positional-only `/` and why no stub may subclass
+# Console are in step_console.StepNarrator's own docstring.
+from step_console import Console, StepNarrator, StepReporter  # noqa: E402 -- same
 
 from xrp_htlc_escrow import (  # noqa: E402 -- same: the escrow payloads and the read-only helpers are that file's, not copied here (rule 8)
     RIPPLE_EPOCH_OFFSET_SECONDS,
@@ -633,7 +641,7 @@ def assert_timelock_ordering(xrp_cancel_after: int, leg: ScriptLeg, now_unix: fl
 
 
 
-def _pinned_chain_amount(console: Console, raw: str, chain: str) -> tuple[Decimal | None, str]:
+def _pinned_chain_amount(console: StepReporter, raw: str, chain: str) -> tuple[Decimal | None, str]:
     """--chain-amount, validated. Its own function so resolve_chain_amount() stays
     under the return ceiling by SHAPE rather than by a suppression (rule 19).
 
@@ -658,7 +666,7 @@ def _pinned_chain_amount(console: Console, raw: str, chain: str) -> tuple[Decima
     return pinned, f"{both}, pinned by hand; NO rate was applied and the legs are not priced"
 
 
-def _rated_chain_amount(console: Console, raw: str, chain: str) -> tuple[Decimal | None, str]:
+def _rated_chain_amount(console: StepReporter, raw: str, chain: str) -> tuple[Decimal | None, str]:
     """--rate, validated and applied. See chain_amount_for_rate for the direction.
 
     THE SENTENCE SAYS THE RATE BOTH WAYS ROUND, and that is worth four lines of code.
@@ -726,7 +734,7 @@ def _coingecko_priced(chain: str) -> tuple[Decimal, str, None]:
             None)
 
 
-def say_how_thin_this_market_is(console: Console, quote) -> None:
+def say_how_thin_this_market_is(console: StepNarrator, quote) -> None:
     """Print the flow behind the price, when there is enough to judge it.
 
     WHY THIS IS PRINTED AND NOT ENFORCED. A size cap would be live posture and the
@@ -762,7 +770,7 @@ def say_how_thin_this_market_is(console: Console, quote) -> None:
                 f"${quote.market_cap_usd:,.0f} cap{cap_note} = {turnover:.6%} turnover per day  <- {verdict}")
 
 
-def _priced_chain_amount(console: Console, chain: str) -> tuple[Decimal | None, str]:
+def _priced_chain_amount(console: StepReporter, chain: str) -> tuple[Decimal | None, str]:
     """The leg's size from a live feed, or None with the refusal already printed.
 
     TRIES BOTH FEEDS AND NAMES THE ONE THAT ANSWERED. A source that is silently
@@ -788,7 +796,7 @@ def _priced_chain_amount(console: Console, chain: str) -> tuple[Decimal | None, 
     return None, ""
 
 
-def resolve_chain_amount(console: Console, args) -> tuple[Decimal | None, str]:
+def resolve_chain_amount(console: StepReporter, args) -> tuple[Decimal | None, str]:
     """How much GRC the swap moves, and WHERE that number came from.
 
     Returns (amount, source_sentence). A None amount means the run must stop, and
@@ -1457,7 +1465,7 @@ def describe_the_dry_run(console: Console, args, chain: str, leg: ScriptLeg,  # 
     console.say("re-run with --run to perform the swap.")
 
 
-def resolve_the_script_chain_adapter(console: Console, chain: str) -> tuple[RPCAdapter | None, dict]:
+def resolve_the_script_chain_adapter(console: StepReporter, chain: str) -> tuple[RPCAdapter | None, dict]:
     """The adapter AND the settings it was built from, resolved once.
 
     RETURNS THE SETTINGS, NOT JUST THE ADAPTER, and that is the fix for the third
@@ -1512,7 +1520,7 @@ def resolve_the_script_chain_adapter(console: Console, chain: str) -> tuple[RPCA
     return adapter, settings
 
 
-def say_what_has_actually_run(console: Console, chain: str) -> None:
+def say_what_has_actually_run(console: StepNarrator, chain: str) -> None:
     """What evidence exists for THIS chain on THIS code path, before anything is funded.
 
     A CLAIM ABOUT EVIDENCE IS A CLAIM, and this driver printed the wrong one twice in one
@@ -1539,7 +1547,7 @@ def say_what_has_actually_run(console: Console, chain: str) -> None:
     )
 
 
-def prepare_the_script_leg(console: Console, chain: str, chain_rpc: dict) -> tuple[object, ScriptLegKeys] | None:
+def prepare_the_script_leg(console: StepReporter, chain: str, chain_rpc: dict) -> tuple[object, ScriptLegKeys] | None:
     """The client that owns the HTLC and the two keys its branches pay to, or None.
 
     BOTH OR NEITHER, which is why they are made together. A client with no keys cannot
@@ -1598,7 +1606,7 @@ def normalize_arguments(args) -> None:
         args.direction = CHAIN_FIRST
 
 
-def refuse_a_chain_this_driver_cannot_fund(console: Console, chain: str) -> bool:
+def refuse_a_chain_this_driver_cannot_fund(console: StepReporter, chain: str) -> bool:
     """True if this chain's HTLC cannot be funded here, having said why. Contacts nothing.
 
     A FUNCTION SO IT CAN BE CALLED WITH A SEEDED CONSOLE, and because the branches it
@@ -1650,7 +1658,7 @@ def refuse_a_chain_this_driver_cannot_fund(console: Console, chain: str) -> bool
     return True
 
 
-def resolve_wallet_passphrase(console: Console, adapter, chain: str) -> tuple[str, bool] | None:
+def resolve_wallet_passphrase(console: StepReporter, adapter, chain: str) -> tuple[str, bool] | None:
     """(passphrase, is_encrypted), or None meaning REFUSE before anything is funded.
 
     ASKED OF THE WALLET, NOT ASSUMED FROM THE CHAIN. Until 2026-09-29 the driver refused

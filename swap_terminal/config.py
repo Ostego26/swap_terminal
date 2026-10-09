@@ -329,7 +329,15 @@ class Config:
     DB_PATH = _env("SWAP_DB_PATH", str(BASE_DIR / "swap_terminal.db"))
     QUOTE_TTL_SECONDS = _env_int("QUOTE_TTL_SECONDS", "600")
     RATE_CACHE_SECONDS = _env_int("RATE_CACHE_SECONDS", "30")
-    DEFAULT_FEE_BPS = _env_int("DEFAULT_FEE_BPS", "150")
+    # ClassVar BECAUSE icp_operator_admin.PostureSource DECLARES IT ONE, and that is
+    # not a style choice: a Protocol member reached through `type[Protocol]` must be a
+    # ClassVar on both sides. Measured against pyright 1.1.414 -- a protocol whose
+    # member is a plain annotation refuses every class with "is not defined as a
+    # ClassVar in protocol", and a @property variant cannot be read off the class at
+    # all ("a property defined within a protocol class cannot be accessed as a class
+    # variable"). ALLOWED_PAIRS already carried ClassVar for the RUF012 reason given
+    # below, which is why this was the only member of the seed that complained.
+    DEFAULT_FEE_BPS: ClassVar[int] = _env_int("DEFAULT_FEE_BPS", "150")
     AMOUNT_TOLERANCE_PCT = _env_float("AMOUNT_TOLERANCE_PCT", "0.01")
     SMALL_SWAP_MANUAL_REVIEW_USD = _env_float("SMALL_SWAP_MANUAL_REVIEW_USD", "5000")
     BTC_MIN_CONFIRMATIONS = _env_int("BTC_MIN_CONFIRMATIONS", "2")

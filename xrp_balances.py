@@ -96,7 +96,15 @@ from chains.xrp_escrow import cancel_inputs, cancel_verdict, offer_sequence_from
 from chains.xrp_signing import reserve_drops
 from chains.xrp_testnet import TESTNET_URL, refuse_mainnet, rpc, saved_faucet_accounts
 from chains.xrp_units import from_drops, unix_from_ripple_time
-from step_console import Console
+
+# Console is what main() builds: it owns the step count, the banner and the summary.
+# StepNarrator (say) and StepReporter (say + check) are what the helpers below declare,
+# each naming only what its own body calls. Declaring the concrete class in a function
+# that uses two of its six members over-promises, and the bill arrives as a test recorder
+# implementing exactly those two being refused -- 19 pyright errors on 2026-10-09, every
+# one that shape. The reasoning, the positional-only `/` and why no stub may subclass
+# Console are in step_console.StepNarrator's own docstring.
+from step_console import Console, StepNarrator, StepReporter
 
 NOTHING_TO_LOOK_AT = 3
 
@@ -124,7 +132,7 @@ ESCROW_TYPE = "escrow"
 _TX_ALREADY_READ: dict[str, dict] = {}
 
 
-def _sequence_from_the_creating_tx(console, escrow: dict, inputs):
+def _sequence_from_the_creating_tx(console: StepNarrator, escrow: dict, inputs):
     """Do the `tx` read that cancel_inputs() names, and return an updated CancelInputs.
 
     READ-ONLY, AND THE ONLY NETWORK CALL IN THIS BLOCK. `tx` is a lookup; nothing here signs or
@@ -245,7 +253,7 @@ def escrows_held(address: str) -> tuple[list[dict], str]:
     return objects, f"{len(objects)} outstanding"
 
 
-def report_account(console: Console, address: str, base_reserve, inc_reserve) -> bool:
+def report_account(console: StepReporter, address: str, base_reserve, inc_reserve) -> bool:
     """Print one account's three numbers. True if the ledger answered."""
     try:
         result = rpc("account_info", {"account": address, "ledger_index": "validated"})

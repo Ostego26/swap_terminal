@@ -307,6 +307,33 @@ class SaysEachLineOnce:
             self._explained = True
             self._console.say(self.NOTICE)
 
+    # THE THREE PASS-THROUGHS ARE SPELLED OUT EVEN THOUGH __getattr__ BELOW ALREADY
+    # FORWARDS THEM, and that is not belt-and-braces. Measured 2026-10-09: pyright
+    # does NOT credit a `__getattr__` toward structural matching, so with only the
+    # magic method this class did not satisfy regtest/console.ConsoleLike and
+    # `run.console = SaysEachLineOnce(console)` was refused -- the finding that
+    # started this. Nothing was ever broken at runtime; the delegation worked and
+    # was simply invisible, to a checker and to `inspect.getmembers` alike, which is
+    # what made this wrapper's surface look incomplete the first time anyone read it.
+    #
+    # Writing them out is the better code regardless of the checker: a reader now
+    # sees what a Run's console is actually used for -- say, step, check, elapsed --
+    # without having to work out what `__getattr__` would catch.
+    #
+    # __getattr__ STAYS, because it still covers `banner`, `summary` and the
+    # attributes (`results`, `total_steps`) that nothing in the funding walk touches
+    # but a future caller might. Removing it would turn "this wrapper forwards
+    # everything it does not override" into "this wrapper forwards the four things
+    # somebody listed", which is a narrower promise than the class makes today.
+    def step(self, number: int, chain: str, title: str) -> None:
+        self._console.step(number, chain, title)
+
+    def check(self, label: str, got: object, expected: object, outcome: str) -> str:
+        return self._console.check(label, got, expected, outcome)
+
+    def elapsed(self) -> str:
+        return self._console.elapsed()
+
     def __getattr__(self, name):
         # EVERYTHING ELSE IS THE REAL CONSOLE'S. `check` tallies into counts the panel's startup
         # gate already uses, and a wrapper that swallowed one would change what that gate saw.
@@ -471,13 +498,19 @@ def refuse_unless_read_only(method: object) -> str:
     )
 
 
-def call_read_only(run: funding_steps.Run, method: str, args: list) -> dict:
+def call_read_only(run: funding_steps.HasAChainNode, method: str, args: list) -> dict:
     """Make one allowlisted call and return {ok, result} or {ok: false, error}. NEVER raises.
 
     A REFUSAL AND A FAILURE ARE DIFFERENT and both are results. "That method is not allowed" is
     the panel's own boundary; "the daemon said -1" is the chain answering. Collapsing them would
     leave an operator unable to tell a policy they can read from a problem they must fix
     (rule 14), so the two carry different text and the daemon's own words are never paraphrased.
+
+    `HasAChainNode` AND NOT `ChainReadingRun`, AND THIS IS THE CALL SITE THAT MEASURED THE
+    SPLIT. The body reaches `run.node().call(...)` and nothing else -- no asset, no line
+    printed -- and the stub in tests/test_operator_panel.py has neither member. The
+    one-Protocol design was tried first and failed here, so declaring the funding walk's
+    Protocol would over-promise by two members and `funding_steps.Run` by nine.
     """
     refusal = refuse_unless_read_only(method)
     if refusal:
@@ -920,13 +953,16 @@ def scan_depth(previous: int | None, tip: int | None, full: int) -> tuple[int, s
     )
 
 
-def _tip_or_none(run: funding_steps.Run) -> int | None:
+def _tip_or_none(run: funding_steps.HasAChainNode) -> int | None:
     """The chain tip, or None if the daemon will not say. Never raises.
 
     None RATHER THAN A HEIGHT OF 0, because 0 is a height and would make the incremental
     scan in payment_rows() compute a depth from a tip that was never read -- a confident
     number derived from a failure, which is the shape rule 17 forbids. None routes to the
     full walk instead, which is slower and correct.
+
+    `HasAChainNode` rather than the funding walk's Protocol: this asks one `getblockcount`
+    through `funding_steps.current_height`, which wants the same one member.
     """
     try:
         return funding_steps.current_height(run)
@@ -934,7 +970,7 @@ def _tip_or_none(run: funding_steps.Run) -> int | None:
         return None
 
 
-def payment_rows(run: funding_steps.Run, key, known_spent: dict | None = None,
+def payment_rows(run: funding_steps.ChainReadingRun, key, known_spent: dict | None = None,
                  unspent_as_of: dict | None = None) -> list[PaymentRow]:
     """Every payment to the funding address, newest first, each marked usable or spent.
 
@@ -953,6 +989,13 @@ def payment_rows(run: funding_steps.Run, key, known_spent: dict | None = None,
     is healthy and something when it is not trains the reader to look only at the noisy ones,
     and the quiet failure here -- a payment whose spent-ness could not be established -- looks
     exactly like a healthy one (rule 14).
+
+    `run: ChainReadingRun` rather than `Run`, and it is this function that makes the three
+    signatures move together: the same object goes straight through to
+    `find_operator_funding`, `find_the_spender` and `_tip_or_none`, so any one of them still
+    demanding the dataclass would make the Protocol here useless. Fourteen call sites in the
+    suite hand this a stub with `asset`, `say`, `node` and `call`, which is exactly what the
+    body and its callees touch.
     """
     try:
         entries = run.node().call("listtransactions", "*", funding_steps.FUNDING_SEARCH_DEPTH, 0)

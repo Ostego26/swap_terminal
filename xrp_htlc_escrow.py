@@ -205,7 +205,16 @@ from microfortnights import format_duration  # noqa: E402 -- same
 # grc_htlc_verify.py became the third verifier wanting the same output
 # conventions. Two copies of rule 6's unit and rule 14's `(none)` would drift
 # and each would look right in its own file (rule 8).
-from step_console import Console  # noqa: E402 -- same
+#
+# BOTH NAMES, and which one a function declares is decided by reading its body.
+# Console is what main() builds: it owns the step count, the banner and the summary,
+# and wait_validated() reads its stopwatch. StepNarrator is the one-method protocol
+# submit() declares, because saying two lines is all submit() does with a console --
+# naming the concrete class there promises six members to a reader and refuses every
+# test recorder that implements the one. 19 pyright errors on 2026-10-09 were that
+# shape. step_console.StepNarrator's docstring carries the reasoning and the measured
+# reason its parameters are positional-only.
+from step_console import Console, StepNarrator  # noqa: E402 -- same
 
 # THE EPOCH OFFSET AND ITS TWO CONVERSIONS NOW LIVE IN chains/xrp_units.py,
 # imported above beside the drop conversions. They moved there 2026-09-29 so
@@ -310,7 +319,7 @@ def escrow_finish_tx(  # noqa: PLR0913 -- checked: six, and each one is a field 
 # piece, and a file at the root owns the ORDER of steps rather than their contents.
 
 
-def submit(console: Console, submitter, secret: str, tx_json: dict) -> dict:
+def submit(console: StepNarrator, submitter, secret: str, tx_json: dict) -> dict:
     """Submit one transaction, through whichever signer this server allows.
 
     CORRECTED 2026-09-26 after the first run against a real ledger. This used to

@@ -693,7 +693,7 @@ def test_a_POST_from_ANOTHER_ORIGIN_is_refused():
     entry = _entry()
     for hostile in ("https://example.com", "http://evil.test:8765", "null",
                     "http://127.0.0.1.attacker.com"):
-        refusal = entry.refuse_a_cross_origin_post({"Origin": hostile, "Host": "127.0.0.1:8765"}, 8765)
+        refusal = entry.refuse_a_cross_origin_post({"Origin": hostile, "Host": "127.0.0.1:8765"})
         assert refusal, f"{hostile} must be refused"
         assert "not this machine" in refusal
         assert "spend coin" in refusal, "and it says WHY, or it reads as a bug to work around"
@@ -708,11 +708,11 @@ def test_a_REBOUND_DNS_NAME_is_refused_even_though_it_is_same_origin():
     """
     entry = _entry()
     refusal = entry.refuse_a_cross_origin_post(
-        {"Origin": "http://rebind.attacker.test", "Host": "rebind.attacker.test:8765"}, 8765)
+        {"Origin": "http://rebind.attacker.test", "Host": "rebind.attacker.test:8765"})
     assert refusal, "a rebound name must be refused"
 
     # Same attack with the Origin stripped, which is the shape that defeats an Origin-only check.
-    refusal = entry.refuse_a_cross_origin_post({"Host": "rebind.attacker.test:8765"}, 8765)
+    refusal = entry.refuse_a_cross_origin_post({"Host": "rebind.attacker.test:8765"})
     assert "DNS-rebinding" in refusal, refusal
 
 
@@ -729,7 +729,7 @@ def test_the_OPERATORS_OWN_PAGE_is_not_obstructed():
                  {"Origin": "http://localhost:8765", "Host": "localhost:8765"},
                  {"Host": "127.0.0.1:8765"},
                  {}):
-        assert entry.refuse_a_cross_origin_post(good, 8765) == "", good
+        assert entry.refuse_a_cross_origin_post(good) == "", good
 
 
 # ---------------------------------------------------------------------------

@@ -142,6 +142,7 @@ import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 import supervisor
 from config import Config
@@ -347,6 +348,90 @@ VERDICT_GLYPHS = {
 }
 
 
+class CaseInsensitiveHeaders(Protocol):
+    """A header container whose `get` folds case. WHAT `headers` HAS TO BE.
+
+    `Mapping[str, str]` is what this field used to say, and it was wrong in both
+    directions at once. Measured 2026-10-09 against the installed werkzeug:
+
+        isinstance(Headers([...]), Mapping)   False
+        list(iter(Headers([...])))            [('X-Forwarded-For', '10.0.0.1'), ...]
+
+    A werkzeug `Headers` is a list of PAIRS with case-insensitive lookup, not a
+    Mapping, and iterating one yields tuples rather than keys -- so the annotation
+    refused the only object that is ever actually passed here
+    (`routes/kill_switch._facts()` hands over `request.headers`) while promising
+    `__getitem__`, `__len__` and key iteration that none of this file uses. Three
+    `.get()` calls in refuse_cross_origin() are the entire use, which is why this
+    names one method and nothing else.
+
+    =====================================================================
+    A PLAIN dict DOES NOT MEET THIS CONTRACT -- AND NO CHECKER CAN SAY SO.
+    `dict(request.headers)` IS THE SECURITY REGRESSION THIS WARNS ABOUT
+    =====================================================================
+
+    `dict(request.headers)` is the obvious way to make a `Headers` fit a Mapping
+    annotation, it type-checks, every existing test stays green -- and it silently
+    disables the forwarding-header refusal below. HTTP header names are
+    case-insensitive on the wire and HTTP/2 lowercases every one of them. Measured,
+    same day, on the real container:
+
+        Headers([("x-forwarded-for", "10.0.0.1")]).get("X-Forwarded-For")  '10.0.0.1'
+        dict(Headers([("x-forwarded-for", "10.0.0.1")])).get("X-Forwarded-For")  None
+
+    refuse_cross_origin() looks the four forwarding headers up by their canonical
+    spelling. Through a `Headers` an HTTP/2 request is refused; through a dict of
+    the same request it is waved past, because the dict is keyed by whatever the
+    wire happened to send. That is a proxied caller reaching the one surface in
+    this application that can spawn the payout worker, with the guard still
+    present in the source and answering [] -- rule 13's "skipped plus success",
+    one layer down.
+
+    AND A CHECKER CANNOT HOLD THAT LINE, which is stated here because the
+    alternative is a reader trusting it to. Measured against pyright 1.1.414: a
+    `dict[str, str]` SATISFIES this Protocol. Case folding lives in the body of
+    `get`, and structural typing sees only its signature -- `dict.get`'s first
+    overload is exactly `(key, /) -> _VT | None`. Two shapes were tried that do
+    refuse a dict and both were rejected for being dishonest rather than
+    expressive: naming the parameter keyword-callable (`get(self, key: str)`)
+    refuses a dict only because typeshed makes `dict.get`'s key positional-only,
+    which is incidental to case and contradicts the positional call sites; adding
+    `getlist` refuses it only by naming a method this file never calls. A third,
+    declaring the `default` parameter, refuses `Headers` as well.
+
+    Either dict-refusing shape also costs more than it buys, measured rather than
+    guessed: the `getlist` variant produces SEVEN errors where there was one --
+    the `headers` field's own `field(default_factory=dict)`, plus six
+    `RequestFacts(headers={...})` seed sites in tests/test_kill_switch.py. Those
+    seeds are right (rule 10: the decision is callable with no socket and no
+    server), so a Protocol that refuses them would be refusing the correct caller
+    to catch a hypothetical one.
+
+    So the enforcement is this docstring and the suite, not the annotation. What
+    the annotation DOES buy is that the type is now true -- `Headers` satisfies it,
+    a Mapping was a claim about an object werkzeug does not provide -- and that the
+    promise shrinks from ten members a caller could reach for (`__getitem__`,
+    `__iter__`, `__len__`, `__contains__`, `keys`, `items`, `values`, `get`, and
+    equality both ways) to the one that is used, so the next reader can see that a
+    single case-folding `get` is the whole contract.
+
+    The `field(default_factory=dict)` below is a dict on purpose and is not the
+    hazard above: an EMPTY container answers None to every lookup at every casing,
+    so there is no case for it to fold, and a seeded-facts test says what it means
+    to send no headers at all.
+    """
+
+    def get(self, name: str, /) -> str | None:
+        """One header by name, case-insensitively, or None. The only method used here.
+
+        POSITIONAL-ONLY because all three call sites are positional, which makes
+        this the truer claim as well as the looser one: `werkzeug.Headers.get` names
+        the parameter `key` and a keyword-callable declaration would pin a spelling
+        nothing depends on.
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class RequestFacts:
     """The four things about a request that decide whether it may operate the switch.
@@ -363,7 +448,7 @@ class RequestFacts:
     and without a server (rule 10).
     """
 
-    headers: Mapping[str, str] = field(default_factory=dict)
+    headers: CaseInsensitiveHeaders = field(default_factory=dict)
     remote_addr: str | None = None
     env: Mapping[str, str] = field(default_factory=dict)
     #: None means "could not look". See loopback.listening_addresses(): the
@@ -372,7 +457,7 @@ class RequestFacts:
     listening: set[str] | None = None
 
     @classmethod
-    def observed(cls, headers: Mapping[str, str], remote_addr: str | None) -> RequestFacts:
+    def observed(cls, headers: CaseInsensitiveHeaders, remote_addr: str | None) -> RequestFacts:
         """The facts as the operating system and this process's environment report them.
 
         The socket scan happens HERE, once per request, rather than inside each

@@ -85,7 +85,7 @@ from typing import Any, Protocol
 import requests
 from chains.base import RPCAdapter, RPCError
 from microfortnights import format_duration
-from regtest.console import FAIL, OK, Console
+from regtest.console import FAIL, OK, ConsoleLike
 
 # Defaults match the operator's described machine exactly, and every one is
 # overridable by environment variable. The variable NAMES are ASCII and say
@@ -356,7 +356,7 @@ def mweb_override_args(help_text: str) -> tuple[list[str], str]:
     )
 
 
-def check_binaries(console: Console, config: ChainConfig) -> str:
+def check_binaries(console: ConsoleLike, config: ChainConfig) -> str:
     """Step 1 for one chain: the daemon and the cli exist, and say which build."""
     console.say(f"looking for {config.daemon_path} and {config.cli_path} on PATH")
     # A binary that prints nothing for -version is not a passing check. It is
@@ -739,7 +739,7 @@ def rpc_answers(config: ChainConfig) -> bool:
 REFUSAL_LOGGING = ("-debug=validation", "-debug=mempoolrej")
 
 
-def apply_mweb_override(console: Console, config: ChainConfig) -> None:
+def apply_mweb_override(console: ConsoleLike, config: ChainConfig) -> None:
     """Ask THIS litecoind whether it can hold MWEB inactive, and set the flag on `config` if so.
 
     MOVED HERE FROM regtest/steps.py ON 2026-09-28, BECAUSE A SECOND STARTER APPEARED AND DID
@@ -774,7 +774,7 @@ def apply_mweb_override(console: Console, config: ChainConfig) -> None:
         )
 
 
-def start_daemon(console: Console, config: ChainConfig) -> bool:
+def start_daemon(console: ConsoleLike, config: ChainConfig) -> bool:
     """Start the daemon if nothing is answering yet. Returns True if we spawned it.
 
     THE REAPER IS stop_daemon() IN THIS FILE, called from the finally block in
@@ -830,7 +830,7 @@ def start_daemon(console: Console, config: ChainConfig) -> bool:
     return True
 
 
-def _spawn(console: Console, config: ChainConfig, argv: list[str]):
+def _spawn(console: ConsoleLike, config: ChainConfig, argv: list[str]):
     console.say(f"{config.asset}: starting {' '.join(argv)}")
     return subprocess.run(  # noqa: S603 -- checked: argv[0] is from shutil.which; the datadir and the options come from this harness's own defaults and its own -help probe, never from a network source. No shell.
         argv,
@@ -841,7 +841,7 @@ def _spawn(console: Console, config: ChainConfig, argv: list[str]):
     )
 
 
-def wait_for_rpc(console: Console, config: ChainConfig) -> None:
+def wait_for_rpc(console: ConsoleLike, config: ChainConfig) -> None:
     """Poll until the daemon answers ANY liveness probe, printing progress. Never a fixed sleep.
 
     A fixed sleep is wrong in both directions: too short and the harness
@@ -918,7 +918,7 @@ def wait_for_rpc(console: Console, config: ChainConfig) -> None:
     )
 
 
-def assert_regtest(console: Console, config: ChainConfig, *, we_started_it: bool) -> dict:
+def assert_regtest(console: ConsoleLike, config: ChainConfig, *, we_started_it: bool) -> dict:
     """THE UNCONDITIONAL REFUSAL. Nothing in this harness runs before it passes.
 
     This is the first call made after every connection, on every chain, on
@@ -946,7 +946,7 @@ def assert_regtest(console: Console, config: ChainConfig, *, we_started_it: bool
     return info
 
 
-def report_softforks(console: Console, config: ChainConfig, info: dict, *, we_started_it: bool) -> None:
+def report_softforks(console: ConsoleLike, config: ChainConfig, info: dict, *, we_started_it: bool) -> None:
     """Print each deployment and its status, from the daemon's own mouth.
 
     This exists for one measured reason. Mining toward the LTC locktime died
@@ -1173,7 +1173,7 @@ def cltv_activation_height(node: SupportsCall, info: dict) -> tuple[int | None, 
     )
 
 
-def probe_capabilities(console: Console, config: ChainConfig, wallet: str = "") -> dict:
+def probe_capabilities(console: ConsoleLike, config: ChainConfig, wallet: str = "") -> dict:
     """Ask the daemon what it can do, instead of guessing from a version string.
 
     Returns a dict the later steps read, and prints every field, because the
@@ -1315,7 +1315,7 @@ def method_exists(node: RegtestRPC, method: str) -> bool:
     return not str(text).lower().startswith("help: unknown command")
 
 
-def ensure_wallet(console: Console, config: ChainConfig, wallet_name: str) -> str:
+def ensure_wallet(console: ConsoleLike, config: ChainConfig, wallet_name: str) -> str:
     """Load the named wallet, creating it if it is not there. Returns the name.
 
     Three RPCs in a deliberate order, because the daemons disagree about what
@@ -1403,7 +1403,7 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
-def stop_daemon(console: Console, config: ChainConfig, we_started_it: bool) -> None:
+def stop_daemon(console: ConsoleLike, config: ChainConfig, we_started_it: bool) -> None:
     """Ask the daemon to stop and then PROVE it is gone (rule 13).
 
     The pid is read BEFORE the stop request, because the daemon deletes its pid
@@ -1469,7 +1469,7 @@ def stop_daemon(console: Console, config: ChainConfig, we_started_it: bool) -> N
     )
 
 
-def wipe_datadir(console: Console, config: ChainConfig) -> None:
+def wipe_datadir(console: ConsoleLike, config: ChainConfig) -> None:
     """Delete the `regtest` subdirectory so a rerun starts from an empty chain.
 
     Only the `regtest` subdirectory, never the datadir itself: the datadir holds

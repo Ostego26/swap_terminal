@@ -63,9 +63,10 @@ import re
 import sys
 import textwrap
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import NamedTuple, TypedDict
+from typing import Any, NamedTuple, Protocol, TypedDict
 
 REPO_ROOT = Path(__file__).resolve().parent
 APP_ROOT = REPO_ROOT / "swap_terminal"
@@ -75,7 +76,7 @@ if str(APP_ROOT) not in sys.path:
 # All five imports are reachable only because of the sys.path line above;
 # hoisting them would break the import it enables. That is what the E402
 # suppressions claim and what a reader can check from these lines.
-from chains.solana import SolanaAdapter, SolanaRPCError  # noqa: E402
+from chains.solana import SolanaAdapter, SolanaRPCError, UnattributableCredit  # noqa: E402
 from chains.solana_address import (  # noqa: E402
     SOLANA_DEVNET_ACCOUNT,
     describe_address,
@@ -210,6 +211,113 @@ def print_banner(rpc: BannerSettings, address: str, address_why: str = "") -> No
         print(f"                  <- {address_why}", flush=True)
     print(f"  threshold       rank {rpc['min_commitment_rank']}  <- a RUNG on the commitment ladder, NOT blocks", flush=True)
     print(f"  database        {Config.DB_PATH}  <- echoed for the paste; this script does not open it", flush=True)
+
+
+class RpcCaller(Protocol):
+    """Anything that can make ONE JSON-RPC call and hand the result back.
+
+    WHY A PROTOCOL AND NOT SolanaAdapter. The functions below that take this
+    touch exactly one member of the adapter -- `call` -- and annotating them
+    `SolanaAdapter` was a promise none of them keeps: it said "give me the whole
+    adapter" when what they need is a transport, and it made the signature
+    unreadable as a statement of what the function reaches for. It also made
+    every test that drives them unannotatable: tests/test_solana_chain_check_units.py
+    stands in two classes that implement `call` and nothing else -- FakeAdapter
+    (9 lines, measured 2026-10-09), whose own docstring says "Only what
+    _network_line touches. Nothing here opens a socket.", and ScriptedAdapter
+    (20 lines). Both say in prose precisely what this Protocol says in types,
+    and until now the type checker had nothing to compare that claim against:
+    it refused both stubs at all 28 call sites instead.
+
+    A STUB THAT CARRIES ONLY WHAT IS NEEDED IS THE POINT, NOT A SHORTCUT. If one
+    of these functions grows a second adapter call, the stub fails loudly on the
+    attribute and this Protocol stops matching -- which is the cheap outcome. The
+    expensive one is a stub that inherits the real adapter and quietly answers
+    from the shipped code a test believed it had replaced.
+    """
+
+    def call(self, method: str, *params) -> Any: ...
+
+
+class SignatureCoverage(Protocol):
+    """The two counts coverage_clause() reconciles. Split out because it needs ONLY these.
+
+    DepositReader below is this plus three more, and coverage_clause() takes
+    THIS one. Annotating it with the wider Protocol would have been the same
+    over-promise this round exists to remove, one level down: measured
+    2026-10-09, coverage_clause()'s body touches `signatures_listed` and
+    `signatures_read` and nothing else, so anything else in its parameter type
+    is a demand it does not make. _deposits_line() still passes its own adapter
+    straight through, because DepositReader derives from this.
+
+    DERIVED RATHER THAN COPIED (rule 8). The two members are declared once, here,
+    and DepositReader inherits them -- two Protocols each spelling
+    `signatures_read` would agree on the day they were written and drift after.
+    """
+
+    @property
+    def signatures_listed(self) -> int: ...
+
+    @property
+    def signatures_read(self) -> int: ...
+
+
+class DepositReader(SignatureCoverage, Protocol):
+    """What _deposits_line() reads off the adapter, and nothing else.
+
+    FIVE MEMBERS -- the three declared below, plus SignatureCoverage's two,
+    because _deposits_line() calls coverage_clause() with the same adapter. The
+    reason they are LISTED rather than inherited FROM SolanaAdapter is in
+    tests/test_solana_chain_check_units.py::_DepositStub's own comment: "THE STUB
+    HAS TO CARRY EVERY ATTRIBUTE THE REAL ADAPTER EXPOSES, and this one was added
+    on 2026-10-01 -- a stub missing a new attribute fails loudly here, which is
+    the cheap outcome." That is a contract, it was being maintained by hand, and
+    this is it written down where a checker can hold it.
+
+    ALL FOUR DATA MEMBERS ARE READ-ONLY PROPERTIES -- the two here and
+    SignatureCoverage's two -- AND THAT IS NOT STYLE. A
+    plain class attribute satisfies a read-only property in a Protocol; the
+    reverse is not true, and TWO of these break if written the other way.
+    Measured 2026-10-09 by declaring each as a settable attribute and re-running
+    pyright over this file and tests/test_solana_chain_check_units.py:
+
+        signatures_read         3 errors. It IS a @property on SolanaAdapter
+                                (listed minus the ones getTransaction could not
+                                fetch), and a settable member cannot be
+                                satisfied by a read-only one -- so the REAL
+                                adapter would fail to match its own diagnostic's
+                                parameter type, at the _deposits_line() call in
+                                check_address().
+        unattributable_drops    21 errors. The adapter holds it as
+                                `list[UnattributableCredit]`, and a MUTABLE
+                                member is invariant: `list[X]` does not satisfy
+                                a settable `Sequence[X]`. Read-only makes it
+                                covariant, which is also the true claim --
+                                neither function here writes to it.
+
+    signatures_listed and min_commitment_rank are plain attributes on the
+    adapter and would survive either spelling. They are properties because
+    read-only is what these two functions actually need, and because one
+    exception in a list of four is a thing a reader has to stop and explain.
+
+    THE `/` ON find_deposits_to_address IS LOAD-BEARING, measured the same way:
+    17 errors without it, because _DepositStub names that parameter `_address`
+    and pyright requires a named positional's SPELLING to match. The one call
+    site here passes it positionally, so positional-only is both the fix and the
+    truer claim. The `*` before tx_limit is not strictly required -- 0 errors
+    without it -- but the call site passes tx_limit by keyword and nothing here
+    passes it positionally. The `= ...` is required in the other direction: an
+    implementation with no default for tx_limit does NOT satisfy this (probed
+    2026-10-09), which is correct, since the adapter and both stubs have one.
+    """
+
+    @property
+    def min_commitment_rank(self) -> int: ...
+
+    @property
+    def unattributable_drops(self) -> Sequence[UnattributableCredit]: ...
+
+    def find_deposits_to_address(self, address: str, /, *, tx_limit: int = ...) -> list[dict]: ...
 
 
 def check_cluster(adapter: SolanaAdapter, run) -> None:
@@ -1476,7 +1584,7 @@ MEMO_HUNT_PACING_SECONDS = 0.35
 MEMO_HUNT_TRANSACTION_VERSION = 1
 
 
-def call_with_backoff(adapter: SolanaAdapter, method: str, *params):
+def call_with_backoff(adapter: RpcCaller, method: str, *params):
     """One RPC call, retrying a rate limit, returning (result, throttled, reason).
 
     EXTRACTED FROM read_one_transaction() 2026-09-30, AND THE OPERATOR'S RUN IS WHY. That
@@ -1519,7 +1627,7 @@ def call_with_backoff(adapter: SolanaAdapter, method: str, *params):
     return None, True, "HTTP 429"
 
 
-def read_one_transaction(adapter: SolanaAdapter, signature: str):
+def read_one_transaction(adapter: RpcCaller, signature: str):
     """One getTransaction, retrying a rate limit and giving the two failures separate names.
 
     RETURNS (transaction, throttled, reason). Exactly one of the three is meaningful:
@@ -1563,7 +1671,7 @@ class OneIdResult(NamedTuple):
     parsed_shape: str
 
 
-def hunt_one_program_id(adapter: SolanaAdapter, program: str, entries: list, how_many: int) -> OneIdResult:
+def hunt_one_program_id(adapter: RpcCaller, program: str, entries: list, how_many: int) -> OneIdResult:
     """Read up to `how_many` of one Memo program id's transactions, printing as it goes.
 
     EXTRACTED FROM hunt_memo() 2026-09-30, because adding the throttle handling put that
@@ -1714,7 +1822,7 @@ def hunt_memo(adapter: SolanaAdapter, how_many: int) -> bool:
     return confirmed
 
 
-def _network_line(adapter: SolanaAdapter) -> str:
+def _network_line(adapter: RpcCaller) -> str:
     genesis = str(adapter.call("getGenesisHash"))
     # solana_cluster() rather than .get() with the sentence inline: swap_readiness.py
     # renders the same verdict, and a default spelled at two call sites is two
@@ -1927,7 +2035,7 @@ def _indented(records: list[str], indent: str = "      ",
     return "".join(lines)
 
 
-def _deposits_line(adapter: SolanaAdapter, address: str, limit: int,
+def _deposits_line(adapter: DepositReader, address: str, limit: int,
                    credited: list[int] | None = None) -> str:
     """What the deposit watcher would see, including what it would REFUSE to credit.
 
@@ -2027,7 +2135,7 @@ def _deposits_line(adapter: SolanaAdapter, address: str, limit: int,
     return "".join(lines)
 
 
-def coverage_clause(adapter: SolanaAdapter, limit: int) -> str:
+def coverage_clause(adapter: SignatureCoverage, limit: int) -> str:
     """How much of the window was actually read, as one sentence. ONE COPY, used by two branches.
 
     IT EXISTED IN ONLY ONE OF THEM UNTIL 2026-10-01, and the missing one was the branch that

@@ -1271,8 +1271,27 @@ def host_of(url_or_authority: str) -> str:
     return authority.rsplit(":", 1)[0] if ":" in authority else authority
 
 
-def refuse_a_cross_origin_post(headers, port: int) -> str:
+def refuse_a_cross_origin_post(headers) -> str:
     """"" if this POST may proceed, else why not. THE defense against a web page driving this.
+
+    THERE IS NO PORT PARAMETER AND THERE MUST NOT BE ONE. It had one from the commit that
+    wrote this function (5d711d1) until 2026-10-09, and no line of the body ever read it:
+    the two checks read `Origin` and `Host`, and `host_of()` strips the port off both before
+    comparing. The caller was passing `self.server.server_address[1]` into nothing.
+
+    AND A PORT CHECK WOULD BREAK THE REMOTE WORKFLOW THIS PANEL ITSELF DOCUMENTS, which is
+    why the parameter is gone rather than wired up to look useful. assert_loopback_only()
+    below refuses any other bind and tells the operator "forward the port over ssh" --
+    under `ssh -L 9999:127.0.0.1:8765` the browser connects to 127.0.0.1:9999, so the Host
+    header carries 9999 while this process is bound to 8765. Comparing them would refuse
+    the one documented way to reach this page from another machine, and the refusal would
+    read as the DNS-rebinding message -- a correct request reported as an attack.
+
+    THE PORT IS NOT WHAT MAKES THIS SAFE EITHER, which is the reason the omission is not a
+    gap. A page that can reach 127.0.0.1:8765 at all already knows the port; what it cannot
+    do is present a loopback Origin it does not have, or a loopback Host while pointing a
+    rebound name at this process. The sibling defense,
+    services/kill_switch.refuse_cross_origin(), takes no port for the same reason.
 
     THE HOLE THIS CLOSES, and it is a real one rather than a formality. This panel binds
     loopback so nothing on the network can reach it -- but the operator's own BROWSER can, and
@@ -2039,7 +2058,12 @@ def build_handler(run: funding_steps.Run, runner: HarnessRunner, page: str,
             self._send(code, body, content_type)
 
         def do_POST(self) -> None:
-            refusal = refuse_a_cross_origin_post(self.headers, self.server.server_address[1])
+            # NO PORT IS PASSED: the guard reads Origin and Host, and a port check would
+            # refuse the `ssh -L` route this panel tells the operator to use. See the
+            # function. `self.server.server_address[1]` also does not type-check --
+            # socketserver declares that address as a str-or-buffer union -- so the dead
+            # argument was costing two pyright errors to compute a value nothing read.
+            refusal = refuse_a_cross_origin_post(self.headers)
             if not refusal and "json" not in (self.headers.get("Content-Type") or ""):
                 # THE THIRD LOCK. `application/json` cannot be sent by a browser's simple form
                 # POST -- it forces a CORS preflight, which this server never answers -- so a

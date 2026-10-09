@@ -70,7 +70,14 @@ class Stub:
     # and what answers ruff's RUF012 honestly: a set on a class IS shared mutable
     # state, and saying so is better than a noqa claiming nobody mutates it.
     ALLOWED_PAIRS: ClassVar[set[tuple[str, str]]] = {("BTC", "GRC"), ("GRC", "BTC")}
-    DEFAULT_FEE_BPS = 150
+    # ClassVar[int] AND NOT A BARE `150`, which is the one line of this stub that is
+    # not obvious. icp_operator_admin.PostureSource declares DEFAULT_FEE_BPS a
+    # ClassVar[int]; a ClassVar is INVARIANT because it is mutable, and a bare
+    # assignment here infers Literal[150], so pyright 1.1.414 refuses the stub with
+    # "Literal[150] is not assignable to int" -- the stub would be rejected for
+    # being too SPECIFIC about a value the test then asserts on. Measured, not
+    # guessed; the bare form was run first.
+    DEFAULT_FEE_BPS: ClassVar[int] = 150
     BTC_MIN_CONFIRMATIONS = 2
     GRC_MIN_CONFIRMATIONS = 6
     # Lowercase and non-threshold attributes must be ignored by the derivation.

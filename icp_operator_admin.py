@@ -68,6 +68,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from typing import ClassVar, Protocol
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
@@ -89,7 +90,56 @@ CANISTER = "operator_admin"
 CONFIRMATION_SUFFIX = "_MIN_CONFIRMATIONS"
 
 
-def configured_assets(config=Config) -> list[str]:
+class PostureSource(Protocol):
+    """What a `config` has to declare to be seeded from. THE PARAMETER'S REAL TYPE.
+
+    `type[Config]` is what these two functions promised -- not in writing, which is
+    part of why it went unnoticed: the parameter was `config=Config` with no
+    annotation at all, so a checker inferred the whole class from the default. And
+    it is an over-promise. Measured 2026-10-09, Config is 973 lines declaring 24
+    uppercase members -- the database path, the secret key, every RPC endpoint, the
+    quote TTL -- and the seed reads TWO of them by name plus one derived family. A
+    signature naming the whole class refuses any stand-in that is not that class,
+    so the only way to type-check tests/test_operator_admin_seed.py's Stub would
+    have been to make it inherit from Config -- and that is the one thing it must
+    not do.
+
+    MEASURED, not argued (2026-10-09, by running it rather than reading it):
+    `class StubSubclass(Config)` with the same two chains declared on it makes
+    configured_assets() return
+
+        ['BTC', 'GRC', 'ICP', 'LTC', 'SOL', 'XRP']
+
+    instead of ['BTC', 'GRC'], because the derivation is `dir(config)` and
+    inheritance hands it the real config's six thresholds. seed_posture() then
+    reports six confirmations for a two-chain stub.
+    test_the_threshold_assets_are_derived_and_not_listed goes red. The stub exists
+    to fail loudly when this file reaches for something new; inheritance replaces
+    that with the shipped Config quietly answering, which is the same class of
+    defect as a blind `except Exception` returning a plausible value.
+
+    THE `<ASSET>_MIN_CONFIRMATIONS` MEMBERS ARE DELIBERATELY ABSENT, and that is
+    the point of the file rather than an omission. They are reached through
+    `dir()` and `getattr()` -- see CONFIRMATION_SUFFIX above -- and that reach IS
+    the derivation. Spelling BTC/LTC/GRC/SOL/XRP/ICP here would be a second list of
+    the chain vocabulary, in the one place most likely to be forgotten when a chain
+    is added (rule 8), and it would be a list no checker could even hold up against
+    the dynamic lookup it claims to describe.
+
+    ClassVar ON BOTH MEMBERS IS MANDATORY, not decoration: these are read off the
+    CLASS (`type[PostureSource]`, never an instance -- Config is never
+    instantiated), and pyright 1.1.414 refuses a plain annotation with
+    "ALLOWED_PAIRS is not defined as a ClassVar in protocol" and a @property with
+    "a property defined within a protocol class cannot be accessed as a class
+    variable". Both variants were run before this was written.
+    """
+
+    ALLOWED_PAIRS: ClassVar[set[tuple[str, str]]]
+    DEFAULT_FEE_BPS: ClassVar[int]
+
+
+
+def configured_assets(config: type[PostureSource] = Config) -> list[str]:
     """Every asset `config` declares a confirmation threshold for, sorted.
 
     SORTED so the generated command is byte-identical across runs. An unordered
@@ -104,7 +154,7 @@ def configured_assets(config=Config) -> list[str]:
     )
 
 
-def seed_posture(config=Config) -> dict:
+def seed_posture(config: type[PostureSource] = Config) -> dict:
     """The posture to install, read out of `config`. THE DERIVATION, as a function.
 
     `config` IS A PARAMETER so a test can hand in a stand-in and assert on the

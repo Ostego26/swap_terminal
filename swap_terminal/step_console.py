@@ -63,8 +63,81 @@ not.
 from __future__ import annotations
 
 import time
+from typing import Protocol
 
 from microfortnights import format_duration
+
+
+class StepNarrator(Protocol):
+    """A console a helper may only SAY lines through. One method, because some bodies use one.
+
+    WHY THESE PROTOCOLS EXIST, AND IT IS NOT A STYLE PREFERENCE. Most functions
+    handed a Console only `say()` a line and `check()` an assertion. Declaring
+    `Console` for those OVER-PROMISES: it says "I may banner, step, summarize and
+    read your stopwatch" when the body does none of it, and a reader has to read
+    the body to find out which. The cost showed up as 19 pyright errors on
+    2026-10-09 -- every one of them a test recorder that implements exactly the
+    methods its caller uses being refused by a signature naming a class with six.
+
+    The fix is NOT to make those recorders subclass Console. Their whole value is
+    failing loudly the day a production function reaches for something new;
+    inheriting would have the shipped Console answer instead, silently, and
+    `_QuietConsole` -- whose entire contract is "says nothing" -- would inherit
+    three methods that print.
+
+    WHY THIS IS SPLIT FROM StepReporter RATHER THAN ONE PROTOCOL WITH BOTH, and it
+    was MEASURED rather than reasoned: annotating xrp_balances.
+    _sequence_from_the_creating_tx -- which only ever says lines -- as the
+    two-method protocol turned 19 pyright errors into 7 NEW ones, because
+    tests/test_xrp_balances.py's `_CountingConsole` implements `say` and nothing
+    else. A Protocol that promises more than its caller uses is the same defect
+    this file is fixing, one level down, and it fails the same way.
+
+    THERE IS NO THIRD PROTOCOL FOR `check` ALONE even though two functions in
+    atomic_swap_xrp.py use only that one (`_pinned_chain_amount`,
+    `_rated_chain_amount`). Both are reached through resolve_chain_amount(), which
+    hands the SAME console to a sibling that needs both, so the narrower type
+    could never be the parameter there -- and no stub in the tree implements
+    `check` without `say`, so the name would have no reader. Split a Protocol when
+    a caller needs less AND something can supply less; a split nothing can use is
+    surface for its own sake.
+
+    POSITIONAL-ONLY (`/`) IS LOAD-BEARING AND WAS MEASURED, not chosen for taste.
+    pyright matches parameter NAMES for a normal parameter, so a recorder written
+    `def say(self, *_args, **_kwargs)` does not satisfy `say(self, text: str)`, and
+    a recorder that names the parameter `line` instead of `text` does not either.
+    Both spellings exist in tests/ today. `/` is also the TRUER claim: every
+    production call site in this tree passes these positionally.
+    """
+
+    def say(self, text: str, /) -> None: ...
+
+
+class StepReporter(StepNarrator, Protocol):
+    """Say a line and check an assertion. What most helpers handed a console use.
+
+    See StepNarrator above for why these are protocols at all, why a stub must
+    never subclass Console, and why the parameters are positional-only.
+
+    `ok: bool` HERE AGAINST `ok: object` ON Console.check, DELIBERATELY. The
+    concrete method takes `object` so it can REFUSE a non-bool at runtime -- see
+    its docstring for the regtest/console.py collision that earns the refusal --
+    and a parameter type is contravariant, so a method accepting `object` already
+    satisfies a protocol promising only `bool`. Verified against pyright 1.1.414
+    rather than assumed. The Protocol states what an honest caller passes; the
+    implementation states what it will physically accept and then rejects the
+    rest. Loosening this to `object` would hand every caller written against the
+    Protocol permission to pass the truthy FAIL string the guard exists to catch.
+
+    NAMED `StepReporter` AND THERE IS NO SECOND NAME FOR IT. Two independent
+    designs of this protocol were written the same day, one called `StepReporter`
+    and one `StepConsole`, with identical members. Landing both would be rule 8's
+    defect created on purpose -- two copies of one rule, agreeing on the day they
+    are written and drifting from then on. One survives and owns the concept; if
+    you arrive here holding the name `StepConsole`, this is the thing you meant.
+    """
+
+    def check(self, label: str, got: object, expected: object, ok: bool, /) -> bool: ...
 
 
 class Console:
@@ -72,6 +145,10 @@ class Console:
 
     See this module's header for why it is shared and why regtest/console.py is
     not merged into it.
+
+    It satisfies StepReporter above, which is what most of its callers should
+    declare: a function that only says lines and checks assertions has no business
+    naming a class that also owns the step count and the stopwatch.
     """
 
     def __init__(self, total_steps: int = 9) -> None:

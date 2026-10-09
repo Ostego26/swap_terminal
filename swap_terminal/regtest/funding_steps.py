@@ -90,7 +90,7 @@ import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple, Protocol
 
 import base58
 from chains.base import RPCError
@@ -107,7 +107,7 @@ from modules.htlc_spend import (
 )
 from modules.htlc_timelock import SECONDS_PER_BLOCK
 from regtest import daemons
-from regtest.console import FAIL, OK, SKIP, XFAIL, Console
+from regtest.console import FAIL, OK, SKIP, XFAIL, ConsoleLike
 from regtest.daemons import ChainConfig, RegtestSetupError, adapter_for
 from regtest.keys import RegtestKey, key_from_seed
 from regtest.txbuild import push_data
@@ -273,13 +273,97 @@ GRC_ENV = {
 GRC_MAINNET_PORT = 15715
 
 
+# WHAT A FUNCTION NEEDS OFF A RUN, DECLARED AS WHAT IT CALLS RATHER THAN AS `Run` ITSELF.
+#
+# THE DEFECT THESE EXIST FOR is a typing one rather than a live one, and it is the shape this
+# tree keeps hitting: a signature that over-promises. Fourteen call sites in
+# tests/test_operator_panel.py hand `payment_rows` and `call_read_only` a stub with four members
+# -- `asset`, `say`, `node`, `call` -- because that is everything those two functions touch.
+# Declaring the parameter `Run` made every one of them a type error, and `Run` is a dataclass
+# carrying a Console, a ChainConfig, a wallet, six more fields and seven more methods. None of
+# the ways to quiet that are acceptable: `cast()` and a widening to `object` stop the call being
+# checked at all, and making the stub subclass `Run` replaces "this test fails loudly the day
+# the function reaches for something new" with the shipped code quietly answering instead --
+# measured in a sibling bucket, where subclassing the real class made a derivation test return
+# six assets instead of two.
+#
+# A Protocol says the true thing: these functions do not need a run, they need a node to ask,
+# and two of them also need a name to print and somewhere to print it. `Run` satisfies them by
+# shape with no change to `Run` and no declaration anywhere that it does -- so nothing on the
+# live path moved to make a checker happy.
+#
+# SPLIT IN TWO BECAUSE ONE CALLER NEEDS STRICTLY LESS, and that was measured rather than tidied.
+# `call_read_only` (regtest/operator_panel.py) reaches only `run.node().call(...)`, and its own
+# stub has no `asset` and no `say` at all. The single-Protocol version was written first and
+# FAILED on exactly that stub: a Protocol that names more than the function calls is the same
+# defect as a parameter that names more than the function calls, one level down.
+
+
+class ReadsAChain(Protocol):
+    """A chain node something can be asked. One method, because that is the whole of it here.
+
+    `RegtestRPC.call()` is what satisfies this in production (regtest/daemons.py:417) and a
+    test's own `call(self, method, *params)` is what satisfies it in the suite.
+
+    POSITIONAL-ONLY ON `method`, and that is not decoration: every call site in this file and
+    in the panel passes the method name positionally, while the stubs spell the parameter
+    whatever they like -- one of them calls its text parameter `line` rather than `text`. A
+    Protocol with a named parameter requires the NAME to match, so `/` is both the truer claim
+    about the contract and the only spelling the real call sites satisfy.
+
+    `Any` for the parameters and the result rather than a union of every JSON shape six daemon
+    families return. Each caller already checks what it got -- `_decoded` tries three routes and
+    `isinstance`-checks the answer -- and narrowing it here would be a claim about those
+    surfaces that nothing in this tree has measured (rule 17).
+    """
+
+    def call(self, method: str, /, *params: Any) -> Any: ...
+
+
+class HasAChainNode(Protocol):
+    """All call_read_only() reaches off a run: one node, one call.
+
+    `current_height()` and the panel's `_tip_or_none()` want exactly this much too: one
+    `getblockcount` and nothing else. They are declared with it rather than with
+    `ChainReadingRun` for the reason the split exists at all -- a function that neither names
+    its asset nor prints a line must not require a caller to supply either.
+
+    `wallet: bool = ...` because the default's VALUE is the implementation's business; what the
+    contract says is that the argument may be left off. `Run.node()` defaults it True.
+    """
+
+    def node(self, wallet: bool = ...) -> ReadsAChain: ...
+
+
+class ChainReadingRun(HasAChainNode, Protocol):
+    """What the funding walk adds: the asset's name, and a line to print.
+
+    One Protocol for the whole walk -- `payment_rows` -> `find_operator_funding` /
+    `find_the_spender` / `_decoded` -- because `payment_rows` passes the SAME object through to
+    all of them, so a per-function split would buy a caller nothing and cost four names. The
+    split that was measured to be necessary is the one above it, not one inside it.
+
+    `asset` is a `@property` because `Run.asset` is one. A Protocol's plain attribute would be
+    writable and `Run.asset` is not, so the claim has to be the weaker one; a test stub's plain
+    class attribute still satisfies a read-only property, and every stub in the suite uses one.
+    """
+
+    @property
+    def asset(self) -> str: ...
+
+    def say(self, text: str, /) -> None: ...
 
 
 @dataclass
 class Run:
     """One chain's run: where to reach it, what to print to, and what it can do."""
 
-    console: Console
+    # ConsoleLike AND NOT Console: operator_panel.py assigns a SaysEachLineOnce
+    # wrapper into this field, and this walk reaches exactly four members off it --
+    # say, elapsed, step, check, counted by grep over this file. The concrete class
+    # has six. See regtest/console.ConsoleLike for why the wrapper must not simply
+    # subclass Console, and for why this protocol is NOT step_console.StepReporter.
+    console: ConsoleLike
     config: ChainConfig
     wallet: str
     capabilities: dict = field(default_factory=dict)
@@ -633,11 +717,17 @@ def _exercise_input_selection(run: Run) -> None:
     )
 
 
-def current_height(run: Run) -> int:
+def current_height(run: HasAChainNode) -> int:
     """The chain tip. Public because the entry point needs it between the two locks.
 
     A BLOCK HEIGHT, never rendered in microfortnights (rule 6): a block is not 1.2096
     seconds long, it is however long it took.
+
+    `HasAChainNode` AND NOT `Run`, because one `getblockcount` is the entire body. The
+    panel's `_tip_or_none()` calls this with the same object `payment_rows()` was handed,
+    which in the suite is a four-member stub; requiring a `Run` here would push that
+    over-promise one call deeper instead of removing it. Every existing caller passes a real
+    `Run`, which satisfies this by shape.
     """
     return int(run.node(wallet=False).call("getblockcount"))
 
@@ -1497,7 +1587,7 @@ def _send_to_self(run: Run, key: RegtestKey, coin: str) -> chain.Outpoint:
     return chain.Outpoint(txid=txid, vout=vout, value_satoshis=value)
 
 
-def _decoded(run: Run, txid: str) -> dict:
+def _decoded(run: ChainReadingRun, txid: str) -> dict:
     """The daemon's own decoding of a transaction, by whichever route answers.
 
     The DAEMON decodes it rather than htlc_spend.parse_transaction(), for the reason
@@ -1506,6 +1596,12 @@ def _decoded(run: Run, txid: str) -> dict:
     carries a segwit serialization that parser cannot read and says so. The 2-of-2 spends
     this harness builds have no witness and are parsed in process; a WALLET transaction is
     not.
+
+    `ChainReadingRun` RATHER THAN `Run`, and it is the walk's Protocol rather than a fourth
+    one naming node-and-asset exactly: this reads `run.node()` and `run.asset` and never
+    says a line, but its only caller that is not already holding a `Run` is
+    `find_operator_funding`, which IS a `ChainReadingRun`. A Protocol per function would be
+    four names for one object that is passed straight through (rule 8 points the other way).
     """
     node = run.node()
     attempts = []
@@ -2142,7 +2238,7 @@ def _spender_of_the_payment(run: Run, key: RegtestKey, txid: str, confirmations)
     return spender
 
 
-def find_operator_funding(run: Run, key: RegtestKey, txid: str) -> chain.Outpoint:
+def find_operator_funding(run: ChainReadingRun, key: RegtestKey, txid: str) -> chain.Outpoint:
     """The output of `txid` that pays `key.address`, read off the chain.
 
     WHY THE OPERATOR HAS TO NAME THE TXID. `listunspent` returns the WALLET's outputs, and this
@@ -2155,6 +2251,9 @@ def find_operator_funding(run: Run, key: RegtestKey, txid: str) -> chain.Outpoin
     THE VOUT IS FOUND, NEVER ASSUMED. A GUI send puts the payment and the change in whichever
     order it likes -- _send_to_self() carries the same warning about sendtoaddress for the same
     reason -- and assuming 0 would have the harness signing over the operator's change.
+
+    `run: ChainReadingRun` rather than `Run` -- a node to read, the asset's name for the
+    refusal, and a line to print is all of it. See the Protocol's own comment above `Run`.
     """
     decoded = _decoded(run, txid)
     wanted = key.p2pkh_script.hex()
@@ -2229,7 +2328,7 @@ def spender_in_block(block: dict, txid: str, vout: int) -> str | None:
     return None
 
 
-def find_the_spender(run: Run, source: chain.Outpoint,
+def find_the_spender(run: ChainReadingRun, source: chain.Outpoint,
                      max_depth: int = MAX_SPEND_SCAN_BLOCKS) -> tuple[str | None, str]:
     """Walk the chain backward from the tip looking for whatever spent `source`. Reads only.
 
@@ -2257,6 +2356,9 @@ def find_the_spender(run: Run, source: chain.Outpoint,
     caller proceeds exactly as it did before this existed -- a diagnostic must not become a gate
     of its own. The description is always non-empty for the same reason `mempool_answer`'s is:
     "no spender found" and "the scan did not happen" are different facts (rule 14).
+
+    `run: ChainReadingRun` rather than `Run`: one node, read-only, and the progress lines
+    rule 14 requires of a walk this long. See the Protocol's own comment above `Run`.
     """
     node = run.node(wallet=False)
     try:

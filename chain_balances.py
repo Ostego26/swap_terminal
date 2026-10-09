@@ -68,7 +68,15 @@ from services.wallet_leveling import (
     moves_to,
     peg_findings,
 )
-from step_console import Console
+
+# Console is what main() builds: it owns the step count, the banner and the summary.
+# StepNarrator (say) and StepReporter (say + check) are what the helpers below declare,
+# each naming only what its own body calls. Declaring the concrete class in a function
+# that uses two of its six members over-promises, and the bill arrives as a test recorder
+# implementing exactly those two being refused -- 19 pyright errors on 2026-10-09, every
+# one that shape. The reasoning, the positional-only `/` and why no stub may subclass
+# Console are in step_console.StepNarrator's own docstring.
+from step_console import Console, StepNarrator, StepReporter
 
 # Every chain this can report, in the order it reports them. Derived from the
 # allowlist rather than spelled again: a chain that has no test-network
@@ -80,7 +88,7 @@ CHAINS = tuple(sorted(CHAIN_TEST_NETWORKS))
 NOTHING_TO_LOOK_AT = 3
 
 
-def adapter_from_conf(console: Console, chain: str):
+def adapter_from_conf(console: StepNarrator, chain: str):
     """An adapter built from this chain's own conf, or None with the reason said.
 
     THE ENVIRONMENT STILL WINS. This runs only for a chain Config.RPC does not
@@ -239,7 +247,7 @@ def shadow_note(bare: float, whole: float | None, unreadable: str, chain: str) -
     ]
 
 
-def _say_amounts(console: Console, chain: str, adapter, spendable: float) -> float | None:
+def _say_amounts(console: StepNarrator, chain: str, adapter, spendable: float) -> float | None:
     """Print every amount this wallet holds. Returns the whole-wallet figure, or None.
 
     EXTRACTED FROM report_chain() 2026-10-08, when the shadowed-balance alarm put it
@@ -290,7 +298,7 @@ def _say_amounts(console: Console, chain: str, adapter, spendable: float) -> flo
     return whole
 
 
-def report_chain(console: Console, chain: str, adapters: dict) -> Decimal | None:
+def report_chain(console: StepReporter, chain: str, adapters: dict) -> Decimal | None:
     """One chain's holdings, and its spendable amount. None if it could not be read.
 
     RETURNS THE AMOUNT RATHER THAN A BOOLEAN since 2026-09-29, because the
@@ -354,7 +362,7 @@ def report_chain(console: Console, chain: str, adapters: dict) -> Decimal | None
     return Decimal(str(spendable if whole is None else whole))
 
 
-def say_what_levels_them(console: Console, held: dict, target: str, *, even: bool) -> None:
+def say_what_levels_them(console: StepReporter, held: dict, target: str, *, even: bool) -> None:
     """Price every wallet, check the dollar, and print the moves. Nothing is sent.
 
     THE VALUES ARE NOTIONAL AND THAT IS SAID FIRST, not in a footnote. A regtest
