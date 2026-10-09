@@ -179,6 +179,44 @@ def comparability(derived: str, today: str) -> tuple[str, str]:
     return "differs", f"both P2PKH on {today_network}, and they are different addresses"
 
 
+def networks_for(rpc: dict) -> dict[str, str]:
+    """Which network each P2PKH chain's address is derived against. THE decision.
+
+    EXTRACTED FROM main() ON 2026-10-09, AND THE EXTRACTION IS THE POINT RATHER
+    THAN TIDINESS. This was one line inside a sixty-line orchestration, which is
+    rule 10's defect exactly: the only way to exercise it was to run the whole
+    tool, so the test written for it tested `expected_network()` directly instead
+    -- and PASSED against the broken version, which never called that function at
+    all. The mutation caught the test, not the code. A decision that cannot be
+    called with seeded inputs is a decision nothing can be wrong about.
+
+    WHAT IT REPLACED, and it had never worked:
+
+        network = Config.NETWORK if hasattr(Config, "NETWORK") else "testnet"
+
+    config.Config has no NETWORK attribute and nothing in the tree sets one, so
+    the hasattr was always False and the value was always the literal "testnet",
+    for every chain. It reads as "respects the configured network, defaulting to
+    testnet" -- a sentence about a setting that does not exist.
+
+    The cost was not cosmetic. `network` picks the version byte
+    (modules/pubkey_address.P2PKH_VERSION_FOR, keyed (asset, network): GRC mainnet
+    0x3E, GRC testnet 0x6F), so on a host with GRC on 15715 and LTC on 9332 --
+    both MAINNET ports -- all three chains derived the SAME testnet address from
+    one key, comparability() reported "different networks", and every row came
+    back n/a with nothing on screen saying why.
+
+    TESTNET WHEN IT IS NOT ESTABLISHED, and that direction is deliberate.
+    expected_network() answers None for an unconfigured port AND for an
+    unrecognized one -- its own docstring refuses to call a mainnet daemon on a
+    custom -rpcport "not mainnet". Guessing MAINNET would print an address in the
+    format an operator might FUND; these are derivations of a local dfx_test_key
+    that controls nothing on any real chain, so a visibly throwaway address is the
+    cheaper way to be wrong.
+    """
+    return {asset: expected_network(asset, rpc) or TESTNET for asset in _P2PKH_CHAINS}
+
+
 def main() -> int:
     """Announce the target first, then print both columns. Rule 14 throughout."""
     canister_id = os.environ.get(_CANISTER_VARIABLE, "")
@@ -237,7 +275,7 @@ def main() -> int:
     # caller read generically only as a Mapping. Same entries, same objects: it
     # reads one port per asset and nothing else.
     table = dict(Config.RPC)
-    networks = {asset: expected_network(asset, table) or TESTNET for asset in _P2PKH_CHAINS}
+    networks = networks_for(table)
 
     print("canister threshold key vs the desk's current addresses -- READ ONLY, nothing is changed")
     print(f"  canister   {canister_id or f'(unset -- export {_CANISTER_VARIABLE})'}")

@@ -80,6 +80,7 @@ from correct_payout_amounts import (
     NOT_ASKED,
     REFUSE,
     SKIP,
+    Correction,
     _footer,
     _summary_line,
     apply_correction,
@@ -1347,3 +1348,43 @@ def test_every_chain_this_terminal_can_quantize_for_can_also_be_READ_BACK():
         f"only quantized: {sorted(set(QUANTIZERS) - set(READERS))}; only readable: "
         f"{sorted(set(READERS) - set(QUANTIZERS))}"
     )
+
+
+def test_a_SKIP_plan_is_refused_before_the_write_rather_than_writing_NULL(tmp_path):
+    """apply_correction() has no guard of its own, and the one four hundred lines away.
+
+    MEASURED AGAINST A REAL TABLE, NOT REASONED ABOUT: with `plan.corrected` in the
+    UPDATE, handing this function a SKIP plan EXECUTES the statement and leaves
+    payouts.amount reading NULL, and only then does anything raise. A payout row
+    whose amount is NULL is worse than one with the wrong number -- it is a row no
+    later reader can reconcile at all, in the tool whose whole job is reconciling
+    them.
+
+    UNREACHABLE TODAY AND THAT IS WHY IT IS A TEST RATHER THAN A FIX TO A LIVE BUG.
+    main():953 skips every non-CORRECT verdict before calling this. But that guard
+    is four hundred lines away and one call frame out, apply_correction() has none
+    of its own, and the invariant it relies on -- "corrected is None for exactly
+    the verdicts that write nothing" -- lived only in prose until
+    Correction.figure_to_write() stated it as code.
+
+    THE SECOND CALLER IS THE ONE THIS IS FOR. Nothing stops a later tool, or a
+    retry path, from calling apply_correction() directly; the refusal is now where
+    the write is instead of where today's only caller happens to be.
+    """
+    db_path = seeded(tmp_path)
+    with db_session(str(db_path)) as db:
+        row = dict(db.execute("SELECT p.*, s.status AS swap_status FROM payouts p "
+                              "JOIN swaps s ON s.id = p.swap_id WHERE p.id = 3").fetchone())
+        before = row["amount"]
+        skip = Correction(verdict=SKIP, recorded=before, corrected=None,
+                          authority="a test", why="this verdict writes nothing")
+
+        with pytest.raises(ValueError) as raised:
+            apply_correction(db, row, skip)
+
+    assert SKIP in str(raised.value), "the refusal must name the verdict it was handed"
+    assert amounts(db_path)[3] == before, (
+        f"payouts.id=3 was {before} and now reads {amounts(db_path)[3]!r} -- a SKIP plan reached "
+        f"the UPDATE, which is the NULL this refusal exists to prevent"
+    )
+    assert audit_rows(db_path) == [], "and no audit row for a correction that did not happen"

@@ -27,6 +27,11 @@ from __future__ import annotations
 import inspect
 
 import pytest
+from modules.address_authority import expected_network
+from modules.address_network import MAINNET, TESTNET
+from modules.pubkey_address import address_from_public_key
+from network_target import UNCONFIGURED_PORT
+from regtest.keys import generate_key
 from valid_addresses import base58_testnet, bech32_address
 
 import icp_custody_addresses as subject
@@ -218,3 +223,110 @@ def test_the_hrp_table_is_not_reimplemented_here():
             f"bech32 looks like instead of asking modules/address_network -- the module that owns "
             f"the table, and that was missing 'rltc' until 2026-09-27"
         )
+
+
+# ---------------------------------------------------------------------------
+# THE NETWORK EACH CHAIN'S ADDRESS IS DERIVED AGAINST, which was one value for
+# all three until 2026-10-09 because it read a setting that does not exist.
+
+
+def test_each_chain_derives_against_the_network_its_own_port_names(monkeypatch):
+    """THE DEFECT: `Config.NETWORK` has never existed, so `hasattr` was always False.
+
+        network = Config.NETWORK if hasattr(Config, "NETWORK") else "testnet"
+
+    config.Config has no NETWORK attribute and nothing in the tree sets one, so
+    that expression returned the literal "testnet" every time it ran, for every
+    chain. It READS as "respects the configured network, defaulting to testnet" --
+    a sentence about a setting that is not there.
+
+    IT MATTERS BECAUSE `network` PICKS THE VERSION BYTE.
+    modules/pubkey_address.P2PKH_VERSION_FOR is keyed (asset, network): GRC
+    mainnet is 0x3E and GRC testnet is 0x6F. Measured on a host with GRC on 15715
+    and LTC on 9332 -- both MAINNET ports -- and BTC on 18443:
+
+        BTC  movVRv8XgK7DYx8y4Md2qx534HRXzjZbo8
+        LTC  movVRv8XgK7DYx8y4Md2qx534HRXzjZbo8   <- the same address
+        GRC  movVRv8XgK7DYx8y4Md2qx534HRXzjZbo8   <- the same address
+
+    Three identical testnet addresses for three different chains. comparability()
+    then reported "different networks" and every row came back n/a, with nothing
+    on screen saying why -- the "0 of 3 rows were an actual comparison" outcome.
+
+    THE MUTATION THIS CATCHES is a return to one network for all three: the old
+    expression gives TESTNET for GRC here, and the first assertion fails.
+
+    SEEDED THROUGH Config.RPC AND DRIVEN THROUGH networks_for(), WHICH IS THE
+    WHOLE POINT AND WHICH I GOT WRONG FIRST. The original version of this test
+    called expected_network() directly and PASSED against the broken code -- which
+    never called that function at all. Reinstating `Config.NETWORK` produced zero
+    failures, so the mutation caught the test rather than the code. The decision
+    had to come out of main() before anything could assert on it (rule 10).
+    """
+    monkeypatch.setitem(subject.Config.RPC["GRC"], "port", 15715)   # GRC mainnet
+    monkeypatch.setitem(subject.Config.RPC["BTC"], "port", 18443)   # BTC regtest
+    monkeypatch.setitem(subject.Config.RPC["LTC"], "port", 9332)    # LTC mainnet
+
+    networks = subject.networks_for(dict(subject.Config.RPC))
+
+    assert networks == {"BTC": TESTNET, "LTC": MAINNET, "GRC": MAINNET}, (
+        f"each chain derives against the network its OWN port names, and these three do not "
+        f"agree; got {networks}"
+    )
+    assert len(set(networks.values())) > 1, (
+        "one value for all three IS the defect -- that is what Config.NETWORK's always-False "
+        "hasattr produced, and a test that cannot tell three-the-same from three-correct is "
+        "the one I wrote first"
+    )
+
+
+def test_the_three_version_bytes_are_not_the_same_byte(monkeypatch):
+    """The consequence, asserted on the ADDRESSES rather than on the network names.
+
+    A network name is an intermediate value; what reached the operator's screen was
+    three identical strings. This derives all three from ONE public key -- so any
+    difference between the outputs is the version byte and nothing else -- and
+    requires the mainnet-configured chain to land somewhere different from the
+    regtest-configured one.
+
+    THE SHARED KEY IS THE CONTROL. Three different keys would produce three
+    different addresses whatever the version byte did, and this test would pass
+    against the broken code.
+    """
+    monkeypatch.setitem(subject.Config.RPC["GRC"], "port", 15715)   # mainnet
+    monkeypatch.setitem(subject.Config.RPC["BTC"], "port", 18443)   # regtest
+
+    networks = subject.networks_for(dict(subject.Config.RPC))
+    public_key = generate_key().public_key
+    grc = address_from_public_key(public_key, "GRC", networks["GRC"])
+    btc = address_from_public_key(public_key, "BTC", networks["BTC"])
+
+    assert grc != btc, (
+        f"one public key derived the same address on a MAINNET-configured GRC daemon and a "
+        f"REGTEST-configured BTC daemon ({grc}) -- which is the defect exactly: one network "
+        f"for every chain"
+    )
+    assert grc.startswith("S"), f"GRC mainnet P2PKH starts with S, got {grc}"
+    assert btc[0] in "mn", f"BTC testnet P2PKH starts with m or n, got {btc}"
+
+
+def test_an_unconfigured_port_falls_back_to_testnet_rather_than_guessing_mainnet(monkeypatch):
+    """The direction of the fallback, which is a safety choice and not an accident.
+
+    expected_network() answers None for an UNCONFIGURED port and for an
+    UNRECOGNIZED one -- its own docstring refuses to call a mainnet daemon on a
+    custom -rpcport "not mainnet". The caller turns None into TESTNET.
+
+    That direction is deliberate and this pins it: guessing MAINNET would print an
+    address in the format an operator might FUND, and these are derivations of a
+    local dfx_test_key that controls nothing on any real chain. Guessing testnet
+    prints one that is visibly throwaway. It is the cheaper way to be wrong.
+    """
+    monkeypatch.setitem(subject.Config.RPC["GRC"], "port", UNCONFIGURED_PORT)
+    table = dict(subject.Config.RPC)
+
+    assert expected_network("GRC", table) is None, "an unconfigured port establishes nothing"
+    assert subject.networks_for(table)["GRC"] == TESTNET, (
+        "and the fallback must be TESTNET -- a mainnet guess prints a FUNDABLE address for a key "
+        "that controls nothing"
+    )

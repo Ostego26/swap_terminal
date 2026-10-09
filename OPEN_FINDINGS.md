@@ -307,7 +307,7 @@ change. It was not done because a partial stub makes any name it omits an error,
 so it has to be complete enough for every `ecdsa` import in the tree. The
 mechanism and the rejected options are written into docstrings at both live sites.
 
-### 16. Three fixes landed without the test that would hold them
+### 16. Three fixes landed without the test that would hold them — CLOSED
 Each is mutation-checked by hand, and each needed a file the agent that found it
 could not reach. Named rather than absorbed.
 
@@ -317,8 +317,24 @@ could not reach. Named rather than absorbed.
 | `run_xrp_first()` returned `False` on its success path (`35a1e77`) | drive BOTH runners through stubbed submit/fund/claim and assert `is True`. **No test drives a runner at all today** |
 | `apply_correction` would write NULL for a SKIP plan (`8425058`) | `apply_correction(db, row, Correction(SKIP, 1.0, None, ...))` raises `ValueError` naming the verdict and leaves `payouts.amount` unchanged |
 
-Plus: each POST route on the operator panel, with its field absent, returns 400
-with the field name in the error — nine routes, no test.
+All three now have one, each mutation-checked against the original defect
+(`f3f1a8a`, and the commit this line lands in).
+
+**AND THE FIRST ATTEMPT AT ONE OF THEM WAS GREEN FOR THE WRONG REASON**, which is
+worth more than the test. The `Config.NETWORK` test called `expected_network()`
+directly — and reinstating the defect produced **zero failures**, because the
+broken code never called that function at all. The mutation caught the test, not
+the code.
+
+The reason it could not be tested properly is rule 10: the decision was one line
+inside a sixty-line `main()`, so the only way to exercise it was to run the whole
+tool. It is now `icp_custody_addresses.networks_for()`, and the same mutation
+fails with `got {'BTC': 'testnet', 'LTC': 'testnet', 'GRC': 'testnet'}` — three
+the same, which is the defect in one line.
+
+Still open, and the same shape: each POST route on the operator panel, with its
+field absent, returns 400 with the field name in the error — nine routes, no
+test.
 
 ### 17. Duplication the pass surfaced and did not merge
 All of it is rule 8, none of it is a defect today, and every one was established
