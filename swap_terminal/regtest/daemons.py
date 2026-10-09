@@ -80,6 +80,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Protocol
 
 import requests
 from chains.base import RPCAdapter, RPCError
@@ -1061,7 +1062,46 @@ def mweb_state_line(asset: str, softforks: dict, extra_args: list[str], *, we_st
 CLTV_DEPLOYMENT = "bip65"
 
 
-def _deployment_tables(node: RegtestRPC, info: dict) -> list[tuple[str, dict]]:
+class SupportsCall(Protocol):
+    """Anything that can make ONE JSON-RPC call and hand back whatever came out.
+
+    WHY A PROTOCOL AND NOT `RegtestRPC`, which is what the two functions below
+    said until 2026-10-09. Between them they reach for exactly one member --
+    `node.call("getdeploymentinfo")`, in `_deployment_tables` -- and
+    `cltv_activation_height` does not touch `node` at all beyond handing it
+    straight down. Annotating them `RegtestRPC` promised a url, credentials, a
+    timeout, a wallet path and every send method on the adapter, none of which is
+    read, and `RegtestRPC` is a NOMINAL class: a stand-in that implements `call`
+    and only `call` is refused on the grounds of its name.
+
+    That refusal is the whole cost, and it lands on the honest stub rather than
+    the over-promising signature. tests/test_regtest_harness_units.py's
+    `_StubNode` answers RPCs from a dict of canned results and RECORDS which
+    methods were asked in which order, because the assertions in that file are
+    about the order. It opens no socket and needs no credentials, so there is
+    nothing for it to inherit from the real adapter that would not be a lie; the
+    alternatives to this Protocol were a live daemon in a unit test or a
+    suppression.
+
+    `Any` IS THE RETURN TYPE BECAUSE A JSON-RPC `result` IS ANY JSON VALUE. The
+    callers below already treat it as unknown -- `isinstance(deployment_info,
+    dict)` is the first thing `_deployment_tables` does with it -- and narrowing
+    this to `dict` would be a claim about every daemon's answer that this file
+    refuses to make everywhere else.
+
+    THE NEAR-DUPLICATE, named because rule 8 asks for it: `solana_chain_check.py`
+    carries `RpcCaller`, structurally this same one-member Protocol. They are not
+    merged because they sit in different suites with no shared import path
+    between them -- this is `swap_terminal/regtest/`, that is a root-level entry
+    point -- and because the methods each names are different vocabularies
+    (`getdeploymentinfo` against Solana's). If a shared `swap_terminal/` home for
+    transport Protocols is ever created, both belong in it.
+    """
+
+    def call(self, method: str, *params: object) -> Any: ...
+
+
+def _deployment_tables(node: SupportsCall, info: dict) -> list[tuple[str, dict]]:
     """Every place a daemon might keep its deployment table, with where it came from.
 
     TWO PLACES, because the field moved. Bitcoin Core carried `softforks` in
@@ -1089,7 +1129,7 @@ def _deployment_tables(node: RegtestRPC, info: dict) -> list[tuple[str, dict]]:
     return tables
 
 
-def cltv_activation_height(node: RegtestRPC, info: dict) -> tuple[int | None, str]:
+def cltv_activation_height(node: SupportsCall, info: dict) -> tuple[int | None, str]:
     """The height at or above which CHECKLOCKTIMEVERIFY is enforced by CONSENSUS.
 
     WHY THIS DECIDES WHERE THE REFUND TEST HAS TO RUN, and it is the finding

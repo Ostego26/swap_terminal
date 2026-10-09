@@ -632,7 +632,20 @@ def test_a_wrong_passphrase_never_reaches_the_lock(monkeypatch):
             self.calls.append((method, params))
             if method == "walletpassphrase":
                 raise RPCError("Error: The wallet passphrase entered was incorrect. (rpc code -14)")
-            return super().call(method, *params) if method != "walletpassphrase" else None
+            # NO `... if method != "walletpassphrase" else None` HERE, and it was
+            # there until 2026-10-09. The branch above RAISES for that method, so the
+            # condition was always true and the `else None` could never run. Proven
+            # rather than read: replacing the None with a helper that raises ran the
+            # whole file green and the probe never fired -- 70 passed.
+            #
+            # It also cost something. pyright does not narrow an unannotated `method`
+            # across an `==`, so it treated the dead half as live and this override's
+            # return type picked up `| None` FROM CODE THAT DOES NOTHING -- one of
+            # this file's two pyright findings, caused by the branch rather than by
+            # the stub's real behavior. (The sibling Unlocking.call returns None for
+            # real, which is why tests/recording_rpc_adapter.py's root annotation was
+            # needed anyway.)
+            return super().call(method, *params)
 
     source = Wrong(1000.0)
     desk = Wallet(11.0, address=GRC_DESK_DEPOSIT, owns=(GRC_DESK_DEPOSIT,))

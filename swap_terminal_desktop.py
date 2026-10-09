@@ -87,6 +87,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
@@ -914,7 +915,47 @@ def launch(host: str, port: int, *, app_mode: bool = True) -> int:
     return 0 if word in ("stopped", "stopped-early") else 1
 
 
-def _wait_for_either(browser: subprocess.Popen, shim: subprocess.Popen) -> str:
+class _WatchableProcess(Protocol):
+    """A process this loop can watch: poll() and the status it leaves behind.
+
+    WHY A PROTOCOL AND NOT `subprocess.Popen`, which is what this said until
+    2026-10-09. The loop below reaches for exactly two things -- `poll()` on both
+    children and `returncode` on the one that died -- and never for a pid, a pipe,
+    a `wait()`, a `kill()` or anything else `Popen` promises. Declaring `Popen`
+    therefore over-promised by the whole rest of that class, and `Popen` is a
+    NOMINAL class: a stub implementing precisely these two members is refused on
+    the grounds of its name rather than its behavior.
+
+    That cost something real. tests/test_desktop_launcher.py's `NeverExits`,
+    `Exited` and `Alive` are three-line stands-in whose entire purpose is to drive
+    this loop down each of its three exits -- window-closed, server-died, ctrl-c --
+    without starting a process. They implement `poll` and `returncode` and nothing
+    else, which is the honest shape of what the loop needs, and the only ways to
+    make a `Popen` annotation accept them are to start real subprocesses in a unit
+    test (a behavior change, and a flaky one) or to suppress the finding (a claim
+    that nothing was checked). The Protocol is the third option: it typechecks
+    against the duck stubs AND against the real `Popen` objects the two production
+    call sites pass, because `Popen` structurally has both members.
+
+    The asymmetry is deliberate and is NOT worth splitting in two. `browser` is
+    only ever polled; `returncode` is read off `shim` alone. Every argument this
+    function has ever been passed -- two real `Popen`s in production, three stubs
+    in the tests -- carries both members, so a second Protocol naming one method
+    would add a name without excluding anything. If a caller ever arrives with a
+    pollable object that has no `returncode`, split it then.
+    """
+
+    @property
+    def returncode(self) -> int | None:
+        """The exit status left behind by a process `poll()` has reported dead."""
+        ...
+
+    def poll(self) -> int | None:
+        """None while the process lives; its exit status once it does not."""
+        ...
+
+
+def _wait_for_either(browser: _WatchableProcess, shim: _WatchableProcess) -> str:
     """Block until the window closes OR the server dies. Returns which happened.
 
     Watching BOTH is the fix for a measured blocker: the first design had one

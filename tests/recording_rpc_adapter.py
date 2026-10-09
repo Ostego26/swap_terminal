@@ -60,7 +60,19 @@ class RecordingRPCAdapter(RPCAdapter):
         #: fee sweep destinations -- is that they are NOT the desk's.
         self.owned_addresses: set[str] = set()
 
-    def call(self, method, *params):
+    def call(self, method, *params) -> object:
+        # `-> object` IS THE ROOT OF AN OVERRIDE CHAIN AND THAT IS WHY IT IS HERE,
+        # added 2026-10-09. A JSON-RPC `result` is any JSON value, null included --
+        # `RPCAdapter.call` returns `response.json().get("result")` -- and this
+        # method's own branches return a dict for the two address RPCs and a string
+        # otherwise. With no annotation that INFERRED as `dict[...] |
+        # Literal['stub-txid']`, which is narrower than the truth, and a return
+        # type can only be NARROWED by an override: tests/test_fund_desk.py's
+        # `Unlocking.call` and `Wrong.call` return None for `walletpassphrase`,
+        # which is exactly what the real daemon answers, and were refused as
+        # incompatible overrides of a type this file had promised by accident.
+        # Stating the honest type at the root is the fix; annotating the leaves
+        # cannot be, because the leaves are the narrow ones.
         self.calls.append((method, params))
         # validateaddress AND getaddressinfo ANSWER PROPERLY, because returning a
         # STUB TXID STRING for them was answering "not established" to every
