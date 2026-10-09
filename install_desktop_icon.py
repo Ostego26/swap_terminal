@@ -29,6 +29,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+# THE ACTION LIST COMES FROM swap_stack, NOT FROM A STRING HERE. This installer
+# printed `swapterm up | down | restart | status | chains` to the operator on
+# 2026-10-09, one commit after `rebuild` was added -- a hand-written second
+# spelling of a list swap_stack.ACTIONS already owns, advertising a command set
+# that was already wrong. Rule 8, in operator-facing text, found by the operator
+# reading it.
+#
+# A 0.42s import, measured, and it is a root script importing a root script --
+# the same world, the same interpreter, already on sys.path.
+import swap_stack
+
 REPO_ROOT = Path(__file__).resolve().parent
 TEMPLATE = REPO_ROOT / "assets" / "swap-terminal.desktop"
 ACTION_TEMPLATE = REPO_ROOT / "assets" / "swap-terminal-action.desktop"
@@ -57,6 +68,17 @@ COMMAND_TARGET = BIN_DIR / "swapterm"
 #: an icon carries no other documentation and "Down" could reasonably be read as
 #: taking the wallet daemons with it. It does not, ever (stack_authority.py's
 #: header refuses to mark them stoppable "under any flag").
+#: Actions that deliberately get NO icon, and why. Named rather than left as an
+#: absence, so test_every_action_is_an_icon_or_explicitly_not() can assert that
+#: ACTION_ENTRIES plus this covers swap_stack.ACTIONS exactly -- which means a new
+#: action cannot quietly fail to get an icon the way `rebuild` just did.
+#:
+#: Both are read-only reports whose whole value is the text, and an icon that
+#: opens a terminal, prints a report and exits gives the operator no time to read
+#: it: the window closes with the process. They belong at a shell prompt, which is
+#: what `swapterm` is for.
+NO_ICON: tuple[str, ...] = ("status", "chains")
+
 ACTION_ENTRIES: tuple[tuple[str, str, str], ...] = (
     (
         "up",
@@ -74,6 +96,20 @@ ACTION_ENTRIES: tuple[tuple[str, str, str], ...] = (
         "Swap Terminal: Restart",
         "Down, prove the stop, then Up. Refuses to start if the stop cannot be proven. "
         "Leaves the chain daemons running.",
+    ),
+    # REBUILD HAS AN ICON BECAUSE WITHOUT ONE THE ICON SET HAS A TRAP. The
+    # application is COPIED INTO the web image (docker/web.Dockerfile:150), so
+    # after a `git pull` an operator who only ever clicks Up serves the old code
+    # with nothing on screen saying so -- the same stale-artifact defect
+    # `rebuild` exists to fix, reintroduced by the launcher set rather than by
+    # the code. It takes minutes on a cold layer cache, which Terminal=true makes
+    # visible rather than mysterious.
+    (
+        "rebuild",
+        "Swap Terminal: Rebuild",
+        "Rebuild the web image from this checkout, then Down, prove, Up. Run this after a "
+        "git pull -- the app is baked into the image, so Up alone serves the old code. "
+        "Never rebuilds the ICP replica, and leaves the chain daemons running.",
     ),
 )
 
@@ -202,7 +238,7 @@ def planned_writes(desktop_files: bool) -> list[tuple[Path, str]]:
     operator reads before letting it write into their home directory.
     """
     writes = [
-        (COMMAND_TARGET, "`swapterm up|down|restart|status|chains`"),
+        (COMMAND_TARGET, f"`swapterm {'|'.join(swap_stack.ACTIONS)}`"),
         (DESKTOP_TARGET, "menu entry: the window"),
     ]
     writes += [
@@ -292,7 +328,7 @@ def closing_lines(on_path: bool) -> list[str]:
         "",
         "INSTALLED.",
         '  menu        "Swap Terminal" (the window), plus Up, Down and Restart',
-        "  shell       swapterm up | down | restart | status | chains",
+        f"  shell       swapterm {' | '.join(swap_stack.ACTIONS)}",
     ]
     if not on_path:
         lines.append(

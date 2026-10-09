@@ -27,6 +27,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import install_desktop_icon
+import swap_stack
 import swap_terminal_desktop as launcher
 
 DB = "/home/op/swap_terminal/swap_terminal/swap_terminal.db"
@@ -281,6 +282,73 @@ def test_the_browser_command_never_carries_no_sandbox(tmp_path):
 # stack a different way from the shell command is rule 8's two spellings, and
 # the one that drifts is the one nobody runs.
 # =============================================================================
+
+
+def test_every_action_is_an_icon_or_explicitly_not_one():
+    """THE DEFECT THIS PINS WAS SHIPPED AND THE OPERATOR READ IT.
+
+    `rebuild` was added to swap_stack.ACTIONS in a7bc6d2. The installer kept its
+    own hand-written list and printed, to the operator, on their own host:
+
+        shell       swapterm up | down | restart | status | chains
+
+    -- advertising a command set that was already wrong, and giving `rebuild` no
+    icon. Rule 8 in operator-facing text, found by the operator reading it rather
+    than by anything failing.
+
+    So the coverage is asserted rather than the list: every action in ACTIONS is
+    either an icon or named in NO_ICON with a reason. A new action can then be
+    DELIBERATELY iconless, and cannot be ACCIDENTALLY iconless.
+
+    MUTATION: add an action to swap_stack.ACTIONS and nothing else. This fails and
+    names it.
+    """
+    iconed = {action for action, _name, _comment in install_desktop_icon.ACTION_ENTRIES}
+    accounted = iconed | set(install_desktop_icon.NO_ICON)
+    actions = set(swap_stack.ACTIONS)
+
+    assert accounted == actions, (
+        f"actions with no icon and no stated reason: {sorted(actions - accounted)}; "
+        f"icons for actions that do not exist: {sorted(accounted - actions)}"
+    )
+    assert not (iconed & set(install_desktop_icon.NO_ICON)), (
+        f"an action is both iconed and listed as having no icon: "
+        f"{sorted(iconed & set(install_desktop_icon.NO_ICON))}"
+    )
+
+
+def test_the_printed_command_list_is_derived_from_the_dispatch_table():
+    """Not a string in this file. That string was wrong for one commit.
+
+    Both printed spellings -- the planned-writes label and the closing "shell"
+    line -- are built from swap_stack.ACTIONS, so an action added there appears in
+    both with no edit here. Asserted on the OUTPUT, because a derivation that is
+    not actually printed is not a fix.
+    """
+    label = dict(install_desktop_icon.planned_writes(desktop_files=False))[
+        install_desktop_icon.COMMAND_TARGET
+    ]
+    closing = " ".join(install_desktop_icon.closing_lines(on_path=True))
+    for action in swap_stack.ACTIONS:
+        assert action in label, f"{action} is missing from the installer's command label: {label}"
+        assert action in closing, f"{action} is missing from the installer's shell line: {closing}"
+
+
+def test_the_rebuild_icon_says_why_up_alone_is_not_enough():
+    """An icon-only operator would otherwise serve stale code after every pull.
+
+    The app is COPIED INTO the web image (docker/web.Dockerfile:150), so `up`
+    alone keeps serving whatever was baked at the last build. Without a rebuild
+    icon the launcher set reintroduces exactly the stale-artifact defect that
+    `rebuild` exists to fix -- and the Comment is the only documentation a
+    one-click user gets.
+    """
+    comments = {action: comment for action, _name, comment in install_desktop_icon.ACTION_ENTRIES}
+    assert "rebuild" in comments, "there is no rebuild icon, so Up is the only option after a pull"
+    said = comments["rebuild"]
+    assert "git pull" in said, f"the rebuild icon does not say when to use it: {said}"
+    assert "baked into the image" in said, f"nor why Up alone is not enough: {said}"
+    assert "replica" in said, f"nor that it leaves the ICP replica alone: {said}"
 
 
 def test_the_command_bakes_both_paths_and_leaves_no_placeholder():
