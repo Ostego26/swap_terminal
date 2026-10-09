@@ -172,6 +172,16 @@ BASE58_VERSIONED_HASH160_LEN = 21
 # as a BTC payout address is a real burn that the flat map cannot see, because it is a
 # perfectly valid mainnet address. It is just not Bitcoin's.
 #
+# THERE IS A SECOND NETWORK-TO-HRP TABLE AND RULE 8 SAYS TO NAME IT HERE, because the
+# two differ and the difference is the point rather than drift:
+# chains/daemon_network.PAYABLE_BECH32_PREFIX maps a DAEMON'S OWN NETWORK NAME -> hrp,
+# and it keeps regtest DISTINCT. This table has only two network values and folds regtest
+# into TESTNET -- see the `rltc` note below -- because it answers "is this an address it
+# is safe to lose coins on", and `rltc` and `tltc` have the same answer to that. The other
+# answers "which addresses can this running daemon actually pay", where they have opposite
+# answers. Inverting this one cannot stand in for it: LTC inverted gives
+# TESTNET -> {tltc, rltc}, which is exactly the collapse that loses the question.
+#
 # GRC is present with an EMPTY table on purpose. "Gridcoin has no bech32" is a fact the
 # authority has to be able to read off this vocabulary, and an absent key would mean
 # "nobody has said", which is the distinction this module refuses to collapse everywhere

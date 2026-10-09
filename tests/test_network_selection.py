@@ -1,7 +1,8 @@
 """ONE SWITCH TO MAINNET, and the checks that make one switch safe rather than loaded.
 
 Role: tests (offline; no daemon, no network, no chain)
-Reads: modules/network_selection.py, modules/address_network.py
+Reads: modules/network_selection.py, modules/address_network.py,
+       chains/daemon_network.py
 Writes: nothing
 Can move funds: no
 Mainnet-safe: yes -- nothing here opens a socket. It is ABOUT mainnet and never reaches one.
@@ -19,6 +20,7 @@ on mainnet, real coins spent to a testnet-encoded address nobody can pay from, n
 from __future__ import annotations
 
 import pytest
+from chains import daemon_network
 from modules import address_network, network_selection
 
 TESTNET = network_selection.TESTNET
@@ -227,3 +229,122 @@ def test_this_module_does_not_flag_itself():
     """The regression that the test above generalizes, pinned on the real tree as well -- a
     tmp_path fixture cannot catch the scan being pointed at a different root."""
     assert "swap_terminal/modules/network_selection.py" not in network_selection.mainnet_blockers()
+
+
+# ---------------------------------------------------------------------------
+# WHICH ADDRESSES A RUNNING DAEMON CAN PAY. This is the other half of the
+# disagreement this file is about: above, a FLAG says which chain somebody meant.
+# Here the DAEMON says which chain it is on, and the question is whether the
+# address in hand is one it can transact with at all.
+#
+# The case that produced these, on the operator's host 2026-10-09: an external
+# Litecoin TESTNET wallet at tltc1q37khgpktccdwpxq6vmkt6gtrnra3x39tvcyx62 and a
+# desk litecoind running -regtest. Both are "testnet" to every check in this
+# repository that asks "is it safe to lose coins here", and they cannot send each
+# other a single coin.
+# ---------------------------------------------------------------------------
+
+
+def test_LTC_regtest_and_LTC_testnet_pay_DIFFERENT_prefixes():
+    """The whole reason the table exists. If these ever match, it answers nothing.
+
+    MUTATION CHECKED: setting PAYABLE_BECH32_PREFIX["LTC"]["regtest"] to "tltc1"
+    -- the single most plausible typo, since both are "the test one" -- fails
+    here and nowhere else in the suite.
+    """
+    regtest = daemon_network.payable_bech32_prefix("LTC", "regtest")
+    testnet = daemon_network.payable_bech32_prefix("LTC", "test")
+    assert regtest == "rltc1"
+    assert testnet == "tltc1"
+    assert regtest != testnet
+
+
+def test_BTC_regtest_and_BTC_testnet_pay_DIFFERENT_prefixes():
+    """Same shape on Bitcoin, and signet shares testnet's hrp rather than having its own."""
+    assert daemon_network.payable_bech32_prefix("BTC", "regtest") == "bcrt1"
+    assert daemon_network.payable_bech32_prefix("BTC", "test") == "tb1"
+    assert daemon_network.payable_bech32_prefix("BTC", "signet") == "tb1"
+
+
+def test_both_spellings_of_testnet_answer_the_same_thing():
+    """chain_network() returns "test" from getblockchaininfo and "testnet" from getinfo.
+
+    Two routes, two spellings, ONE answer. A table that knew only one of them
+    would answer None for every daemon old enough to need the getinfo fallback --
+    which on this desk is Gridcoin, the chain the fallback was written for.
+    """
+    for asset in ("BTC", "LTC"):
+        assert daemon_network.payable_bech32_prefix(asset, "test") == daemon_network.payable_bech32_prefix(
+            asset, "testnet"
+        )
+
+
+@pytest.mark.parametrize(
+    ("asset", "network", "why"),
+    [
+        ("GRC", "test", "Gridcoin has no bech32 at all -- its addresses are base58"),
+        ("XRP", "test", "not a bitcoin-family chain; this table knows nothing about it"),
+        ("LTC", "unknown (getinfo: no `testnet` field)", "chain_network()'s own failure sentinel"),
+        ("LTC", "", "an empty string is not a network name"),
+        ("LTC", "mainnet", "a spelling no chainparams.cpp here was read for -- refuse, do not guess"),
+    ],
+)
+def test_what_is_not_established_answers_None_rather_than_guessing(asset, network, why):
+    """Fails closed, same as CHAIN_TEST_NETWORKS: an allowlist refuses the unknown.
+
+    "mainnet" is in this list deliberately and is NOT an oversight. Bitcoin says
+    "main", and a table that also accepted "mainnet" would be inventing a
+    vocabulary no daemon answers (rule 11: one vocabulary, and it is the
+    daemon's).
+    """
+    assert daemon_network.payable_bech32_prefix(asset, network) is None, why
+
+
+def test_the_two_hrp_tables_disagree_about_regtest_ON_PURPOSE():
+    """Rule 8's "if they genuinely differ, the difference is the point."
+
+    address_network.BECH32_HRPS_BY_ASSET answers "is this safe to lose coins on",
+    so `rltc` and `tltc` are both TESTNET there. daemon_network answers "which
+    address can this daemon pay", where they are opposites. This asserts the
+    DISAGREEMENT rather than either table's values, so neither can be quietly
+    "fixed" into the other -- which is the one change that would silently
+    re-break the thing both comments were written to prevent.
+    """
+    safe_to_lose = address_network.BECH32_HRPS_BY_ASSET["LTC"]
+    assert safe_to_lose["tltc"] == safe_to_lose["rltc"] == TESTNET, (
+        "address_network folds regtest into testnet on purpose; see its comment"
+    )
+    payable = daemon_network.PAYABLE_BECH32_PREFIX["LTC"]
+    assert payable["test"] != payable["regtest"], (
+        "daemon_network keeps them apart on purpose; see its comment"
+    )
+
+
+def test_every_prefix_names_an_hrp_the_address_decoder_knows():
+    """A typo in one table is caught by the other, without spelling the vocabulary twice.
+
+    `rltcl` instead of `rltc1`, or `bcrt` instead of `bcrt1`, would otherwise be
+    invisible: the report would print a wrong prefix with total confidence and no
+    test would care. Checked by stripping the bech32 separator "1" and looking
+    the hrp up in the decoder's own table, so the two stay consistent without
+    either one being derived from the other (they cannot be -- see the test
+    above).
+    """
+    for asset, by_network in daemon_network.PAYABLE_BECH32_PREFIX.items():
+        known = address_network.BECH32_HRPS_BY_ASSET[asset]
+        for network, prefix in by_network.items():
+            assert prefix.endswith("1"), f"{asset}/{network}: {prefix!r} has no bech32 separator"
+            assert prefix[:-1] in known, (
+                f"{asset}/{network}: hrp {prefix[:-1]!r} is not in "
+                f"address_network.BECH32_HRPS_BY_ASSET[{asset!r}] -- one of the two is a typo"
+            )
+
+
+def test_the_asset_keys_match_the_decoder_exactly():
+    """Neither table may know a chain the other does not, which is how one goes stale.
+
+    A chain added to the decoder and not here answers None forever and the report
+    silently says nothing about it; added here and not to the decoder, the test
+    above raises KeyError. Both directions are failures, so both are asserted.
+    """
+    assert set(daemon_network.PAYABLE_BECH32_PREFIX) == set(address_network.BECH32_HRPS_BY_ASSET)

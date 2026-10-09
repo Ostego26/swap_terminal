@@ -64,6 +64,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+# THE ONE AUTHORITY ON WHAT A DAEMON'S NETWORK NAME MEANS (rule 8). Imported
+# rather than re-spelled here: chains/daemon_network.py owns both the network
+# names and which address prefix each one pays, and this file only renders them.
+# SAFE FOR THIS FILE'S STDLIB-ONLY CONTRACT -- daemon_network.py imports nothing
+# but __future__, so swap_stack.py on the host still needs no dependency.
+from chains.daemon_network import payable_bech32_prefix
+
 #: The ports this terminal's HTTP surfaces are reachable on, and what each means.
 #:
 #: NOT DERIVED FROM Config, and that is the decision on this line. Config tells you
@@ -1323,6 +1330,87 @@ def probe_failure_detail(detail: object, end: int = _DETAIL_END) -> str:
     return f"{text[:end]} [+{dropped} chars] {text[-end:]}"
 
 
+def chain_network_lines(rows: object) -> list[str]:
+    """Name the network each answered daemon reports, and the addresses it can pay.
+
+    A SEPARATE FUNCTION CALLED FROM BOTH BRANCHES of
+    chain_reachability_verdict() below, because the network matters most in the
+    branch where the chains ARE reachable. That is the branch whose headline is
+    "all 3 probeable chain(s) answered", and a reachable daemon on the wrong
+    network is the failure that reads as success.
+
+    WHY THIS EXISTS, measured on the operator's host 2026-10-09. They had a
+    Litecoin testnet wallet at tltc1q37khgpktccdwpxq6vmkt6gtrnra3x39tvcyx62 and
+    a desk litecoind running -regtest. services/admin_view.probe_chain() HAD
+    ALREADY READ the word "regtest" off that daemon and put it in its row -- its
+    own docstring says "an operator whose `testnet` alias points at mainnet must
+    read the word mainnet here" -- and this report dropped the field on the
+    floor. Counted the same day: `row["network"]` had ZERO readers anywhere in
+    Python, out of a row shape with five keys. The browser panel printed it
+    (static/admin.js:161) and `swap_stack.py chains`, the command an operator
+    actually runs, did not. Several rounds went on a question the probe had
+    answered on its first call.
+
+    NOT A FAILURE, EVER. This returns lines and nothing else; it cannot change a
+    status. A mainnet daemon is shouted about and still not failed here, because
+    this function's one job is to put the word on the screen -- deciding what a
+    mainnet answer MEANS belongs to the thing about to spend, and
+    chains/daemon_network.CHAIN_TEST_NETWORKS is where that refusal already
+    lives. Two places deciding it is rule 8's shape at the worst possible site.
+
+    `rows` is typed `object` to match chain_reachability_verdict()'s own
+    contract: it is handed parsed JSON and must not assume a shape it did not
+    check. A row that is not a mapping is skipped rather than raising, since a
+    report that dies on a malformed row tells the operator nothing at all
+    (rule 14).
+    """
+    if not isinstance(rows, list):
+        return []
+    lines = []
+    mainnet_seen = []
+    for row in rows:
+        if not isinstance(row, Mapping) or row.get("reachable") is not True:
+            continue
+        asset = str(row.get("asset") or "?")
+        network = row.get("network")
+        if not network:
+            # ANSWERED BUT WOULD NOT NAME ITS NETWORK is a third outcome and it
+            # gets its own line (rule 14: "did nothing" must not look like "did
+            # work"). probe_chain() puts None here for exactly this case and
+            # puts its reason in `detail`, which the refused branch prints.
+            lines.append(f"  {asset:<5} would not name its network -- so NOTHING is established about")
+            lines.append(f"  {'':<5} which chain it is on, reachable or not")
+            continue
+        network = str(network)
+        prefix = payable_bech32_prefix(asset, network)
+        note = (
+            f"pays {prefix}... addresses, and only those"
+            if prefix
+            else "no bech32 on this chain -- its addresses are base58, which cannot "
+            "name a network"
+        )
+        lines.append(f"  {asset:<5} {network:<9} {note}")
+        if network == "main":
+            mainnet_seen.append(asset)
+    if not lines:
+        return []
+    header = [
+        "networks, as each daemon ITSELF reports them -- never from its port number,",
+        "because a port is a reason to believe and not a check:",
+    ]
+    if mainnet_seen:
+        # LOUD, AND STILL NOT A FAILURE HERE. CLAUDE.md's standing instruction for
+        # this repository is TESTNET ONLY, so a mainnet answer is the one thing on
+        # this screen an operator must not skim past.
+        header.append("")
+        header.append(
+            f"  *** {', '.join(mainnet_seen)} REPORTS MAINNET. This desk is testnet-only; a "
+            f"payout there"
+        )
+        header.append("      moves real coin. ***")
+    return [*header, *lines]
+
+
 def chain_reachability_verdict(body: object, trouble: str = "") -> tuple[str, str, list[str]]:
     """Can the container reach its chain daemons? Pure; takes /api/admin/chains' body.
 
@@ -1382,8 +1470,19 @@ def chain_reachability_verdict(body: object, trouble: str = "") -> tuple[str, st
             f"not asked: {', '.join(not_asked)} -- no read-only probe for those adapters, which is"
             if not_asked else "every configured chain with a probe was asked.",
             *(["by design and not a fault."] if not_asked else []),
+            # REACHABLE IS NOT THE WHOLE ANSWER, which is why these print in the
+            # branch that passed. See chain_network_lines() for the 2026-10-09
+            # measurement: three daemons answered, one was on a network that
+            # could not pay the address the operator was aiming at, and this
+            # headline said "all 3 probeable chain(s) answered".
+            "",
+            *chain_network_lines(rows),
         ]
 
+    # COMPUTED ONCE. It was called twice on consecutive lines when first written
+    # -- once for the lines and once to decide whether to print a blank after
+    # them -- which is two walks of the same rows for a layout decision.
+    networks = chain_network_lines(rows)
     detail = [
         f"answered: {', '.join(answered) or '(none)'}",
         "",
@@ -1404,6 +1503,11 @@ def chain_reachability_verdict(body: object, trouble: str = "") -> tuple[str, st
     ), [
         *(f"  {row['asset']}: {probe_failure_detail(row.get('detail'))}" for row in refused),
         "",
+        # THE ONES THAT DID ANSWER STILL HAVE A NETWORK WORTH READING. A refusal on
+        # one chain is no reason to stop reporting the others, and the operator
+        # looking at this screen is usually mid-diagnosis on exactly that.
+        *networks,
+        *([""] if networks else []),
         *detail,
     ]
 

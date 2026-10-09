@@ -53,6 +53,7 @@ from swap_terminal.stack_authority import (
     canister_lookup_verdict,
     canister_surface_lines,
     chain_exit_code,
+    chain_network_lines,
     chain_probe_envelope,
     chain_probe_rows,
     chain_reachability_verdict,
@@ -2706,3 +2707,139 @@ def test_a_lookup_that_could_not_run_yields_no_id_rather_than_an_empty_one(monke
     for line in rendered:
         assert "http://.localhost" not in line, f"a URL was built from an empty id: {line.strip()}"
         assert not line.rstrip().endswith("&id="), f"a Candid link with no target: {line.strip()}"
+
+
+# ---------------------------------------------------------------------------
+# THE NETWORK EACH DAEMON REPORTS, on the screen the operator actually reads.
+#
+# services/admin_view.probe_chain() has put a `network` field in every row since
+# it was written, and its docstring says "an operator whose `testnet` alias
+# points at mainnet must read the word mainnet here". Counted 2026-10-09:
+# `row["network"]` had ZERO readers in Python, out of a five-key row. The browser
+# panel rendered it (static/admin.js:161); `swap_stack.py chains` did not. The
+# cost was several rounds on the operator's host chasing why a Litecoin TESTNET
+# address could not be paid by a desk litecoind running -regtest -- a fact the
+# first probe of the session had already read and reported.
+# ---------------------------------------------------------------------------
+
+
+def _answered(asset, network):
+    """One probe row shaped exactly as services/admin_view.probe_chain() returns it."""
+    return {
+        "asset": asset,
+        "probed": True,
+        "reachable": True,
+        "network": network,
+        "detail": f"answered; it reports its network as {network}",
+    }
+
+
+def test_the_reachable_verdict_NAMES_each_daemons_network():
+    """The branch where everything passed is the branch where this matters most.
+
+    MUTATION CHECKED: removing `*chain_network_lines(rows)` from the reachable
+    branch of chain_reachability_verdict() fails here. Nothing else in the suite
+    noticed, which is how the field went unread from the day it was added.
+    """
+    body = chain_probe_envelope(
+        [_answered("BTC", "regtest"), _answered("LTC", "regtest"), _answered("GRC", "test")],
+        probed_at="2026-10-09T00:00:00Z",
+        adapters_configured=3,
+    )
+    status, headline, detail = chain_reachability_verdict(body)
+    assert status == "reachable"
+    blob = "\n".join(detail)
+    assert "regtest" in blob, f"the word the probe read is not on the screen: {headline}"
+    assert "rltc1" in blob, "a regtest litecoind pays rltc1 addresses and the report must say so"
+    assert "bcrt1" in blob
+
+
+def test_a_refused_chain_does_not_suppress_the_others_networks():
+    """A refusal on one chain is no reason to stop reporting the rest.
+
+    The operator reading this screen is usually mid-diagnosis on exactly that,
+    and the network of the chains that DID answer is what the next step turns on.
+    """
+    body = chain_probe_envelope(
+        [
+            {
+                "asset": "BTC",
+                "probed": True,
+                "reachable": False,
+                "network": None,
+                "detail": "did not answer: Connection refused",
+            },
+            _answered("LTC", "regtest"),
+        ],
+        probed_at="2026-10-09T00:00:00Z",
+        adapters_configured=2,
+    )
+    status, _headline, detail = chain_reachability_verdict(body)
+    assert status == "unreachable"
+    blob = "\n".join(detail)
+    assert "rltc1" in blob
+    assert "Connection refused" in blob, "the refusal must still be reported too"
+
+
+def test_a_daemon_reporting_MAINNET_is_shouted_about():
+    """CLAUDE.md's standing instruction for this repository is TESTNET ONLY.
+
+    A mainnet answer is the one thing on this screen an operator must not skim
+    past, so it gets capitals and asterisks rather than a row in a table. It is
+    still NOT a failure here: deciding what mainnet MEANS belongs to the thing
+    about to spend, and chains/daemon_network.CHAIN_TEST_NETWORKS already
+    refuses on it. Two places deciding that is rule 8's shape at the worst site.
+    """
+    body = chain_probe_envelope(
+        [_answered("LTC", "main")], probed_at="2026-10-09T00:00:00Z", adapters_configured=1
+    )
+    status, _headline, detail = chain_reachability_verdict(body)
+    assert status == "reachable", "this function reports; it does not decide what mainnet means"
+    blob = "\n".join(detail)
+    assert "MAINNET" in blob
+    assert "ltc1" in blob
+
+
+def test_a_daemon_that_would_not_name_its_network_says_SO_rather_than_nothing():
+    """Rule 14: "did nothing" must not look like "did work".
+
+    probe_chain() puts None here when a daemon answered but named no chain, and
+    an omitted row would read as "nobody asked". Three outcomes, three renderings.
+    """
+    body = chain_probe_envelope(
+        [{"asset": "GRC", "probed": True, "reachable": True, "network": None, "detail": "d"}],
+        probed_at="2026-10-09T00:00:00Z",
+        adapters_configured=1,
+    )
+    _status, _headline, detail = chain_reachability_verdict(body)
+    assert "would not name its network" in "\n".join(detail)
+
+
+def test_GRC_is_reported_without_inventing_a_bech32_prefix_for_it():
+    """Gridcoin has none. A report that printed one would be confidently wrong."""
+    lines = chain_network_lines([_answered("GRC", "test")])
+    blob = "\n".join(lines)
+    assert "test" in blob
+    assert "base58" in blob
+    assert "grc1" not in blob and "tgrc1" not in blob
+
+
+@pytest.mark.parametrize("rows", [None, "a string", 42, {"not": "a list"}, [None], ["x"], [{}]])
+def test_a_malformed_row_is_skipped_rather_than_raising(rows):
+    """A report that dies on a bad row tells the operator nothing at all (rule 14).
+
+    chain_reachability_verdict() is handed parsed JSON and must not assume a
+    shape it did not check; this function has the same contract and the same
+    `object` annotation for the same reason.
+    """
+    assert chain_network_lines(rows) == []
+
+
+def test_rows_with_nothing_reachable_produce_no_section_at_all():
+    """An empty heading over an empty table is the "blank gap" rule 14 forbids.
+
+    This is the one case where printing nothing is right: the section is ABOUT
+    the daemons that answered, and the verdict's own headline already says that
+    none did.
+    """
+    assert chain_network_lines([{"asset": "ICP", "probed": False, "reachable": None, "network": None}]) == []

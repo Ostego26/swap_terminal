@@ -103,3 +103,79 @@ def chain_network(adapter) -> str:
             return "testnet" if value else "main"
         reasons.append(f"{method}: no `{field}` field")
     return f"{UNKNOWN_PREFIX}{'; '.join(reasons) or 'no route answered'})"
+
+
+#: WHICH BECH32 ADDRESS PREFIX a daemon on each network issues and accepts, per chain.
+#: Keyed by the EXACT strings chain_network() above can return, because that is the only
+#: vocabulary a caller has: `getblockchaininfo.chain` answers "main", "test", "regtest" or
+#: "signet", and the `getinfo.testnet` fallback answers "testnet" or "main". All six
+#: spellings appear below rather than being normalized first, so there is no second
+#: mapping step to drift (rule 11: one vocabulary, applied in one place).
+#:
+#: WHY THIS IS A SEPARATE TABLE FROM modules/address_network.BECH32_HRPS_BY_ASSET, AND
+#: RULE 8 SAYS TO NAME THE OTHER ONE HERE BECAUSE THE DIFFERENCE IS THE WHOLE POINT:
+#:
+#:   BECH32_HRPS_BY_ASSET   hrp -> network, and it has only TWO network values. It folds
+#:                          regtest into TESTNET on purpose -- it answers "is this an
+#:                          address it is safe to lose coins on", and `rltc` and `tltc`
+#:                          have the same answer to that question.
+#:   this table             network -> hrp, and regtest is DISTINCT. It answers "which
+#:                          addresses can THIS running daemon actually pay", and `rltc`
+#:                          and `tltc` have opposite answers to that one.
+#:
+#: Neither is a candidate to replace the other and inverting either gives the wrong
+#: shape: BECH32_HRPS_BY_ASSET["LTC"] inverted maps TESTNET -> {tltc, rltc}, which is
+#: exactly the collapse that makes it unable to answer this question.
+#:
+#: WHAT THIS COST, measured on the operator's host 2026-10-09. They had a Litecoin
+#: testnet wallet at `tltc1q37khgpktccdwpxq6vmkt6gtrnra3x39tvcyx62` and a desk litecoind
+#: running `-regtest` (pid 165984, `-datadir=/home/mpjones26/regtest/ltc`). Those cannot
+#: transact: a regtest node issues and accepts `rltc1...` and regtest coins are not on
+#: testnet. services/admin_view.probe_chain() had ALREADY READ the word "regtest" off
+#: that daemon and put it in its row -- and `swap_stack.py chains`, the report the
+#: operator actually runs, printed "all 3 probeable chain(s) answered: BTC, LTC, GRC"
+#: and dropped the field. Only the browser panel rendered it (static/admin.js:161).
+#: Several rounds went on the question the probe had already answered.
+#:
+#: VALUES READ OFF chainparams.cpp, NOT RECALLED (rule 17). Bitcoin's bech32_hrp is "bc"
+#: on main, "tb" on both testnet and signet, and "bcrt" on regtest; Litecoin's is "ltc",
+#: "tltc" and "rltc". modules/address_network.py:182-191 cites the same Litecoin file for
+#: `rltc` and records what its absence cost on 2026-09-27.
+#:
+#: GRC IS PRESENT WITH AN EMPTY TABLE on purpose, matching BECH32_HRPS_BY_ASSET's own
+#: reasoning: "Gridcoin has no bech32" is a fact a caller must be able to read off this
+#: vocabulary, and an absent key would mean "nobody has said".
+PAYABLE_BECH32_PREFIX: dict[str, dict[str, str]] = {
+    "BTC": {"main": "bc1", "test": "tb1", "testnet": "tb1", "signet": "tb1", "regtest": "bcrt1"},
+    "LTC": {"main": "ltc1", "test": "tltc1", "testnet": "tltc1", "regtest": "rltc1"},
+    "GRC": {},
+}
+
+
+def payable_bech32_prefix(asset: str, network: str) -> str | None:
+    """Which bech32 prefix a daemon of `asset` on `network` pays. None when not established.
+
+    THREE OUTCOMES COLLAPSED TO TWO WOULD BE THE DEFECT HERE, so read None as
+    "nobody has said" and never as "it has none":
+
+      a prefix   this chain uses bech32 and this network's prefix is known.
+      None       one of three things, and the caller must not claim either of the
+                 others -- the asset is not a bitcoin-family chain this table
+                 knows, or it is GRC which has no bech32 at all, or `network` is
+                 a string chain_network() could not resolve (its "unknown (...)"
+                 sentinel, or a network no chainparams.cpp here was read for).
+
+    FAILS CLOSED BY DESIGN, exactly as CHAIN_TEST_NETWORKS above does and for the
+    same reason: an allowlist refuses the unknown, a denylist admits it. A caller
+    that wants to WARN about a mismatch gets None and says nothing, which is the
+    correct amount to say about a network nobody named.
+
+    BASE58 IS DELIBERATELY NOT ANSWERED HERE and the omission is the finding. The
+    testnet P2PKH version byte is 0x6f on BTC testnet, BTC regtest, LTC testnet,
+    LTC regtest, BTC signet AND GRC testnet -- six networks, one byte. A legacy
+    `m...`/`n...` address cannot be attributed to any one of them, so a function
+    returning a base58 prefix per network would be returning a guess in the same
+    voice as a fact (rule 17). bech32 carries the network in the string itself,
+    which is why only it can be answered.
+    """
+    return PAYABLE_BECH32_PREFIX.get(asset, {}).get(network) or None
