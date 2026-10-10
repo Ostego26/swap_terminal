@@ -226,6 +226,31 @@ from typing import NamedTuple
 # with no import-time side effect -- which rule 12 names as one of the two things the
 # linter cannot check. It imports nothing from services/, so there is no cycle, and it
 # opens no socket, so importing it does not make this module able to make a call.
+from chains.daemon_network import NETWORK_IS_TEST, SYNC_SYNCED
+
+# THE STATE VOCABULARIES, IMPORTED BECAUSE SPELLING ONE BY HAND WAS A MEASURED DEFECT.
+#
+# THE BUG, found 2026-10-10 by reading a rendered page rather than by running a test:
+# this module compared the wallet lock state against the literal `"unencrypted"`, and
+# chains/daemon_wallet.LOCK_NOT_ENCRYPTED is `"not_encrypted"`. So an UNENCRYPTED wallet
+# -- nothing to unlock, nothing in the way of a payout -- rendered in the status bar as
+# `[!]`, the warning glyph, beside a sentence saying there was no passphrase. A warning
+# that fires on the healthy case is rule 13's own argument about a warning that fires on
+# every run: the reader learns to ignore it and then misses the real one, which here is
+# an ENCRYPTED wallet that a payout cannot leave.
+#
+# AND IT WAS INVISIBLE TO EVERY ASSERTION IN THE FILE, which is the half worth writing
+# down. The cell rendered, carried a label, a value, a glyph and a sentence, and passed
+# the "status bar is never empty" check -- a state comparison against a string nothing
+# produces does not fail, it just never matches. Importing the names is what makes a
+# renamed state a NameError instead of a cell that quietly stops being right (rule 11:
+# one vocabulary, derived in one place, applied identically everywhere).
+#
+# THE SAME ARGUMENT COVERS THE OTHER TWO. `SYNC_SYNCED` and `NETWORK_IS_TEST` were
+# spelled correctly by luck, and chains/daemon_network.py's own comment says those
+# verdict tuples exist so "a renderer with one case per state can be tested for covering
+# them all".
+from chains.daemon_wallet import LOCK_ENCRYPTED, LOCK_NOT_ENCRYPTED
 from chains.solana_units import (
     BALANCE_COMMITMENT,
     COMMITMENT_RANKS,
@@ -1164,7 +1189,7 @@ def core_status_bar(live: Mapping) -> tuple[Cell, ...]:
     sync_cell = _cell("Sync", synced or "(not established)", (
         f"{sync.get('why') or 'the daemon reported its chain position and nothing was wrong with it'}"
         f"{'' if behind is None else f'. Behind by {behind} block(s) -- a COUNT, never a duration'}"
-    ), CELL_OK if synced == "synced" else CELL_WARN if synced else CELL_UNKNOWN)
+    ), CELL_OK if synced == SYNC_SYNCED else CELL_WARN if synced else CELL_UNKNOWN)
 
     height = _reported(node_fields, "blocks")
     blocks_cell = _cell("Blocks", str(blocks if blocks is not None else height or "(not reported)"), (
@@ -1187,14 +1212,27 @@ def core_status_bar(live: Mapping) -> tuple[Cell, ...]:
         f"{verdict} -- only `network_is_test` is permission; the other two both refuse, and for "
         f"different reasons. Reachable is not the question: an alias pointing at mainnet reads "
         f"the same as one pointing at testnet until a daemon says which"
-    ), CELL_OK if named and verdict == "network_is_test" else CELL_WARN if named else CELL_UNKNOWN)
+    ), CELL_OK if named and verdict == NETWORK_IS_TEST else CELL_WARN if named else CELL_UNKNOWN)
 
+    # THE THREE LOCK STATES MAP ONTO THREE CELL STATES, ONE EACH, AND NOT TWO ONTO ONE.
+    # chains/daemon_wallet.encryption_note()'s own docstring: "THE THIRD STATE IS NOT
+    # 'NOT ENCRYPTED', which is the whole reason this is a classifier" -- a viewer can
+    # say it could not tell, and reporting "not encrypted" for a daemon that never
+    # answered would be a measurement nobody took. So:
+    #
+    #   not_encrypted    ok       nothing has to be unlocked before this wallet signs.
+    #   encrypted        warn     THE fact that decides whether a payout can be made at
+    #                             all, and it is invisible in every balance figure on
+    #                             every other screen.
+    #   not_established  unknown  nobody could tell, which is neither of the above.
     encryption = wallet.get("encryption") or {}
     lock_state = str(encryption.get("state") or "")
     lock_cell = _cell("Wallet", lock_state or "(not established)", (
-        f"{encryption.get('why') or 'the wallet lock state was not reported'}. Reported, never "
-        f"offered: nothing on this page would collect a passphrase"
-    ), CELL_OK if lock_state == "unencrypted" else CELL_WARN if lock_state else CELL_UNKNOWN)
+        f"{str(encryption.get('why') or 'the wallet lock state was not reported').rstrip('. ')}. "
+        f"Reported, never offered: nothing on this page would collect a passphrase"
+    ), CELL_OK if lock_state == LOCK_NOT_ENCRYPTED
+       else CELL_WARN if lock_state == LOCK_ENCRYPTED
+       else CELL_UNKNOWN)
 
     return (sync_cell, blocks_cell, peers_cell, network_cell, lock_cell)
 

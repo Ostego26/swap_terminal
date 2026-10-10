@@ -659,7 +659,12 @@
   {%- if data.asked %}
   {%- for row in live.answers %}
   <section class="panel cw-pane" id="{{ data.qt.pane_anchors[row.pane.title] }}">
-    <h2>{{ row.pane.title }}</h2>
+    {#- THE SUFFIX DISAMBIGUATES TWO SECTIONS THAT WOULD OTHERWISE SHARE A HEADING.
+        The fixed Overview section above is the Qt-equivalent figures card; this one is
+        the pane question's own translated answer, and PANE_QUESTIONS' first title is
+        also "Overview". Two <h2>Overview</h2> on one page is ambiguous in a paste,
+        which is the instrument this operator reads these pages with. -#}
+    <h2>{{ row.pane.title }} &#183; the translated answer</h2>
     <p class="panel-note">{{ row.pane.what }}<br>
        <span class="subtle">asked as <code>{{ row.pane.question }}</code>{% if row.translated %},
        sent as <code>{{ row.translated }}</code>{% endif %}</span></p>
@@ -702,7 +707,7 @@
   {%- else %}
   {%- for pane in data.panes %}
   <section class="panel cw-pane" id="{{ data.qt.pane_anchors[pane.title] }}">
-    <h2>{{ pane.title }}</h2>
+    <h2>{{ pane.title }} &#183; the translated answer</h2>
     <p class="panel-note">{{ pane.what }}<br>
        <span class="subtle">would be asked as <code>{{ pane.question }}</code>, translated through this
        chain's command map</span></p>

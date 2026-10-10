@@ -49,6 +49,12 @@ from pathlib import Path
 
 import app as app_module
 import pytest
+from chains.daemon_wallet import (
+    LOCK_ENCRYPTED,
+    LOCK_NOT_ENCRYPTED,
+    LOCK_NOT_ESTABLISHED,
+    LOCK_STATES,
+)
 from chains.solana_units import COMMITMENT_RANKS, DISCOVERY_COMMITMENT, FINALIZED_RANK
 from services import chain_panel as panel
 from services import chain_wallet_layout as layout
@@ -895,6 +901,71 @@ def test_a_node_with_no_peers_WARNS_and_a_node_nobody_asked_does_not():
     assert all(cell.state == layout.CELL_UNKNOWN for cell in unasked), (
         "a page nobody has asked reports a warning, which makes the real warning unreadable"
     )
+
+
+def test_each_of_the_THREE_lock_states_gets_its_own_cell_state():
+    """The bug this test was written for, and it was invisible to every other assertion.
+
+    THE DEFECT, found 2026-10-10 by reading a rendered page rather than by running
+    anything: services/chain_wallet_layout.core_status_bar() compared the lock state
+    against the literal `"unencrypted"`, and chains/daemon_wallet.LOCK_NOT_ENCRYPTED is
+    `"not_encrypted"`. So an UNENCRYPTED wallet -- nothing to unlock, nothing in the way
+    of a payout -- rendered in the status bar as `[!]`, the warning glyph, beside a
+    sentence saying there was no passphrase.
+
+    WHY NOTHING CAUGHT IT. A state comparison against a string nothing produces does not
+    fail; it simply never matches. The cell still rendered, still carried a label, a
+    value, a glyph and a sentence, and still passed the "status bar is never empty"
+    check. A warning that fires on the healthy case is rule 13's argument about a
+    warning that fires on every run: the reader learns to ignore it, and then misses the
+    real one -- which here is an ENCRYPTED wallet that a payout cannot leave, which is
+    the single fact that decides whether a GRC payout can be made at all and is
+    invisible in every balance figure on every other screen.
+
+    THREE STATES ONTO THREE, NOT TWO ONTO ONE. encryption_note()'s own docstring: "THE
+    THIRD STATE IS NOT 'NOT ENCRYPTED', which is the whole reason this is a classifier"
+    -- a viewer can say it could not tell, and reporting "not encrypted" for a daemon
+    that never answered would be a measurement nobody took.
+
+    MUTATION: compare against the literal `"unencrypted"` again, which is what the code
+    said. The first case fails. Collapse `not_established` into either of the other two
+    and the third fails.
+    """
+    cases = {
+        # No `unlocked_until` at all: a Bitcoin-derived daemon reports that field ONLY
+        # for an encrypted wallet, so its absence means there is no passphrase.
+        LOCK_NOT_ENCRYPTED: (CORE_COMPLETE, layout.CELL_OK),
+        # `unlocked_until` present: encrypted, and a payout needs a passphrase.
+        LOCK_ENCRYPTED: ({**CORE_COMPLETE,
+                          "getwalletinfo": {**CORE_COMPLETE["getwalletinfo"],
+                                            "unlocked_until": 0}}, layout.CELL_WARN),
+        # getwalletinfo did not answer: NOT a claim that the wallet has no passphrase.
+        LOCK_NOT_ESTABLISHED: ({**CORE_COMPLETE,
+                                "getwalletinfo": RuntimeError("Method not found"),
+                                "getinfo": {"balance": 1.5}}, layout.CELL_UNKNOWN),
+    }
+    assert set(cases) == set(LOCK_STATES), (
+        "a lock state exists that this test does not cover, which is how the first one "
+        "stopped being covered"
+    )
+    for expected_lock, (answers, expected_cell) in cases.items():
+        adapters = {"BTC": Answering("BTC", answers)}
+        result = panel.chain_panel(_app(adapters).config, adapters, "BTC", ask=True)
+        reported = result["live"]["panes"]["wallet"]["encryption"]["state"]
+        assert reported == expected_lock, (
+            f"the fixture no longer produces {expected_lock}: the daemon reported {reported}"
+        )
+        cell = next(c for c in result["qt"]["status"] if c.label == "Wallet")
+        assert cell.state == expected_cell, (
+            f"a {expected_lock} wallet renders {cell.state} in the status bar, expected "
+            f"{expected_cell}. {cell}"
+        )
+        assert cell.value == expected_lock, cell
+        assert "never offered" in cell.note, "the cell no longer says it offers no unlock"
+        # AND THE SENTENCE IS NOT DOUBLE-PUNCTUATED. encryption_note()'s `why` already
+        # ends in a period and this cell appends one; the first version produced "..it
+        # can sign.. Reported", which is the kind of thing a reader stops trusting.
+        assert ".. " not in cell.note, cell.note
 
 
 def test_solanas_bar_carries_the_COMMITMENT_RUNG_from_the_one_place_that_owns_it():
