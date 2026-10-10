@@ -420,6 +420,23 @@ SERVICE_SIDE = frozenset({
     # who signs, not which ledger is reached, and chains/icp.py's adapter cannot
     # supply one because it is --identity anonymous by construction.
     "pay_icp_deposit.py",
+    # pay_deposit.py, added 2026-10-10. SERVICE SIDE, for pay_icp_deposit.py's reason
+    # above with one chain-specific sharpening.
+    #
+    # It pays the CUSTOMER side of a BTC or LTC swap, to the deposit address recorded in
+    # swap_terminal.db -- an address derived by the daemon's own getnewaddress, which
+    # means it exists in exactly ONE wallet. A conf fallback reaching a different
+    # daemon would not merely send to the wrong chain; it would send to an address that
+    # daemon has never heard of, so the coins would go to whoever can spend that script
+    # on that network and the swap would sit at awaiting_deposit forever.
+    #
+    # ON REGTEST THAT IS A PRIVATE CHAIN AND THE LOSS IS NOTIONAL. On testnet it is
+    # faucet coins. On MAINNET it would be real, which is why refuse_mainnet() reads
+    # chains/daemon_network.test_network_verdict() against what the DAEMON reports and
+    # offers no override -- but a refusal inside the tool is not a reason for the
+    # resolver to be loose, and this register is about which daemon is reached rather
+    # than about what the tool does once it gets there.
+    "pay_deposit.py",
 })
 # show_swap.py was in this set for one commit and the register's own completeness
 # check removed it: it reads swap_terminal.db and resolves no chain at all, so a

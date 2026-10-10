@@ -146,21 +146,28 @@ PAYERS: dict[str, DepositPayer] = {
         "by hand, which is how the 82.65 tGRC was lost on a different chain.",
     ),
     "BTC": DepositPayer(
-        tool="",
-        arming="",
-        note="NOTHING PAYS THIS LEG. The send itself is one call -- "
-        "chains/base.RPCAdapter.send_to_address(address, amount), which BitcoinAdapter "
-        "inherits unchanged, with can_spend = True. What is missing is the swap-aware "
-        "wrapper: the lookup by deposit address, and the refusals around status, expiry "
-        "and an already-recorded deposit. pay_icp_deposit.py's refuse() is already "
-        "chain-independent apart from its one from_asset check, so this is a small change "
-        "and not a new design.",
+        tool="python3 pay_deposit.py --deposit-address <the address on the page> --apply",
+        arming="an unlocked wallet, and a daemon reporting a TEST network -- "
+        "pay_deposit.refuse_mainnet() has no override flag",
+        note="Added 2026-10-10. This entry previously read NOTHING PAYS THIS LEG and "
+        "predicted that the wall would be hit three more times; it was hit on LTC the same "
+        "day. The send is base.send_to_address() exactly as that note said, and the wrapper "
+        "adds the lookup by deposit address plus the refusals. ONE GUARD pay_icp_deposit.py "
+        "DOES NOT NEED: a Bitcoin-family send has no idempotency key, so "
+        "refuse_already_paid() asks the DAEMON whether the address was already paid. The "
+        "database cannot answer that for the 15s before the watcher writes a row, and two "
+        "runs inside that window are two transactions.",
     ),
     "LTC": DepositPayer(
-        tool="",
-        arming="",
-        note="NOTHING PAYS THIS LEG. Identical to BTC: LitecoinAdapter inherits "
-        "base.send_to_address unchanged. Same missing wrapper, same small change.",
+        tool="python3 pay_deposit.py --deposit-address <the address on the page> --apply",
+        arming="an unlocked wallet, and a daemon reporting a TEST network",
+        note="Same tool and same guards as BTC. WRITTEN FROM A MEASUREMENT ON THE "
+        "OPERATOR'S HOST 2026-10-10: a swap wanted 0.06030068 LTC, the desk's testnet wallet "
+        "held 0.02, and a hand-rolled send was answered with Insufficient funds (rpc code "
+        "-6) only AFTER it had been attempted. pay_deposit.py reads the balance and the "
+        "network first. tLTC cannot be minted here -- the daemon reports test rather than "
+        "regtest, so fund_testnets.py's generatetoaddress does not apply and "
+        "testnet_wallets.py names the faucets instead.",
     ),
     "GRC": DepositPayer(
         tool="",
