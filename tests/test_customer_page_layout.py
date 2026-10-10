@@ -1131,7 +1131,13 @@ def test_the_env_remedy_sentence_is_printed_once_per_asset_not_once_per_pair(cli
     """
     monkeypatch.setitem(client.application.config, "ADAPTERS", {})
     body = html.unescape(client.get("/admin").get_data(as_text=True))
-    remedy = "Nothing in the serving path reads a .env"
+    # THE SUBSTRING CHANGED ON 2026-10-10 and the reason is worth keeping: the sentence
+    # used to say "Nothing in the serving path reads a .env", which stopped being true
+    # when config.read_env_file() began reading the database location out of it. The
+    # phrase matched here is the part that is still load-bearing -- that a CREDENTIAL
+    # has to be exported -- rather than the whole paragraph, so a rewording of the
+    # explanation does not fail a test about page length.
+    remedy = "DELIBERATELY NEVER a credential"
     occurrences = body.count(remedy)
 
     assert occurrences >= 1, "the remedy sentence left the page entirely"

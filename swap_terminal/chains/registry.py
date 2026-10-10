@@ -456,10 +456,24 @@ def why_unconfigured(asset: str, rpc: Mapping[str, object] | None = None) -> str
     named = missing[0] if len(missing) == 1 else ", ".join(missing[:-1]) + f" and {missing[-1]}"
     verb = "is" if len(missing) == 1 else "are"
     return (
+        # THE SENTENCE WAS "Nothing in the serving path reads a .env" UNTIL 2026-10-10,
+        # and that became imprecise the same day. config.read_env_file() now reads TWO
+        # keys out of .env -- SWAP_DB_PATH and SWAP_DB_DIR -- because SWAP_DB_DIR and
+        # SWAP_DB_PATH were two names for one fact and an operator who moved the database
+        # moved the container and not the host tools.
+        #
+        # NO CREDENTIAL IS IN THAT ALLOWLIST AND THAT IS THE POINT, so the remedy for an
+        # RPC variable is unchanged: it has to be exported. Saying "nothing reads a .env"
+        # would now be false, and saying ".env is read" would be worse -- an operator
+        # would put GRC_RPC_PORT in the file and watch it do nothing. So the line names
+        # WHICH keys are read and why the rest are not, which is the only version that
+        # leads to the right action.
         f"{asset} has no adapter in this process: {named} {verb} unset (or 0) in the environment this "
-        f"process was started with. Nothing in the serving path reads a .env, so it has to be exported in "
-        f"the shell that starts the server -- a value set only in a file, or only in another shell, does "
-        f"not reach here."
+        f"process was started with. The serving path reads ONLY the database location out of .env "
+        f"(SWAP_DB_PATH and SWAP_DB_DIR) and DELIBERATELY NEVER a credential -- reading those would arm "
+        f"every process that imports Config -- so this has to be exported in the shell that starts the "
+        f"server, or supplied by compose. A value set only in .env, or only in another shell, does not "
+        f"reach here."
     )
 
 

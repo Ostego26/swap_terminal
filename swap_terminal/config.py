@@ -398,9 +398,163 @@ class RpcSettings(TypedDict):
     ICP: IcpRpc
 
 
+#: The .env docker compose already reads, as this process can see it.
+#:
+#: REPO_ROOT and not BASE_DIR: compose reads the .env beside docker-compose.yml, which
+#: is the repository root, while BASE_DIR is swap_terminal/ one level down.
+ENV_FILE = BASE_DIR.parent / ".env"
+
+#: THE ONLY TWO KEYS READ OUT OF IT, AND THE ALLOWLIST IS THE POINT.
+#:
+#: .env holds GRIDCOIN_WALLET_PASSPHRASE and the RPC credentials. Reading those here
+#: would ARM every host process that imports Config -- a reporting tool, a root
+#: diagnostic, anything -- with the ability to unlock a wallet, which is an arming
+#: decision and belongs to the operator (rule 16), not to an import. So this reads two
+#: keys, both of which name a FILESYSTEM LOCATION and neither of which is a secret.
+#:
+#: Adding a third key to this tuple is an arming decision. Say so out loud.
+ENV_FILE_KEYS = ("SWAP_DB_PATH", "SWAP_DB_DIR")
+
+#: The quote characters compose's own dotenv parser honors, and the shortest value
+#: that can be quoted at all (a pair of quotes with nothing between them).
+#: set_grc_passphrase.sh writes single-quoted values, and a path read with its quotes
+#: still attached is a path that does not exist.
+_DOTENV_QUOTES = "\"'"
+_QUOTED_MINIMUM = 2
+
+#: What a database is called inside SWAP_DB_DIR. Named once (rule 11) because
+#: docker-compose.web.yml spells the same thing as SWAP_DB_PATH=/data/swap_terminal.db.
+DB_FILENAME = "swap_terminal.db"
+
+
+def read_env_file(path=None) -> dict:
+    """The allowlisted keys from a dotenv file. Returns {} if it is absent or unreadable.
+
+    `path=None` AND RESOLVED IN THE BODY, NOT `path=ENV_FILE` IN THE SIGNATURE. A
+    default argument is evaluated once, when the function is DEFINED, so the second
+    form binds this module's ENV_FILE forever and reassigning config.ENV_FILE
+    afterwards changes nothing. I wrote it that way first and caught it within a
+    minute by running the four provenance cases: three of them read the real
+    repository root instead of the temp directory the probe had pointed ENV_FILE at,
+    and all three reported "the built-in default" -- a confident, wrong provenance
+    claim, which is this function's entire subject arriving in the function itself.
+    Resolving in the body also makes the file overridable, which is what lets a test
+    point it at tmp_path rather than editing the repository's own .env.
+
+    =========================================================================
+    THIS IS NOT load_dotenv(), AND THE DIFFERENCE IS THE WHOLE JUSTIFICATION
+    =========================================================================
+
+    This module's own header says, and has said since it was written: "nothing here
+    reads a .env, and adding load_dotenv() to a module read at import is the
+    import-time side effect rule 12 names as a measured past defect." That stays true
+    and this does not violate it.
+
+    What rule 12 forbids is a module that MUTATES os.environ or writes the filesystem
+    when imported, because every later import then becomes order-dependent. This
+    function mutates nothing. It opens one file in the repository root, reads at most
+    two keys out of it into a dict, and returns it. os.environ is untouched, so a
+    process that imports Config sees exactly the environment it started with, and the
+    environment still WINS over anything in here (see DB_PATH below).
+
+    =========================================================================
+    WHY IT EXISTS: SWAP_DB_DIR AND SWAP_DB_PATH WERE TWO NAMES FOR ONE FACT
+    =========================================================================
+
+    Measured on the operator's host 2026-10-10. They moved the database out of a MEGA
+    sync folder -- correctly, and with the tooling telling them to:
+
+        mv swap_terminal/swap_terminal.db ~/.local/share/swap_terminal/
+        sed -i 's|^SWAP_DB_DIR=.*|SWAP_DB_DIR=/home/.../.local/share/swap_terminal|' .env
+        docker compose up -d --force-recreate web
+
+    The CONTAINER followed, because compose reads .env and
+    docker-compose.web.yml sets SWAP_DB_PATH=/data/swap_terminal.db over the new
+    mount. Every HOST tool did not, because nothing on the host reads .env and
+    SWAP_DB_PATH was unset in their shell -- so Config.DB_PATH fell back to
+    BASE_DIR/swap_terminal.db, a file that no longer existed. `swap_stack.py status`
+    then reported the OLD path, and its own new share check dutifully reported that
+    MEGA was syncing a database that was no longer there.
+
+    That is rule 11 in its exact stated form: one concept, derived in two places,
+    which agreed on the day they were written and drifted the moment one moved. And
+    rule 15's: the authority's LOCATION was itself ambiguous, so "one database" was
+    not a property anything enforced.
+
+    THE PRECEDENCE, and the environment stays on top:
+
+      SWAP_DB_PATH in the process environment   wins, always. The container sets it,
+                                                tests/conftest.py sets it, and an
+                                                operator overriding for one command
+                                                must not be second-guessed by a file.
+      SWAP_DB_PATH in .env                      next, for a host shell that has not
+                                                exported anything.
+      SWAP_DB_DIR in .env + DB_FILENAME         THE BRIDGE. This is the line that
+                                                makes the host agree with the
+                                                container by construction rather than
+                                                by the operator remembering to set
+                                                two variables to the same place.
+      BASE_DIR/swap_terminal.db                 unchanged, as it always was.
+
+    OSError IS SWALLOWED AND NAMED (rule 12). A .env that is absent, or mode 600 and
+    owned by someone else, is an ordinary state -- set_grc_passphrase.sh chmods it to
+    600 on purpose -- and Config must not fail to import because of it. The caller can
+    tell this from a real answer because an empty dict falls through to the next
+    source, and workers/common.db_path_source() reports WHICH source won.
+    """
+    found = {}
+    try:
+        text = Path(ENV_FILE if path is None else path).read_text()
+    except OSError:
+        return found
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, _, value = stripped.partition("=")
+        name = name.strip()
+        if name not in ENV_FILE_KEYS:
+            continue
+        # SINGLE AND DOUBLE QUOTES STRIPPED, because set_grc_passphrase.sh writes
+        # single-quoted values and compose's own parser treats them as literal. A
+        # path read with its quotes still attached is a path that does not exist.
+        value = value.strip()
+        if len(value) >= _QUOTED_MINIMUM and value[0] == value[-1] and value[0] in _DOTENV_QUOTES:
+            value = value[1:-1]
+        if value:
+            found[name] = value
+    return found
+
+
+def database_path() -> str:
+    """Where the swap database is, from the one derivation every process shares.
+
+    SEE read_env_file() for the precedence and for the measurement that produced it.
+    This function is the single place that applies it, so a host tool, a worker and
+    the container cannot disagree about which file is the authority (rule 15).
+    """
+    from_environment = _env("SWAP_DB_PATH")
+    if from_environment:
+        return from_environment
+
+    from_file = read_env_file()
+    if from_file.get("SWAP_DB_PATH"):
+        return from_file["SWAP_DB_PATH"]
+    if from_file.get("SWAP_DB_DIR"):
+        # THE DIRECTORY, NEVER THE FILE -- docker-compose.web.yml refuses a
+        # SWAP_DB_DIR that names the file, because WAL keeps -wal and -shm sidecars
+        # beside it and they must be one mount. Joining DB_FILENAME here is the same
+        # rule applied on the host side.
+        return str(Path(from_file["SWAP_DB_DIR"]).expanduser() / DB_FILENAME)
+    return str(BASE_DIR / DB_FILENAME)
+
+
 class Config:
     SECRET_KEY = _env("SECRET_KEY", "swap-terminal-dev")
-    DB_PATH = _env("SWAP_DB_PATH", str(BASE_DIR / "swap_terminal.db"))
+    # NOT _env("SWAP_DB_PATH", ...) ANY MORE. See database_path() and read_env_file():
+    # the operator moved the database, updated .env, and every host tool kept opening
+    # the old path because nothing on the host read .env.
+    DB_PATH = database_path()
     QUOTE_TTL_SECONDS = _env_int("QUOTE_TTL_SECONDS", "600")
     RATE_CACHE_SECONDS = _env_int("RATE_CACHE_SECONDS", "30")
     # ClassVar BECAUSE icp_operator_admin.PostureSource DECLARES IT ONE, and that is
