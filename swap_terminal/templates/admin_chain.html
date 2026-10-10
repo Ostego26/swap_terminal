@@ -115,9 +115,14 @@
    <span class="empty-params">asset={{ asset }} &#183; adapter=absent &#183; would have shown: {{ what }}</span></p>
 {%- else %}
 <p class="empty"><span class="empty-mark">(not asked)</span>
-   <span class="empty-what">{{ what }} is not shown because nobody has asked {{ asset }} yet. This is not
-   a figure of zero and not an outage &#8212; it is a page that contacts nothing until told to. Use
-   <em>Ask {{ asset }} now</em> above.</span>
+   {#- "{{ what }} &#8212; NOT SHOWN" RATHER THAN "{{ what }} is not shown", because
+       `what` is sometimes plural ("The balance card and the recent transactions") and
+       sometimes singular ("This answer"), and one macro cannot conjugate for both. It
+       read "...and the recent transactions is not shown", which is the kind of sentence
+       a reader starts discounting the rest of the page for. -#}
+   <span class="empty-what">{{ what }} &#8212; <strong>NOT SHOWN</strong>, because nobody has asked
+   {{ asset }} yet. This is not a figure of zero and not an outage &#8212; it is a page that contacts
+   nothing until told to. Use <em>Ask {{ asset }} now</em> above.</span>
    <span class="empty-params">asset={{ asset }} &#183; asked=no</span></p>
 {%- endif %}
 {%- endmacro %}
