@@ -1172,12 +1172,18 @@ def core_status_bar(live: Mapping) -> tuple[Cell, ...]:
     rather than only in a table four sections up.
     """
     sync = live.get("sync") or {}
-    node = live.get("node") if isinstance(live.get("node"), Mapping) else {}
     panes = live.get("panes") or {}
     wallet = panes.get("wallet") or {}
     peers = (panes.get("peers") or {}).get("rows") or []
     peer_error = (panes.get("peers") or {}).get("error") or ""
-    node_fields = panes.get("node") if isinstance(panes.get("node"), Mapping) else node
+    # THE Information PANE'S OWN FIELDS, which is the only place a block height lives
+    # besides the sync verdict. A LOOKUP AND NOT A FALLBACK CHAIN: this read
+    # `live.get("node")` first and fell back to `panes.get("node")`, and the first of
+    # those is a key services/chain_panel.core_live() does not return -- so it was a
+    # branch that could never be taken, which is rule 9's dead code wearing a defensive
+    # hat. The payload is {"panes", "network", "network_named", "network_verdict",
+    # "sync", "bech32", "rpc_calls"}; `node` lives inside `panes`.
+    node_fields = panes.get("node") if isinstance(panes.get("node"), Mapping) else {}
 
     blocks = sync.get("blocks")
     behind = sync.get("behind")
