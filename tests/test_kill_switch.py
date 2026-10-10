@@ -52,6 +52,7 @@ import contextlib
 import ipaddress
 import json
 import os
+import pathlib
 import socket
 import subprocess
 import sys
@@ -958,8 +959,35 @@ def loopback_listener():
 #: POST handler moved to the customer entry point -- SAME function, same imports,
 #: same two service calls. The review below is unchanged because nothing about
 #: the handler changed; only the URL it answers on.
+#: /admin/swaps/<swap_id>/rescue ARRIVED 2026-10-10, the first control on the operator
+#: surface, after the operator asked five times:
+#:
+#:   "i asked for just a fucking control panel and i got a dumbass verbose pile of shit
+#:    that doesn't control anything"      "no controls. no buttons. nothing."
+#:   "why have you been dancing the fuck around on trols."
+#:
+#: REVIEWED AGAINST THIS FILE'S CLAIM, which is about signaling and spawning rather than
+#: about writing. routes/admin.rescue_swap_action() sends no signal and starts no process:
+#: it imports nothing from supervisor, subprocess, signal or os, and the only thing it
+#: calls that writes is services/payout_rescue.apply_rescue(), which issues three SQL
+#: statements against swap_terminal.db. Checked by reading the handler and by
+#: test_the_rescue_route_signals_nothing_and_spawns_nothing below, which asserts the
+#: absence over the module's own source rather than trusting this sentence.
+#:
+#: IT IS NOT HARMLESS AND IS NOT CLAIMED TO BE. It moves a swap to 'payout_pending', and
+#: workers/payout_worker.py then broadcasts -- so it is one step upstream of a send,
+#: exactly as rescue_payout.py is. What makes that acceptable on an unauthenticated
+#: surface is the gate, not the absence of consequence: payout_rescue.rescue_verdict()
+#: refuses any swap it cannot PROVE was never broadcast, and the same control_refusals()
+#: the buttons on /admin/controls use runs first.
 REVIEWED_NON_SPAWNING_POST_ROUTES = frozenset(
-    {"/api/quotes", "/api/swaps", "/swap/<swap_id>/address-proof", "/"}
+    {
+        "/api/quotes",
+        "/api/swaps",
+        "/swap/<swap_id>/address-proof",
+        "/",
+        "/admin/swaps/<swap_id>/rescue",
+    }
 )
 
 
@@ -1481,3 +1509,37 @@ def test_the_publish_line_is_ABSENT_on_a_plain_host_and_present_when_it_is_IGNOR
     confused = "\n".join(kill_switch.bind_evidence(_exposed(in_container=False, publish="127.0.0.1")))
     assert "SET BUT IGNORED" in confused
     assert "no publish to declare" in confused
+
+
+def test_the_rescue_route_signals_nothing_and_spawns_nothing():
+    """The claim REVIEWED_NON_SPAWNING_POST_ROUTES makes about the rescue route, checked.
+
+    A comment saying "this handler spawns nothing" is a claim; this reads the module and
+    asserts it. The distinction matters because the set above is what stops an unreviewed
+    write surface appearing, and an entry added on the strength of a sentence nobody
+    verified is the set failing quietly.
+
+    READS THE SOURCE rather than calling the handler, because the absence of a capability
+    cannot be established by one request not using it. What is asserted is that the module
+    does not IMPORT the means: no subprocess, no signal, no os.kill, no supervisor.
+    """
+    source = (
+        pathlib.Path(app_module.__file__).resolve().parent / "routes" / "admin.py"
+    ).read_text()
+    for forbidden in ("import subprocess", "import signal", "os.kill", "import supervisor",
+                      "from supervisor", "Popen", "os.system", "os.exec"):
+        assert forbidden not in source, (
+            f"routes/admin.py contains {forbidden!r}, so it can signal or spawn -- and it is "
+            f"listed in REVIEWED_NON_SPAWNING_POST_ROUTES as a route that cannot. Either the "
+            f"route changed or that entry is now false."
+        )
+    # AND THE GATE IS ACTUALLY CALLED. A rescue route that imported control_refusals and
+    # never invoked it would pass every assertion above while refusing nobody.
+    assert "control_refusals(" in source, (
+        "routes/admin.py does not call control_refusals(), so the rescue button is not behind "
+        "the same guard /admin/controls uses"
+    )
+    assert "rescue_verdict(" in source, (
+        "routes/admin.py does not call rescue_verdict(), so the rescue button does not consult "
+        "the gate that proves a payout was never broadcast"
+    )

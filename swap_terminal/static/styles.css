@@ -2326,3 +2326,30 @@ h2:target {
   font-size: var(--t-xs);
   white-space: pre-wrap;
 }
+
+/* THE RESCUE CONTROL, 2026-10-10 -- the first button on the operator surface. Sits inside
+   the failure-reason cell of a failed payout row, so it is styled tight: the row is
+   already full-width prose and a block-level form would push the table apart. */
+.rescue-form { display: inline; margin-left: 0.6em; }
+
+.rescue-button {
+  padding: 0.2em 0.8em;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rescue-button:hover,
+.rescue-button:focus-visible {
+  background: currentColor;
+  color: var(--paper, #fff);
+  outline: 2px solid currentColor;
+  outline-offset: 1px;
+}
+
+/* Pressed. One pixel, so the click reads as taken rather than as the page reloading. */
+.rescue-button:active { transform: translateY(1px); }

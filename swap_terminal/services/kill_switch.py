@@ -146,7 +146,13 @@ from typing import Protocol
 
 import supervisor
 from config import Config
-from loopback import LOOPBACK_HOSTS, host_of, is_loopback_host, listening_addresses
+from loopback import (
+    LOOPBACK_HOSTS,
+    default_gateway,
+    host_of,
+    is_loopback_host,
+    listening_addresses,
+)
 from microfortnights import format_duration
 from services.admin_view import worker_stopped_consequence
 
@@ -577,6 +583,14 @@ class RequestFacts:
     #: control surface that arms a payout worker must refuse the pair. What this
     #: flag buys is an honest explanation instead of a wrong instruction.
     in_container: bool = False
+    #: What this container's default route points at, read from /proc/net/route by
+    #: loopback.default_gateway(). None on a host, or when the table cannot be read.
+    #:
+    #: IT IS A FACT ABOUT THIS PROCESS, NOT ABOUT THE REQUEST, which is the only reason
+    #: it may be used in a refusal at all: every other peer signal is something a caller
+    #: writes. See the peer branch in refuse_cross_origin() and default_gateway()'s own
+    #: docstring for the measurement that put it there.
+    gateway: str | None = None
 
     @classmethod
     def observed(cls, headers: CaseInsensitiveHeaders, remote_addr: str | None) -> RequestFacts:
@@ -592,6 +606,7 @@ class RequestFacts:
             env=os.environ,
             listening=listening_addresses(),
             in_container=in_a_container(),
+            gateway=default_gateway(),
         )
 
 
@@ -946,11 +961,73 @@ def refuse_cross_origin(facts: RequestFacts) -> list[str]:
             "This request has no peer address, so where it came from could not be established. "
             "A real request always has one."
         )
-    elif not is_loopback_host(facts.remote_addr):
+    elif not _peer_is_this_machine(facts):
         refusals.append(
             f"This request arrived from {facts.remote_addr}, which is not this machine."
+            + (
+                f" This container's default route points at {facts.gateway}, which WOULD be "
+                f"accepted as the host -- but the publish is not declared loopback, so who can "
+                f"reach the published port is unknown."
+                if facts.in_container and facts.remote_addr == facts.gateway
+                else ""
+            )
         )
     return refusals
+
+
+def _peer_is_this_machine(facts: RequestFacts) -> bool:
+    """Is the caller the machine running this desk? The peer half of the control guard.
+
+    A LOOPBACK PEER ALWAYS QUALIFIES and that is the original check, unchanged.
+
+    THE BRIDGE GATEWAY ALSO QUALIFIES, INSIDE A CONTAINER WHOSE PUBLISH IS DECLARED
+    LOOPBACK, and this is the 2026-10-10 fix. Measured off the operator's own rendered
+    page:
+
+        THESE CONTROLS ARE REFUSING. No button is rendered below.
+        This request arrived from 172.18.0.1, which is not this machine.
+        bind  SWAP_TERMINAL_PUBLISH_HOST: '127.0.0.1' -- declared loopback
+
+    Read those two lines together: the BIND guard passed -- the publish is loopback, so
+    refuse_off_box() was satisfied -- and the PEER check refused on 172.18.0.1, which is
+    the docker bridge gateway. That is the operator's own machine, reaching the published
+    port from the host side. A bridged container never sees a loopback peer from outside
+    itself, so on the only deployment this repository ships -- compose, bridge, published
+    port -- the controls could not be operated by anybody, ever. The operator said so five
+    times ("no controls. no buttons. nothing.") and this line was the cause.
+
+    A RECOGNITION, NOT A RELAXATION. The check's question is "is the caller the machine
+    running the desk". On a bridged container the gateway IS that machine, so admitting it
+    answers the question correctly rather than lowering the bar. And the comparison value
+    comes from the KERNEL -- this container's routing table -- not from anything the
+    caller sent, so it stays evidential where the Host header and Origin are not.
+
+    THREE CONDITIONS, ALL REQUIRED, and each closes a hole the others do not:
+
+      in_container        on a host there is no bridge and no reason to admit a gateway;
+                          a host's default route points at its router, which is emphatically
+                          not this machine.
+      publish is loopback the one fact that says who can reach the published port. It is a
+                          DECLARATION the container cannot verify -- publish_verdict()'s
+                          own docstring says so -- but it is not one a CALLER can write,
+                          which is what matters here.
+      peer == gateway     and nothing else. Every OTHER container on the same bridge
+                          arrives from its own 172.18.0.x, not from .1, so a sibling
+                          container is still refused. That is OPEN_FINDINGS finding 4 and
+                          this leaves it exactly where it was.
+
+    A gateway of None -- unreadable routing table -- qualifies nothing: `facts.gateway ==
+    facts.remote_addr` is False against a real peer address, so an unestablished fact
+    refuses, which is the posture every other branch of this guard takes.
+    """
+    if is_loopback_host(facts.remote_addr or ""):
+        return True
+    return bool(
+        facts.in_container
+        and facts.gateway
+        and facts.remote_addr == facts.gateway
+        and publish_verdict(facts) == PUBLISH_LOOPBACK
+    )
 
 
 def control_refusals(facts: RequestFacts) -> list[str]:

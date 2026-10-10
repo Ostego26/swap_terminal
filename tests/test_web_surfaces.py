@@ -530,12 +530,29 @@ def test_an_xrp_swap_shows_a_destination_tag_panel_and_refuses_to_show_a_target(
 # --- the operator surface ---------------------------------------------------
 
 
-def test_the_admin_blueprint_registers_no_write_method():
-    """READ-ONLY, proven over the app's REAL url map rather than by reading the file.
+def test_the_admin_blueprint_registers_EXACTLY_ONE_write_method():
+    """ONE write, named, proven over the app's REAL url map rather than by reading the file.
 
-    MUTATION: add `@bp.post("/admin/retry")` to routes/admin.py. This fails
-    immediately. Reading the source and seeing only `@bp.get` proves nothing
-    about the next edit, which is exactly what this constraint has to survive.
+    THIS ASSERTED ZERO UNTIL 2026-10-10, and the change is the operator's, asked for five
+    times:
+
+      "i asked for just a fucking control panel and i got a dumbass verbose pile of shit
+       that doesn't control anything or tell me anything useful really."
+      "no controls. no buttons. nothing."
+      "why have you been dancing the fuck around on trols. i have said i want a fucking
+       control panel for awhile now."
+
+    The read-only posture was not wrong, it was over-broad: it treated every possible
+    button as the button that spends. Re-driving a payout that was refused BEFORE signing
+    signs nothing, and refusing to build it was the dancing the operator named.
+
+    SO THE ASSERTION IS NOW AN ALLOWLIST OF ONE RATHER THAN AN EMPTINESS, which is
+    strictly more useful: a SECOND write arriving fails here and has to be looked at
+    deliberately, and the one that exists is named with what guards it. An emptiness
+    assertion could only ever say "something appeared".
+
+    MUTATION: add `@bp.post("/admin/retry")` to routes/admin.py. This still fails
+    immediately, which is the property worth keeping.
     """
     writes = set()
     for rule in app_module.app.url_map.iter_rules():
@@ -551,8 +568,21 @@ def test_the_admin_blueprint_registers_no_write_method():
             assert rule.methods is not None, (
                 f"admin rule {rule.rule} declares no methods, so it answers ANY verb including POST"
             )
-            writes |= set(rule.methods) - {"GET", "HEAD", "OPTIONS"}
-    assert writes == set(), f"the admin surface must be read-only; found {sorted(writes)}"
+            for verb in set(rule.methods) - {"GET", "HEAD", "OPTIONS"}:
+                writes.add((rule.rule, verb))
+
+    # THE ONE WRITE, AND IT IS SPELLED OUT. Behind services/kill_switch.control_refusals()
+    # -- the same guard /admin/controls uses -- and behind
+    # services/payout_rescue.rescue_verdict(), which refuses any swap it cannot prove was
+    # never broadcast. tests/test_kill_switch.py asserts both calls exist in the handler
+    # and that the module imports no means of signaling or spawning.
+    allowed = {("/admin/swaps/<swap_id>/rescue", "POST")}
+    assert writes == allowed, (
+        f"the admin surface registers exactly one write method and it is the rescue control. "
+        f"Found {sorted(writes)}, expected {sorted(allowed)}. A new write surface on an "
+        f"unauthenticated page has to be reviewed deliberately -- see this test's docstring "
+        f"and tests/test_kill_switch.REVIEWED_NON_SPAWNING_POST_ROUTES."
+    )
 
 
 def test_up_can_actually_read_the_chain_probe_it_asks_for(client):
@@ -1475,7 +1505,7 @@ def test_the_peg_route_reports_both_coins_and_their_ratio_when_both_price(client
     )
 
 
-def test_every_admin_route_including_the_peg_check_is_still_a_GET():
+def test_every_admin_route_EXCEPT_THE_RESCUE_CONTROL_is_a_GET():
     """The read-only constraint is structural, and a new route must not loosen it.
 
     routes/admin.py's header claims every route on the blueprint is a GET. This
@@ -1503,8 +1533,25 @@ def test_every_admin_route_including_the_peg_check_is_still_a_GET():
         if rule.methods is not None
     }
     assert "/api/admin/peg" in methods, "the peg route is not registered on the admin blueprint"
+
+    #: The ONE route on this blueprint that is not a GET, and what it answers. Named here
+    #: rather than excluded by a pattern, so a second write cannot join it by accident --
+    #: the sibling assertion in
+    #: test_the_admin_blueprint_registers_EXACTLY_ONE_write_method carries the reasoning
+    #: and the operator's instruction that put it there.
+    rescue = "/admin/swaps/<swap_id>/rescue"
+    assert methods.get(rescue) == {"POST"}, (
+        f"the rescue control must answer POST and nothing else; it answers "
+        f"{sorted(methods.get(rescue) or [])}. A GET that re-drives a payout would be "
+        f"re-driven by a link preview, a crawler or a browser prefetch."
+    )
     for path, verbs in methods.items():
-        assert verbs == {"GET"}, f"{path} accepts {sorted(verbs)}, and this surface is GET-only"
+        if path == rescue:
+            continue
+        assert verbs == {"GET"}, (
+            f"{path} accepts {sorted(verbs)}. Every admin route but the rescue control is a "
+            f"GET, so it is safe to reload and cannot be triggered by following a link"
+        )
 
 
 # --- the deposit side of the figures list -------------------------------------

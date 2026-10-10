@@ -64,6 +64,20 @@
 <section class="hero hero-tight">
   <p class="eyebrow">Operator surface &#183; read-only</p>
   <h1>System state</h1>
+{%- if rescue %}
+{#- THE RESULT OF A RESCUE, AT THE TOP, because the operator pressed a button about a
+    payout and must not have to go looking for whether it took. Four outcomes and they do
+    not render the same (rule 14: make "did nothing" look different from "did work"):
+    refused caller, no such swap, refused swap, done. -#}
+<section class="panel {{ 'panel-ok' if rescue.done else 'panel-alarm' }}">
+  <h2>{{ 'Re-driven' if rescue.done else 'NOT re-driven' }}: {{ rescue.swap_id }}</h2>
+  <p class="lede">{{ rescue.why }}</p>
+  {%- if rescue.done %}
+  <p class="panel-note">Released {{ rescue.released }} of standing reservation. The payout
+     worker claims it on its next cycle and broadcasts; nothing here signed anything.</p>
+  {%- endif %}
+</section>
+{%- endif %}
   {#- THIS SENTENCE IS STILL TRUE OF THIS PAGE, and keeping it true is why the start/stop
       controls live at /admin/controls instead of here.
 
@@ -1004,7 +1018,33 @@
       {% if row.status == 'failed' and row.failure_reason %}
       <tr class="row-reason">
         <td></td>
-        <td colspan="6" class="reason-cell">{{ row.failure_reason }}</td>
+        <td colspan="6" class="reason-cell">{{ row.failure_reason }}
+          {#- THE FIRST CONTROL ON THIS SURFACE, 2026-10-10. The operator asked five times
+              ("no controls. no buttons. nothing.") and this is the action they actually
+              needed: a payout refused BEFORE signing, with the coins still in the desk and
+              the swap stuck at 'failed' forever because 'failed' is deliberately never
+              retried.
+
+              IT IS RENDERED ON EVERY FAILED ROW AND REFUSES MOST OF THEM. The gate is
+              services/payout_rescue.rescue_verdict(), which the endpoint calls -- any live
+              payout row, any txid anywhere on the swap, an empty failed_reason, or a reason
+              not in PRE_SIGNING_MARKERS and it refuses with the reason on the page. The
+              button does not know the verdict; the endpoint does, and showing a button that
+              might refuse beats hiding one that would have worked (the panel and the
+              endpoint asking the same question is what control_refusals' own docstring
+              argues for -- a page that offers what the endpoint refuses is bad, a page that
+              refuses what the endpoint accepts is worse because nobody discovers it).
+
+              NO CONFIRMATION STEP, deliberately: there is nothing to confirm. This writes
+              three rows and signs nothing. What broadcasts is payout_worker, on its next
+              cycle, exactly as it does after the CLI -- and the swap it would pay is one
+              the gate has proved was never paid.
+          -#}
+          <form method="post" action="{{ url_for('admin.rescue_swap_action', swap_id=row.swap_id) }}"
+                class="rescue-form">
+            <button type="submit" class="rescue-button">Re-drive this payout</button>
+          </form>
+        </td>
       </tr>
       {% elif row.status == 'failed' %}
       {#- FAILED WITH NO RECORDED REASON IS ITSELF A FINDING, not a blank. It

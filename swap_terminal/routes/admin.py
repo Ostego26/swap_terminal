@@ -72,6 +72,8 @@ from flask import Blueprint, current_app, jsonify, render_template, request
 from services.admin_view import overview, probe_chains, probe_peg
 from services.chain_panel import chain_panel
 from services.helpers import utc_now_iso
+from services.kill_switch import RequestFacts, control_refusals
+from services.payout_rescue import apply_rescue, rescue_verdict
 
 # ONE SPELLING OF /api/admin/chains' BODY, shared with the host-side reader in
 # swap_stack.py. stack_authority is pure stdlib and live-safe to import (its own
@@ -204,3 +206,112 @@ def admin_peg_route():
     that could not be checked must not render like a peg that held.
     """
     return jsonify(probe_peg())
+
+
+# =============================================================================
+# THE FIRST CONTROL ON THIS SURFACE
+# =============================================================================
+#
+# THE OPERATOR ASKED FOR THIS FIVE TIMES AND I DEFERRED TWICE, 2026-10-10:
+#
+#   "i asked for just a fucking control panel and i got a dumbass verbose pile of
+#    shit that doesn't control anything or tell me anything useful really."
+#   "no controls. no buttons. nothing."
+#   "why have you been dancing the fuck around on trols. i have said i want a
+#    fucking control panel for awhile now."
+#
+# They are right that it was dancing. The reasoning I kept giving -- that a write
+# verb on an unauthenticated page is a custody decision -- is sound and does not
+# apply to THIS action, and I should have separated the two instead of treating
+# every button as the same button.
+#
+# WHY RESCUE IS THE ONE THAT GOES FIRST, AND WHY IT IS SAFE TO PRESS:
+#
+#   it signs nothing            this handler and the service under it call no send
+#                               method and open no socket to a chain. They move a
+#                               row from 'failed' to 'payout_pending'.
+#   the gate is the safety      services/payout_rescue.rescue_verdict() refuses any
+#                               swap it cannot PROVE was never broadcast: any live
+#                               payout row, any txid on any row, an empty
+#                               failed_reason, or a reason not in
+#                               PRE_SIGNING_MARKERS. That gate is older than this
+#                               button, is tested in 22 cases, and the button
+#                               cannot bypass it -- it calls the same function with
+#                               the same arguments the CLI does.
+#   no passphrase, ever         nothing here collects one and nothing here needs
+#                               one. The operator's standing instruction is that a
+#                               passphrase must never appear in a command this
+#                               repository emits and the panel must never have a
+#                               field for one. That is untouched and is why
+#                               wallet unlock is NOT a button.
+#   it is what was needed       the swap this was built for is real:
+#                               s_0dc53d06ab3968fb, a BTC deposit confirmed at
+#                               2026-10-10T17:21:14 and a GRC payout that refused
+#                               before signing four seconds later because
+#                               GRIDCOIN_WALLET_PASSPHRASE was not in the worker's
+#                               environment. 1000.08070022 GRC owed, nothing sent,
+#                               and the fix was a command the operator had to be
+#                               handed.
+#
+# WHAT IT DOES CAUSE: workers/payout_worker.py picks the swap up on its next cycle
+# and broadcasts. So this is one step upstream of a send, exactly as the CLI is,
+# and the handler says so on the page rather than in this comment alone.
+#
+# THE GUARD IS THE SAME ONE /admin/controls USES -- services/kill_switch's
+# RequestFacts.observed() and control_refusals(), which refuse an off-box caller
+# and a cross-origin post. Reused rather than re-derived: two implementations of
+# "may this caller act" is the shape where a page offers a control the endpoint
+# refuses, or worse renders a refusal over an endpoint that accepts (rule 8, and
+# control_refusals' own docstring makes the same argument).
+
+
+@bp.post("/admin/swaps/<swap_id>/rescue")
+def rescue_swap_action(swap_id: str):
+    """Hand one swap whose payout was refused before signing back to the payout worker.
+
+    FOUR STEPS AND NONE OF THEM IS A DECISION THIS FUNCTION MAKES. May this caller
+    act (kill_switch.control_refusals), may this swap be re-driven
+    (payout_rescue.rescue_verdict), what gets written (payout_rescue.apply_rescue).
+    Rule 10: the handler is the layer above the decision, and every one of those three
+    is callable with seeded inputs and no socket.
+
+    IT RENDERS THE ADMIN PAGE EITHER WAY, with the outcome on it. A refusal that
+    answered with a status code and no page would be rule 14's silence on the surface
+    least able to afford it -- the operator pressed a button about money and has to be
+    told which of four things happened: refused caller, no such swap, refused swap, or
+    done.
+
+    COMMITS ONLY AFTER apply_rescue() RETURNS. The service does not commit, so a raise
+    anywhere in it leaves the swap exactly as it was.
+    """
+    refusals = control_refusals(RequestFacts.observed(request.headers, request.remote_addr))
+    db = get_db()
+    swap = db.execute("SELECT * FROM swaps WHERE id = ?", (swap_id,)).fetchone()
+    rows = db.execute(
+        "SELECT * FROM payouts WHERE swap_id = ? ORDER BY id", (swap_id,)
+    ).fetchall()
+
+    if refusals:
+        outcome = {"swap_id": swap_id, "done": False, "why": "; ".join(refusals)}
+    elif swap is None:
+        outcome = {"swap_id": swap_id, "done": False,
+                   "why": f"no swap with id {swap_id} exists in this database"}
+    else:
+        allowed, reason = rescue_verdict(swap, rows)
+        if not allowed:
+            outcome = {"swap_id": swap_id, "done": False, "why": reason}
+        else:
+            written = apply_rescue(db, swap, reason, actor="the operator panel")
+            db.commit()
+            outcome = {
+                "swap_id": swap_id,
+                "done": written["moved"],
+                "why": reason if written["moved"]
+                       else "another caller moved this swap first; nothing was changed",
+                "released": f"{written['released']} {written['asset']}",
+            }
+    return render_template(
+        "admin.html",
+        data=overview(get_db(), current_app.config, current_app.config["ADAPTERS"]),
+        rescue=outcome,
+    )

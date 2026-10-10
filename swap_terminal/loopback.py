@@ -370,3 +370,129 @@ def listening_addresses() -> set[str] | None:
     if not read_any:
         return None
     return hosts
+
+
+#: Where the kernel records this process's routing table, inside a container as on a host.
+#: /proc/net/route rather than `ip route`: no subprocess, no PATH dependency, and the file
+#: is present in every container image this tree builds -- the web image is python:slim and
+#: has no iproute2 at all, so a subprocess here would have failed on the only deployment
+#: that needs this.
+PROC_NET_ROUTE = "/proc/net/route"
+
+#: The three fields this parse needs out of a /proc/net/route line: Iface, Destination,
+#: Gateway, in that order. Named so the length check below is a statement about the format
+#: rather than a bare 3 (ruff PLR2004, and it is right -- the number means something).
+_ROUTE_MIN_FIELDS = 3
+
+#: A /proc/net/route address field is a 32-bit value as 8 hex characters. A field of any
+#: other length is not one, and is skipped rather than parsed into something plausible.
+_ROUTE_HEX_WIDTH = 8
+
+#: The destination of a DEFAULT route, and the gateway value that means "none recorded".
+#: Both are the all-zero address written in this file's hex form.
+_ROUTE_DEFAULT_DESTINATION = "00000000"
+
+#: `0.0.0.0` as a GATEWAY means the route is direct -- on-link, no next hop -- so there is
+#: no host address to admit and the scan continues. Spelled as a constant because ruff
+#: flags the literal as a possible all-interfaces bind (S104) and it is not one: this is a
+#: value being READ from the kernel and rejected, never a value being bound to.
+_ROUTE_NO_GATEWAY = "0.0.0.0"  # noqa: S104 -- CHECKED: this is a value COMPARED AGAINST, never bound. default_gateway() reads it out of /proc/net/route and SKIPS the route it names; nothing in this module opens a socket or passes a host to a server. The comment block above says the same thing at length.
+
+
+def default_gateway(path: str = PROC_NET_ROUTE) -> str | None:
+    """The address this container's default route points at, or None if it cannot be read.
+
+    =========================================================================
+    WHY THIS EXISTS: THE OPERATOR'S CONTROLS WERE REFUSING THEIR OWN MACHINE
+    =========================================================================
+
+    Measured on their host 2026-10-10, off the rendered /admin/controls page:
+
+        THESE CONTROLS ARE REFUSING. No button is rendered below.
+        This request arrived from 172.18.0.1, which is not this machine.
+        bind  SWAP_TERMINAL_PUBLISH_HOST: '127.0.0.1' -- declared loopback
+
+    Both halves of that are worth reading together. The BIND guard passed -- the publish
+    is declared loopback, so services/kill_switch.refuse_off_box() was satisfied. What
+    refused was the PEER check, on 172.18.0.1.
+
+    172.18.0.1 IS THE DOCKER BRIDGE GATEWAY, which is to say it is the operator's own
+    machine, reaching the published port from the host side of the bridge. The peer check
+    requires a loopback address and a bridged container never sees one from outside
+    itself: the host's packets arrive from the gateway, and the container's loopback is
+    reachable only from the container. So on the only deployment this repository actually
+    ships -- docker compose, bridge network, published port -- the controls could not be
+    reached by anybody, ever. The operator said it five times ("no controls. no buttons.
+    nothing.") and the cause was this line, not the styling.
+
+    THIS IS A RECOGNITION, NOT A RELAXATION, and the distinction is the whole argument for
+    writing it rather than adding an override flag. The peer check exists to establish
+    that the caller is the machine running the desk. On a bridged container the gateway IS
+    that machine. Admitting it answers the check's own question correctly; it does not
+    lower the bar.
+
+    AND IT IS READ FROM THE KERNEL, NOT FROM THE REQUEST. Every other signal the controls
+    refuse on is something a caller can write -- the Host header, the Origin, even the
+    peer address behind a proxy. This one is the container's own routing table. A caller
+    cannot change what this container's default route points at by sending a request, so
+    using it as the comparison keeps the check evidential.
+
+    WHAT IT DELIBERATELY DOES NOT DO. It does not say the request came from the host. It
+    says the peer address EQUALS the gateway, which every other container on the same
+    bridge does NOT -- they arrive from their own 172.18.0.x address, not from .1. That is
+    the precise gap OPEN_FINDINGS finding 4 names (containers on this bridge reach this
+    port directly, bypassing the publish), and this leaves it exactly where it was: a
+    sibling container is still refused. Only the gateway is admitted, and only with the
+    publish declared loopback, which the caller cannot declare.
+
+    =========================================================================
+    THE FORMAT, because a wrong parse here would admit the wrong address
+    =========================================================================
+
+    /proc/net/route is a header line then one route per line, tab-separated, with the
+    addresses as LITTLE-ENDIAN HEX of the 32-bit value. A default route is the one whose
+    Destination is 00000000; its Gateway field holds the address. Read on the operator's
+    own container:
+
+        Iface  Destination  Gateway   Mask      ...
+        eth0   00000000     010012AC  00000000  ...
+        eth0   000012AC     00000000  0000FFFF  ...
+
+    010012AC little-endian is AC.12.00.01 = 172.18.0.1. The byte order is the trap: read
+    big-endian it is 1.0.18.172, which is a real routable address belonging to somebody
+    else, and a check that admitted it would be admitting a stranger. Hence the explicit
+    reversal below and tests/test_loopback.py's vector for exactly this value.
+
+    RETURNS None RATHER THAN GUESSING on anything it cannot read or parse -- a missing
+    file, a short line, a malformed field, no default route. The caller treats None as "no
+    gateway established" and refuses, which is the same posture
+    listening_addresses() takes: a control surface that cannot establish a fact must not
+    assume the permissive answer.
+    """
+    try:
+        with Path(path).open(encoding="ascii") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return None
+    for line in lines[1:]:
+        fields = line.split()
+        # Iface, Destination, Gateway, ... -- three is the minimum this needs.
+        if len(fields) < _ROUTE_MIN_FIELDS:
+            continue
+        destination, gateway = fields[1], fields[2]
+        if destination != _ROUTE_DEFAULT_DESTINATION:
+            continue
+        if len(gateway) != _ROUTE_HEX_WIDTH:
+            continue
+        try:
+            packed = bytes.fromhex(gateway)
+        except ValueError:
+            return None
+        # LITTLE-ENDIAN, which is what the docstring's 010012AC vector pins. Reversed
+        # here rather than by int.from_bytes(..., "little") plus a format, because the
+        # four bytes ARE the four octets and reversing them is the whole conversion.
+        octets = ".".join(str(byte) for byte in reversed(packed))
+        if octets == _ROUTE_NO_GATEWAY:
+            continue
+        return octets
+    return None

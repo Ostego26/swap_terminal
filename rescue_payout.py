@@ -76,259 +76,32 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from config import Config
-from db import PAYOUT_LIVE_STATUSES, db_session
+from db import db_session
 from microfortnights import format_duration
 from report_block import labeled
-from services.helpers import utc_now_iso
 
-SELF = "rescue_payout.py"
-
-#: Fragments of swaps.failed_reason that PROVE the refusal happened before anything
-#: was signed. Matched case-insensitively as substrings.
-#:
-#: EACH ONE IS A REFUSAL RAISED BEFORE THE SIGNING CALL, verified against the
-#: raising site rather than inferred from the wording:
-#:
-#:   "holds no key that could"     the pre-arming SOL adapter's refusal. The exact
-#:                                 string the operator's failed swap recorded, from
-#:                                 code that imported nothing able to sign.
-#:   SolanaSendNotArmed            chains/solana_signing.require_send_confirmation()
-#:                                 raises before load_payout_keypair() is reached,
-#:                                 so the key file is not even opened.
-#:   "cannot pay out"              chains/registry.why_cannot_pay_out()'s verdict,
-#:                                 raised by create_swap/payout before any adapter
-#:                                 send method is called.
-#:   SolanaClusterRefused          require_devnet() refuses after ONE getGenesisHash
-#:                                 and before any balance read, blockhash or submit.
-#:
-#: DELIBERATELY NOT HERE, and each absence is the point:
-#:   SolanaWireMismatch            raised AFTER signing. Nothing was submitted on
-#:                                 that path either, but the signed bytes exist and
-#:                                 a rescue should be a person's decision, not this
-#:                                 file's.
-#:   a timeout, a transport error, a bare exception
-#:                                 the case this whole file is cautious about. Money
-#:                                 may be on chain.
-#:   "pynacl is not importable"    ADDED 2026-10-03, after the operator's rescue
-#:                                 re-drove the swap and it failed on this instead.
-#:                                 PyNaCl is an OPTIONAL dependency on purpose, so a
-#:                                 host without it refuses rather than crashing a
-#:                                 read-only deposit watcher at import.
-#:
-#:                                 PROVABLY PRE-BROADCAST AT BOTH RAISE SITES,
-#:                                 checked rather than inferred from the wording:
-#:                                 chains/solana_signing._public_key_bytes():527 is
-#:                                 reached from derive_and_check(), which runs BEFORE
-#:                                 sign_message() in signed_transfer_wire(); and
-#:                                 sign_message():716 is the signing call itself, so
-#:                                 if it raises there are no signed bytes to submit.
-#:                                 Either way nothing reached a cluster.
-#:   "invalid amount (rpc code -3)"
-#:                                 ADDED 2026-10-03, after the first BTC -> LTC swap
-#:                                 recorded exactly this and the tool refused to
-#:                                 re-drive it. The refusal was correct for its own
-#:                                 reason -- an unrecognized message is absence of
-#:                                 evidence -- and the evidence exists:
-#:
-#:                                 RPC CODE -3 IS RPC_TYPE_ERROR, raised by Bitcoin
-#:                                 Core's AmountFromValue() while CONVERTING the
-#:                                 `amount` parameter. It happens before the wallet
-#:                                 is touched, before an input is selected, before a
-#:                                 transaction exists -- so there are no signed
-#:                                 bytes and nothing can have been relayed.
-#:
-#:                                 MEASURED, NOT REASONED. The operator ran
-#:                                 createrawtransaction with the same amount class
-#:                                 and got the identical -3 "Invalid amount" while
-#:                                 producing NO transaction, and a valid amount on
-#:                                 the same command returned a hex string. That is
-#:                                 the parser failing in isolation, with the wallet
-#:                                 not involved at all.
-#:
-#:                                 THE CODE IS PART OF THE MARKER on purpose.
-#:                                 "invalid amount" alone could plausibly be some
-#:                                 other daemon's wording for a post-broadcast
-#:                                 condition; "(rpc code -3)" pins it to the
-#:                                 parameter-conversion error, which is the thing
-#:                                 that proves nothing was signed. chains/base.py
-#:                                 includes the code in the message it records,
-#:                                 which is why this can be matched at all.
-#:
-#:                                 AND THE CAUSE IS FIXED, so this marker is for
-#:                                 swaps that failed BEFORE c36250f:
-#:                                 chains/coin_amounts.fit_to_chain_precision() now
-#:                                 fits the amount to the chain's eight decimals
-#:                                 before the send, so a payout no longer reaches
-#:                                 the parser with seventeen.
-#:   "(rpc code -14)"
-#:                                 ADDED 2026-10-07, minutes after the entry
-#:                                 below, when s_ebb03e8dc1b96e1c failed a SECOND
-#:                                 time -- `Error: The wallet passphrase entered
-#:                                 was incorrect. (rpc code -14)`. A mangled paste
-#:                                 had armed the container with a fragment of a
-#:                                 command instead of the passphrase, so the
-#:                                 rescue handed the swap back to a worker that
-#:                                 could not unlock the wallet.
-#:
-#:                                 THE PROOF IS STRUCTURAL AND CLEANER THAN THE
-#:                                 UNSET CASE. chains/gridcoin_wallet_lock.
-#:                                 unlocked_for_payout() is a generator context
-#:                                 manager and its first three statements are:
-#:
-#:                                     lock(adapter)                       # 258
-#:                                     unlock_for_sending(adapter, pass..) # 259
-#:                                     try:
-#:                                         yield                           # 261
-#:
-#:                                 -14 is raised by line 259, which is BEFORE the
-#:                                 `try` is entered and before `yield`. The body
-#:                                 of the `with` -- holding broadcast_payout() --
-#:                                 is reached only at that yield, so it cannot
-#:                                 have executed.
-#:
-#:                                 AND THE WALLET WAS LOCKED WHEN IT RAISED, by
-#:                                 line 258, one statement earlier. A locked
-#:                                 Gridcoin wallet cannot send at all: sendtoaddress
-#:                                 answers -13. So even a body that had somehow run
-#:                                 could not have broadcast anything.
-#:
-#:                                 -14 IS RPC_WALLET_PASSPHRASE_INCORRECT, which by
-#:                                 definition means the wallet did not open. It is
-#:                                 not a send that failed; it is a send that was
-#:                                 never possible.
-#:
-#:   "not set in this process's environment"
-#:                                 ADDED 2026-10-07, after the first ICP deposit
-#:                                 this system ever credited -- 1.00000000 ICP,
-#:                                 block index 1, to the subaccount for
-#:                                 s_ebb03e8dc1b96e1c -- had its GRC payout refuse
-#:                                 and this tool correctly declined to re-drive it.
-#:                                 The refusal was right for its own reason: an
-#:                                 unrecognized message is absence of evidence. The
-#:                                 evidence exists and is recorded here rather than
-#:                                 inferred from the wording, which is what this
-#:                                 list demands of every entry.
-#:
-#:                                 THE RAISE PRECEDES THE BODY, STRUCTURALLY.
-#:                                 services/payout_service.py:828 is
-#:                                 `with payout_unlock_context(destination_asset,
-#:                                 adapter):` and broadcast_payout() is at :835,
-#:                                 INSIDE it. payout_unlock_context() is a plain
-#:                                 function returning a context manager -- not a
-#:                                 @contextmanager generator -- so its
-#:                                 `if not passphrase: raise` at :1111 fires while
-#:                                 the `with` EXPRESSION is being evaluated, before
-#:                                 any context manager exists and therefore before
-#:                                 the body can be entered at all. There is no path
-#:                                 from that raise to a send.
-#:
-#:                                 THE EXCEPTION TYPE IS CATEGORICALLY SEPARATE.
-#:                                 PayoutUnlockUnavailable's own docstring: "no
-#:                                 transaction was created, nothing reached any
-#:                                 daemon". It exists as its own class precisely so
-#:                                 it cannot be confused with a send that failed.
-#:
-#:                                 AND THE WORKER LOG SHOWS NO SEND BETWEEN THEM.
-#:                                 On the operator's host: the amount-quantization
-#:                                 line at 20:26:09,280, then `payout FAILED` at
-#:                                 20:26:09,285. Five milliseconds and no RPC.
-#:
-#:                                 Three independent places, which is the standard
-#:                                 this file's header sets. MATCHED ON THE
-#:                                 ENVIRONMENT CLAUSE rather than on "GRC payouts
-#:                                 need the wallet fully unlocked", because
-#:                                 payout_service.py builds that sentence from
-#:                                 `{asset}` and WALLET_UNLOCK_ASSETS can grow -- a
-#:                                 marker naming GRC would silently stop matching
-#:                                 the day a second chain joined, which is rule 8's
-#:                                 drift in a safety check.
-PRE_SIGNING_MARKERS = (
-    "holds no key that could",
-    "solanasendnotarmed",
-    "cannot pay out",
-    "solanaclusterrefused",
-    "pynacl is not importable",
-    "invalid amount (rpc code -3)",
-    "not set in this process's environment",
-    "(rpc code -14)",
+# RE-EXPORTED ON PURPOSE, 2026-10-10. These three moved to services/payout_rescue.py
+# because the web container has no root tools in it (docker/web.Dockerfile copies
+# swap_terminal/ and nothing else), so a route could not import a gate that lived here.
+#
+# They stay importable from THIS module because it is still this tool's public surface:
+# tests/test_rescue_payout.py imports them from here, and so would anybody who found the
+# gate by reading the tool that uses it. A re-export is the one honest way to move an
+# implementation without moving its callers.
+#
+# `noqa: F401` IS A CLAIM AND HERE IS WHAT WAS CHECKED (rule 19): ruff is right that this
+# module does not USE refused_before_signing or PRE_SIGNING_MARKERS -- rescue_verdict()
+# does, inside the service. They are imported for re-export alone. Verified by running
+# `python3 -c "import rescue_payout; rescue_payout.refused_before_signing('')"` and by
+# tests/test_rescue_payout.py, which imports all three from this name.
+from services.payout_rescue import (  # noqa: F401
+    PRE_SIGNING_MARKERS,
+    apply_rescue,
+    refused_before_signing,
+    rescue_verdict,
 )
 
-
-def refused_before_signing(reason: str) -> str:
-    """The PRE_SIGNING_MARKERS fragment this reason matches, or "" for none.
-
-    EXTRACTED FROM rescue_verdict() ON 2026-10-03, when a marker was added and
-    there was nowhere to test the matching with seeded inputs -- the comparison was
-    a list comprehension inside a function that also needs a swap row and payout
-    rows. CLAUDE.md rule 10 puts the thing that DECIDES at the bottom, callable on
-    its own, and this is the decision the whole file turns on: whether a recorded
-    failure is provably pre-broadcast.
-
-    CASE-INSENSITIVE, matching the contract PRE_SIGNING_MARKERS documents. The
-    reason text comes from a daemon or an adapter and its capitalization is not
-    ours to rely on; the markers are written lowercase for that reason.
-
-    "" RATHER THAN False, so the caller can name WHICH marker matched in its own
-    sentence. An operator reading "matches 'invalid amount (rpc code -3)'" can go
-    and check that claim; "matched: True" gives them nothing to check.
-    """
-    lowered = (reason or "").lower()
-    for marker in PRE_SIGNING_MARKERS:
-        if marker in lowered:
-            return marker
-    return ""
-
-
-def rescue_verdict(swap, payout_rows) -> tuple[bool, str]:
-    """May this swap be handed back to the payout worker? The decision, as a function.
-
-    Returns (allowed, reason). The reason is printed either way, because a refusal
-    an operator cannot read is a refusal they will route around.
-
-    ORDER IS CHEAPEST-AND-MOST-FATAL FIRST, the same shape
-    chains/solana_signing.signed_transfer_wire() uses: status, then any txid, then
-    the recorded reason. The first refusal is the one reported, so an operator acts
-    on one fact rather than three.
-    """
-    if swap["status"] != "failed":
-        return False, (
-            f"the swap is '{swap['status']}', not 'failed'. This tool exists for a swap whose payout "
-            f"was refused before signing; anything else is either already moving or waiting on a person"
-        )
-    live = [row for row in payout_rows if row["status"] in PAYOUT_LIVE_STATUSES]
-    if live:
-        statuses = ", ".join(sorted({row["status"] for row in live}))
-        return False, (
-            f"{len(live)} payout row(s) are LIVE ({statuses}). A live row means a payout was claimed and "
-            f"may be ON CHAIN -- a 'created' row with no txid is exactly the crash-between-send-and-record "
-            f"case. Re-driving could double-send. Prove the payment's absence or presence on the "
-            f"destination chain first; settle_payout.py is the tool when it WAS delivered"
-        )
-    with_txid = [row for row in payout_rows if row["txid"]]
-    if with_txid:
-        return False, (
-            f"{len(with_txid)} payout row(s) carry a txid ({with_txid[0]['txid']}). A txid is a "
-            f"broadcast. Nothing here may re-drive a swap that has one"
-        )
-    reason = (swap["failed_reason"] or "").lower()
-    if not reason:
-        return False, (
-            "swaps.failed_reason is empty, so there is no evidence about WHEN the refusal happened. "
-            "Absence of a recorded reason is not evidence that nothing was broadcast"
-        )
-    matched = refused_before_signing(reason)
-    if not matched:
-        return False, (
-            f"the recorded reason is not one this tool can prove happened BEFORE signing, so it refuses: "
-            f"a send can raise AFTER the node accepted the transaction. Read the reason and decide by "
-            f"hand. Recognized markers are {', '.join(PRE_SIGNING_MARKERS)}. The reason recorded was: "
-            f"{(swap['failed_reason'] or '')[:200]}"
-        )
-    return True, (
-        f"the recorded reason matches {matched!r}, which is raised BEFORE anything is signed, and no "
-        f"payout row is live or carries a txid. This swap was provably never broadcast"
-    )
-
+SELF = "rescue_payout.py"
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
@@ -388,33 +161,31 @@ def main(argv: list[str] | None = None) -> int:
         # 3.12 host; this container is 3.11 and printed none, which is why it
         # shipped. services/helpers.py has both functions and the rest of the tree
         # uses the _iso one.
-        now = utc_now_iso()
-        # ONE TRANSACTION for the release and the status change. Either both land or
-        # neither does: a released reservation on a swap still 'failed' loses the
-        # record of money owed, and a 'payout_pending' swap with the reservation
-        # still standing is the double-reservation this exists to prevent.
-        db.execute(
-            "UPDATE wallet_inventory SET hot_reserved = MAX(hot_reserved - ?, 0), "
-            "hot_available = hot_confirmed - MAX(hot_reserved - ?, 0), updated_at = ? WHERE asset = ?",
-            (amount, amount, now, asset),
-        )
-        db.execute(
-            "UPDATE swaps SET status = 'payout_pending', failed_reason = ?, updated_at = ? "
-            "WHERE id = ? AND status = 'failed'",
-            (f"re-driven by {SELF} on {now}; previous refusal: {swap['failed_reason']}", now, args.swap),
-        )
-        db.execute(
-            # COLUMN NAMES READ OFF THE SCHEMA, NOT RECALLED. The first version of this
-            # INSERT said (from_status, to_status, reason) and the table is
-            # (old_status, new_status, message) -- db.py:311. That is the second
-            # column-name guess to miss in this session; the first cost the operator a
-            # query that died with "no such column: reason".
-            "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at) "
-            "VALUES (?, 'failed', 'payout_pending', ?, ?)",
-            (args.swap, f"{SELF}: {reason}", now),
-        )
+        # THE THREE WRITES MOVED TO services/payout_rescue.apply_rescue() ON 2026-10-10,
+        # when the operator panel grew a Rescue button and there were suddenly two callers.
+        # They were spelled here, including the comment explaining why the reservation has
+        # to be released in the same transaction as the status change -- that reasoning is
+        # now at the function, which is where the next reader of either caller will find it.
+        #
+        # ONE IMPLEMENTATION IS NOT A TIDY-UP HERE. The three statements have to happen
+        # together or the swap is left either owing money with no reservation or holding a
+        # reservation nothing will release. Two copies of that, drifting, is rule 8's bug
+        # with a delay on it on the one path where the delay costs a double payout.
+        outcome = apply_rescue(db, swap, reason, actor=SELF)
         db.commit()
-        print("  WROTE      status -> payout_pending, reservation released, audit row written", flush=True)
+        # THE FIGURE, NOT A SENTENCE SAYING A FIGURE EXISTS. This printed "reservation
+        # released" with no amount; apply_rescue() returns what it actually released, so
+        # the line now carries the number an operator would otherwise go and query for
+        # (rule 14: state what the number means, next to the number). `moved` is the
+        # guarded UPDATE's rowcount -- 0 means another caller got there first, which the
+        # web button made a real race rather than a theoretical one, and that must not
+        # render the same as a rescue that worked.
+        print(
+            f"  WROTE      status -> payout_pending ({'moved' if outcome['moved'] else 'ALREADY MOVED by '
+            'another caller -- nothing changed'}), released {outcome['released']} "
+            f"{outcome['asset']} of reservation, audit row written",
+            flush=True,
+        )
         print("  next       payout_worker picks it up on its next cycle. Watch it:", flush=True)
         print(f"               python3 show_swap.py --swap {args.swap}", flush=True)
     print(labeled("done in", format_duration(time.monotonic() - started)), flush=True)
