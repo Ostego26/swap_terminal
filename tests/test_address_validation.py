@@ -74,7 +74,7 @@ CONFIG = {
 
 @pytest.fixture
 def db(tmp_path):
-    conn = connect_db(str(tmp_path / "validation.db"))
+    conn = connect_db(str(tmp_path / "validation.db"), create=True)
     conn.executescript(SCHEMA)
     conn.execute(
         """

@@ -146,7 +146,7 @@ def armed(monkeypatch, destination: str = GRC_PAYOUT) -> None:
 
 def seed_one_completed_grc_swap(db_path: str, swap_id: str = "s_live") -> None:
     """One delivered GRC payout, so the fee ledger has something to retain."""
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         paid = seed_swap(connection, swap_id)
         seed_payout(connection, swap_id, paid)
@@ -162,7 +162,7 @@ def seed_open_grc_swap(db_path: str, swap_id: str, status: str, expected_input: 
     every swap whose status is not terminal, and services/payout_service.
     payout_amount() prices each one.
     """
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         seed_swap(connection, swap_id, Seed(expected_input=expected_input))
         connection.execute("UPDATE swaps SET status = ? WHERE id = ?", (status, swap_id))
@@ -173,7 +173,7 @@ def seed_open_grc_swap(db_path: str, swap_id: str, status: str, expected_input: 
 
 def sweep_rows(db_path: str) -> list[dict]:
     """Every `fee_sweeps` row, oldest first. THE THING EVERY TEST ASSERTS ON."""
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         return [dict(row) for row in connection.execute(
             "SELECT id, asset, destination_address, amount, txid, status FROM fee_sweeps ORDER BY id"
@@ -195,7 +195,7 @@ def accrued_grc(db_path: str) -> float:
         fee_rows,
     )
 
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         return next(total.retained for total in asset_totals(fee_rows(connection)) if total.asset == "GRC")
     finally:
@@ -360,7 +360,7 @@ def test_a_sweep_recorded_but_never_reported_sent_blocks_a_re_run(monkeypatch, d
     """
     armed(monkeypatch)
     seed_one_completed_grc_swap(db_path)
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         connection.execute(
             "INSERT INTO fee_sweeps (asset, destination_address, amount, txid, status, created_at)"
@@ -457,7 +457,7 @@ def test_a_sweep_that_would_strand_an_open_swaps_payout_is_refused(monkeypatch, 
     armed(monkeypatch)
     seed_one_completed_grc_swap(db_path)
     seed_open_grc_swap(db_path, "s_open", "payout_pending", expected_input=0.5)
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         floor = obligation(connection, "GRC").floor
     finally:
@@ -680,7 +680,7 @@ def test_the_obligation_floor_retains_for_exactly_the_non_terminal_statuses(db_p
 
     for status in sorted(STATUS_MEANINGS):
         seed_open_grc_swap(db_path, f"s_{status}", status, expected_input=0.01)
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         retained_for = {
             str(row["id"])
@@ -718,7 +718,7 @@ def test_a_reservation_with_no_open_swap_still_holds_the_floor(db_path):
     MUTATION: in fee_sweep.obligation(), `floor=max(open_total, reserved)` ->
     `floor=open_total`. This fails. Verified 2026-10-04.
     """
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         connection.execute(
             "INSERT INTO wallet_inventory (asset, hot_confirmed, hot_reserved, hot_available, updated_at)"

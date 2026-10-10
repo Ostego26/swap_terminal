@@ -42,7 +42,7 @@ FAILURE_REASON = "the re-lock failed and ate the txid"
 
 
 def seed(db_path, *, status="failed", txid=None, payout_rows=1, payout_row=("failed", None)):
-    conn = connect_db(str(db_path))
+    conn = connect_db(str(db_path), create=True)
     conn.executescript(SCHEMA)
     conn.execute(
         "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps,"

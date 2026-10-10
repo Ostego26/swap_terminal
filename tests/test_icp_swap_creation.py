@@ -65,7 +65,7 @@ class FakeICPAdapter:
 
 @pytest.fixture
 def db(tmp_path):
-    conn = connect_db(str(tmp_path / "swap_terminal_icp_creation.db"))
+    conn = connect_db(str(tmp_path / "swap_terminal_icp_creation.db"), create=True)
     conn.executescript(SCHEMA)
     _seed_swaps(conn, SWAP_IDS)
     yield conn

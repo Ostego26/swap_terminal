@@ -38,6 +38,7 @@ mistake for a connection.
 import logging
 import sqlite3
 from contextlib import contextmanager
+from pathlib import Path
 
 # Rootless, the same way services/deposit_service.py reaches
 # deposit_vout_artifact.py: swap_terminal/ is already on sys.path for `db` to
@@ -1707,7 +1708,88 @@ def dict_factory(cursor, row):
     return {col[0]: row[idx] for idx, col in enumerate(cursor.description)}
 
 
-def connect_db(db_path: str) -> sqlite3.Connection:
+class DatabaseNotFound(FileNotFoundError):
+    """The path names no database, and this connection will not invent one.
+
+    ITS OWN TYPE because the remedy is specific and is never "handle the error": a
+    caller that reaches this has been given a path to a database that does not exist,
+    and the fix is the path, not a retry or a fallback.
+    """
+
+
+def connect_db(db_path: str, *, create: bool = False) -> sqlite3.Connection:
+    """Open `db_path`. REFUSES a missing file unless `create` is asked for.
+
+    =========================================================================
+    THIS FUNCTION MADE A SECOND DATABASE OUT OF A TYPO, AND THE TYPO WAS MINE
+    =========================================================================
+
+    It was `sqlite3.connect(db_path)` with nothing else, and sqlite3.connect CREATES a
+    missing file. workers/common.database_census() records what that cost on
+    2026-10-01:
+
+        Three workers were started from a shell whose SWAP_DB_PATH pointed at the wrong
+        file -- repo_root/runtime/swap_terminal.db instead of
+        repo_root/swap_terminal/swap_terminal.db, A PATH I PUT IN A BLOCK I HANDED
+        THEM. They then ran for an hour printing
+
+            deposit_watcher cycle=57 IDLE  active_swaps=0 refreshed=0
+
+        while THREE swaps sat in awaiting_deposit in the database every root tool
+        reads. Nothing was wrong with any worker. Nothing failed.
+
+    And on 2026-10-10 the operator found the file still there, nine days later, holding
+    one failed SOL swap with a real deposit_events row and five audit rows:
+
+        327,680 bytes   52 swaps   newest 2026-10-10T21:57   the authority
+        118,784 bytes    1 swap    newest 2026-10-01T22:34   the orphan
+
+    Their words: "is that fucking bifurcated database fixed as well? or did you just
+    gloss over that huge BFD". absorb_db.py merges the orphan, and a merge tool is
+    CLEANUP. Rule 19's test is "does it stop the symptom being reported, or stop the
+    cause existing? Only the second is a fix." THIS is the second.
+
+    =========================================================================
+    WHY REFUSING IS THE RIGHT DEFAULT AND CREATING IS THE EXCEPTION
+    =========================================================================
+
+    A missing database has exactly two meanings and they want opposite answers:
+
+      first boot        nothing exists yet and the schema is about to be written.
+                        init_db() asks for that explicitly, once, and it is the only
+                        place in the serving path that does.
+      a wrong path      every other time. SWAP_DB_PATH mistyped, a tool run from the
+                        wrong directory, a container started without its volume. There
+                        is no case where the right answer is an empty database.
+
+    Creating by default makes the first meaning free and the second SILENT, and the
+    second is the one that happens. CLAUDE.md rule 14's whole subject is that a
+    terminal pointed at an empty file is indistinguishable from a quiet one -- and the
+    quiet one is normal, so the broken one reads as normal.
+
+    THE MESSAGE NAMES THE VARIABLE AND THE TWO USUAL SUSPECTS, because the operator
+    reading it is holding a path they believe is right. "No such file" would send them
+    to look for a missing database; what is actually wrong is the path.
+
+    KEYWORD-ONLY, so a positional second argument cannot become a silent create: this
+    took a single string for its whole life and every existing call still reads the
+    same.
+    """
+    if not create and not Path(db_path).exists():
+        raise DatabaseNotFound(
+            f"no database at {db_path!r}, and this connection will not create one. Until "
+            f"2026-10-10 it did, which is how a mistyped SWAP_DB_PATH became a SECOND "
+            f"database that three workers polled for an hour while the real swaps sat "
+            f"elsewhere (workers/common.database_census() has the measurement).\n"
+            f"  check  SWAP_DB_DIR in .env -- config.database_path() reads it and joins "
+            f"swap_terminal.db onto it, and docker compose mounts the same directory at /data. "
+            f"It is the one place that moves BOTH the host and the container\n"
+            f"  check  SWAP_DB_PATH in the process environment, which OVERRIDES .env -- it must "
+            f"name the FILE, not the directory\n"
+            f"  check  the working directory, if the path is relative\n"
+            f"  check  that a container was started with its /data volume\n"
+            f"Only db.init_db() may create a database, and it says so by passing create=True."
+        )
     conn = sqlite3.connect(db_path)
     conn.row_factory = dict_factory
     return conn
@@ -1729,16 +1811,58 @@ def close_db(_=None) -> None:
         db.close()
 
 
-def init_db() -> None:
-    db = get_db()
-    db.executescript(SCHEMA)
-    db.commit()
-    apply_migrations(db)
+def init_db(db_path=None) -> None:
+    """Create the database if it is absent, then bring it up to the current schema.
+
+    THE ONLY PLACE IN THIS TREE THAT MAY CREATE ONE, and it opens its OWN connection
+    with create=True rather than going through get_db(). That is the whole of the
+    2026-10-10 change: get_db() serves every HTTP request, and a request arriving when
+    the database has vanished must fail loudly rather than quietly manufacture an empty
+    one -- which is exactly what it used to do.
+
+    `db_path` IS THE CONTAINER'S DOOR IN, and it exists because of a startup order this
+    change would otherwise have broken. docker/web_workers_entrypoint.main() calls
+    start_workers() BEFORE it execs gunicorn, and gunicorn is what imports wsgi -> app ->
+    create_app() -> init_db(). So on a fresh volume the three workers reached the
+    database FIRST, and what used to happen is that whichever of them got there first
+    created the file and applied SCHEMA itself (payout_worker.py:133 still runs
+    executescript(SCHEMA) before its loop, for exactly that reason).
+
+    With connect_db() refusing, that worker would instead die at startup on a database
+    nobody had created yet -- a loud failure, but a WRONG one: the path was right, the
+    volume was mounted, and the only thing missing was a file the container itself owns.
+    So the entrypoint now calls this with an explicit path before start_workers(), and
+    creation happens once, in one place, announced, before anything polls.
+
+    Taking a path rather than duplicating four lines into the entrypoint is rule 8: two
+    copies of "create and migrate" would agree on the day they were written. There is
+    one copy and the caller says which database.
+
+    WITHOUT AN ARGUMENT it reads current_app, which is the Flask path and unchanged.
+
+    The connection is closed rather than cached in `g`, because this runs at app
+    startup where there is no request context to cache into, and the next get_db() opens
+    the file this just created.
+    """
+    path = str(current_app.config["DB_PATH"]) if db_path is None else str(db_path)
+    db = connect_db(path, create=True)
+    try:
+        db.executescript(SCHEMA)
+        db.commit()
+        apply_migrations(db)
+    finally:
+        db.close()
 
 
 @contextmanager
-def db_session(db_path: str):
-    conn = connect_db(db_path)
+def db_session(db_path: str, *, create: bool = False):
+    """A transaction on `db_path`, committed on success and rolled back on a raise.
+
+    `create` IS PASSED THROUGH AND DEFAULTS TO REFUSING, for connect_db()'s reason: a
+    root tool handed a wrong path must fail rather than open an empty database and
+    report that nothing is pending.
+    """
+    conn = connect_db(db_path, create=create)
     try:
         yield conn
         conn.commit()

@@ -246,7 +246,7 @@ def seeded_db(tmp_path):
     # -- each passed alone and the pair failed together, which is the signature of
     # shared state rather than of a bug in the code under test. Every service
     # takes `db` as an argument, so the path never needed to be global.
-    conn = connect_db(str(tmp_path / "t.db"))
+    conn = connect_db(str(tmp_path / "t.db"), create=True)
     conn.executescript(SCHEMA)
     conn.commit()
     apply_migrations(conn)

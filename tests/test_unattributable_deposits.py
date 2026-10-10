@@ -50,7 +50,7 @@ WHY = "no memo instruction -- unattributable, and a human has to match it"
 @pytest.fixture
 def db(tmp_path):
     """A real database on the real SCHEMA, so the table's constraints are the ones under test."""
-    conn = connect_db(str(tmp_path / "swap_terminal_test.db"))
+    conn = connect_db(str(tmp_path / "swap_terminal_test.db"), create=True)
     conn.executescript(SCHEMA)
     return conn
 

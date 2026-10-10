@@ -110,7 +110,7 @@ CONFIG = {"AMOUNT_TOLERANCE_PCT": 0.01, "ICP_MIN_CONFIRMATIONS": 1}
 
 @pytest.fixture
 def db(tmp_path):
-    conn = connect_db(str(tmp_path / "t.db"))
+    conn = connect_db(str(tmp_path / "t.db"), create=True)
     conn.executescript(SCHEMA)
     apply_migrations(conn)
     conn.execute(

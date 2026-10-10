@@ -589,7 +589,7 @@ def _seed_one_pending_xrp_swap(db_path: str, payout_address: str, swap_id: str =
     idx_payouts_one_live_per_swap is what makes a second live payout row impossible.
     A test that skipped it would be measuring a database the worker never sees.
     """
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     now = "2026-10-02T00:00:00+00:00"
     conn.execute(
@@ -675,7 +675,7 @@ def test_the_seed_reaches_no_log_record_no_database_column_and_no_stream(tmp_pat
     adapters = {"XRP": XRPAdapter(url=TESTNET_URL, min_confirmations=1)}
 
     with caplog.at_level(logging.DEBUG):
-        conn = connect_db(db_path)
+        conn = connect_db(db_path, create=True)
         try:
             completed = process_pending_payouts(conn, armed_config(paying.classic_address), adapters)
         finally:
@@ -766,7 +766,7 @@ def test_an_armed_xrp_payout_completes_the_swap_and_records_the_txid(tmp_path, l
     _seed_one_pending_xrp_swap(db_path, XRP_CUSTOMER_PAYOUT)
     adapters = {"XRP": XRPAdapter(url=TESTNET_URL, min_confirmations=1)}
 
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     try:
         process_pending_payouts(conn, armed_config(paying.classic_address), adapters)
         swap = conn.execute("SELECT * FROM swaps WHERE id = 's_xrp'").fetchone()
@@ -813,7 +813,7 @@ def test_reverting_the_call_site_to_two_positional_arguments_fails_the_payout(tm
         lambda adapter, asset, config, address, amount: adapter.send_to_address(address, amount),
     )
 
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     try:
         completed = process_pending_payouts(conn, armed_config(paying.classic_address), adapters)
         swap = conn.execute("SELECT * FROM swaps WHERE id = 's_xrp'").fetchone()
@@ -878,7 +878,7 @@ class PayableGRC:
 
 
 def _quote_row(db_path: str, quote_id: str = "q_gate") -> None:
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     now = "2026-10-02T00:00:00+00:00"
     later = "2126-10-02T00:00:00+00:00"
@@ -928,7 +928,7 @@ def test_a_swap_is_refused_when_the_seed_is_set_but_the_payout_account_is_not(tm
     _quote_row(db_path)
     adapters = {"GRC": PayableGRC(), "XRP": XRPAdapter(url=TESTNET_URL, min_confirmations=1)}
 
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     try:
         # The seed alone is NOT enough, which is the whole assertion.
         with pytest.raises(ValueError, match="XRP_DEPOSIT_ACCOUNT"):
@@ -962,7 +962,7 @@ def test_a_swap_is_created_once_both_variables_are_set(tmp_path, monkeypatch):
     _quote_row(db_path)
     adapters = {"GRC": PayableGRC(), "XRP": XRPAdapter(url=TESTNET_URL, min_confirmations=1)}
 
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     try:
         swap = create_swap(conn, armed_config(XRP_HOT_ACCOUNT), adapters, "q_gate", XRP_CUSTOMER_PAYOUT)
         stored = conn.execute("SELECT * FROM swaps WHERE id = ?", (swap["id"],)).fetchone()

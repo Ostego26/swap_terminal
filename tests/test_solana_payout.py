@@ -1416,7 +1416,7 @@ def _seed_one_pending_sol_swap(db_path: str, payout_address: str, amount: float,
     dust amount would make every test here die on the rent guard instead of on the
     thing it is named for.
     """
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     now = "2026-10-03T00:00:00+00:00"
     conn.execute(
@@ -1868,7 +1868,7 @@ def test_an_UNARMED_SOL_swap_lands_FAILED_with_the_reason_and_NOTHING_recorded_a
     _seed_one_pending_sol_swap(db_path, DESTINATION, 0.05)
     adapter = ready_adapter(destination_exists=False, hot_wallet=valid_addresses.SOL_DEPOSIT_ACCOUNT)
 
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     try:
         completed = process_pending_payouts(conn, SOL_PAYOUT_CONFIG, {"SOL": adapter})
         swap = conn.execute("SELECT * FROM swaps WHERE id = 's_sol'").fetchone()
@@ -1913,7 +1913,7 @@ def test_an_ARMED_SOL_payout_completes_the_swap_and_records_the_SIGNATURE(tmp_pa
     db_path = str(tmp_path / "sol_payout_armed.db")
     _seed_one_pending_sol_swap(db_path, DESTINATION, 0.05)
 
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     try:
         completed = process_pending_payouts(conn, SOL_PAYOUT_CONFIG, {"SOL": adapter})
         swap = conn.execute("SELECT * FROM swaps WHERE id = 's_sol'").fetchone()

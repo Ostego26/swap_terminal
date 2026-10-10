@@ -121,7 +121,7 @@ def db_path(tmp_path):
 
 @pytest.fixture
 def db(db_path):
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     apply_migrations(conn)
     conn.execute(
@@ -249,7 +249,7 @@ def test_a_stale_refresh_neither_advances_the_swap_nor_writes_an_audit_row(db, d
     seed_swap(db, "s_race", 11)
     stale = dict(db.execute("SELECT * FROM swaps WHERE id = 's_race'").fetchone())
 
-    winner = connect_db(db_path)
+    winner = connect_db(db_path, create=True)
     deposit_service.process_active_swaps(
         winner, CONFIG, {"SOL": StubAdapter([event("tx_race", 11, confirmations=1)])})
     assert status_of(db, "s_race") == "confirming", "the winner's own cycle"
@@ -279,7 +279,7 @@ def test_the_deferred_credit_still_happens_on_the_NEXT_cycle(db, db_path):
     """
     seed_swap(db, "s_race", 11)
     stale = dict(db.execute("SELECT * FROM swaps WHERE id = 's_race'").fetchone())
-    winner = connect_db(db_path)
+    winner = connect_db(db_path, create=True)
     deposit_service.process_active_swaps(
         winner, CONFIG, {"SOL": StubAdapter([event("tx_race", 11, confirmations=1)])})
     deposit_service.refresh_swap_from_chain(
@@ -304,7 +304,7 @@ def test_the_deposit_events_row_the_loser_upserted_is_KEPT(db, db_path):
     """
     seed_swap(db, "s_race", 11)
     stale = dict(db.execute("SELECT * FROM swaps WHERE id = 's_race'").fetchone())
-    winner = connect_db(db_path)
+    winner = connect_db(db_path, create=True)
     deposit_service.process_active_swaps(
         winner, CONFIG, {"SOL": StubAdapter([event("tx_race", 11, confirmations=1)])})
 
@@ -333,7 +333,7 @@ def test_a_lost_race_does_not_stop_the_OTHER_swaps_in_the_SAME_cycle(db, db_path
     """
     seed_swap(db, "s_race", 11)
     seed_swap(db, "s_other", 12)
-    other = connect_db(db_path)
+    other = connect_db(db_path, create=True)
 
     def race():
         other.execute(

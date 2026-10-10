@@ -59,12 +59,15 @@ from chains.registry import build_adapters, missing_settings
 from chains.solana import SolanaAdapter
 from chains.xrp import XRPAdapter
 from config import (
+    DB_FILENAME,
+    ENV_FILE,
     ENV_SET,
     ENV_SET_BUT_EMPTY,
     ENV_UNSET,
     Config,
     bitcoin_family_rpc,
     env_variable_state,
+    read_env_file,
 )
 from db import db_session
 from log_setup import configure_logging
@@ -252,12 +255,23 @@ def database_census(db_path: str) -> str:
     terminal pointed at an empty file is INDISTINGUISHABLE from a quiet one, and
     the second is the normal state, so the first reads as normal.
 
-    AND connect_db() CREATES WHAT IT CANNOT FIND. db.py:561 is a bare
+    AND connect_db() USED TO CREATE WHAT IT COULD NOT FIND. db.py was a bare
     sqlite3.connect(), which makes a missing file rather than refusing, and no
-    worker applies SCHEMA. So a typo in a path does not fail: it manufactures an
-    empty database and polls it forever. The file at the wrong path even had a
-    schema, because the desktop launcher had passed the same bad value to
-    create_app(), which calls init_db().
+    worker applies SCHEMA on its own. So a typo in a path did not fail: it
+    manufactured an empty database and polled it forever. The file at the wrong
+    path even had a schema, because the desktop launcher had passed the same bad
+    value to create_app(), which calls init_db().
+
+    FIXED 2026-10-10, AND THIS CENSUS IS NOT THEREFORE DEAD. db.connect_db() now
+    raises db.DatabaseNotFound on a missing file unless the caller passes
+    create=True, which only db.init_db() does -- so the hour above cannot repeat
+    in that exact form. What the refusal CANNOT catch is the case that is left,
+    and it is the more interesting half: a path that exists, is initialized, and
+    is the WRONG ONE. The orphan from 2026-10-01 was still sitting there on
+    2026-10-10 with a schema and a swap in it, so a worker pointed at it today
+    would connect without complaint and poll it forever, exactly as before.
+    Refusing a missing file removes one of this function's two jobs; the tally
+    below is the other one, and nothing else in the tree does it.
 
     WHAT IT REPORTS, and why a count rather than a verdict. There is no way from
     inside one worker to know which database is the RIGHT one -- that is the
@@ -275,13 +289,19 @@ def database_census(db_path: str) -> str:
                                   one line
     """
     path = Path(db_path)
-    # exists() BEFORE connecting, because connect() would create it and then this
-    # line could never report the one state most worth reporting.
+    # exists() BEFORE connecting, and KEPT after connect_db() learned to refuse: the
+    # refusal raises, and this function's contract is to RETURN a line for the banner,
+    # not to abort the banner. Checking here is what lets the worker print the reason
+    # on the screen it is already printing to, in the same block as the path it is
+    # reading -- which is the one place the operator is looking.
     if not path.exists():
         return (
-            "DOES NOT EXIST YET. sqlite3.connect() CREATES a missing file and no worker applies the "
-            "schema, so this worker is about to poll a database it manufactured. If you expected swaps "
-            "here, SWAP_DB_PATH is pointing somewhere you did not mean"
+            "DOES NOT EXIST. This worker is about to REFUSE rather than start: db.connect_db() raises "
+            "DatabaseNotFound on a missing file as of 2026-10-10, because until then it CREATED one and "
+            "three workers spent an hour polling the empty database that made. If you expected swaps "
+            "here, SWAP_DB_PATH is pointing somewhere you did not mean. In the container, "
+            "docker/web_workers_entrypoint.prepare_database() creates it before any worker starts, so "
+            "seeing this line there means the entrypoint was bypassed"
         )
     try:
         with db_session(db_path) as db:
@@ -526,6 +546,54 @@ def stale_code_note(pid: int | None = None) -> str:
     )
 
 
+def unreachable_note(unreachable) -> str:
+    """The note naming which assets could not be reached this cycle, or "" if all were.
+
+    =========================================================================
+    WHY A CYCLE WITH A DEAD CHAIN MUST NOT READ LIKE A CLEAN ONE
+    =========================================================================
+
+    Until 2026-10-10 one unreachable chain raised out of a list comprehension in
+    services/deposit_service.process_active_swaps(), the worker caught it one level up,
+    and the cycle printed FAILED with a consecutive-failure count. So a signal existed
+    and it said the wrong thing: "the cycle failed", when what was true was "four of six
+    assets were refreshed and two were not". An operator can act on the second and
+    cannot act on the first.
+
+    Now each swap and each shared account is guarded individually, which fixes the
+    crediting and creates a NEW way to be silent: the cycle succeeds, `refreshed` is 4
+    where 6 swaps are open, and nothing says why. A count that is quietly short is
+    exactly the shape workers/common.database_census() exists for -- `active_swaps=0 is
+    expected only when no swap is open` was true of the file being read and false of the
+    system. So the partition goes on the line, with the assets NAMED: an operator who
+    sees `BTC` knows which daemon to look at, and `2 asset(s)` sends them nowhere.
+
+    ONE ASSET PER NAME, DEDUPLICATED AND SORTED. Six swaps behind one dead BTC daemon is
+    one fact about BTC, not six; printing it six times would bury the second asset.
+
+    THE EXCEPTION TYPE AND NOT ITS MESSAGE. `[Errno 111] Connection refused` carries a
+    host and port, and this line is printed on every cycle for as long as the chain is
+    down -- the type is what differs between "nothing is listening" and "the credential
+    is wrong", and the full message is already in the per-unit logger.warning beside the
+    guard. A note that grows with the message would also make a flapping endpoint
+    reflow the whole line every cycle, which is what makes a log unreadable.
+    """
+    if not unreachable:
+        return ""
+    by_asset: dict[str, set[str]] = {}
+    for asset, _which, exc in unreachable:
+        by_asset.setdefault(str(asset), set()).add(type(exc).__name__)
+    named = ", ".join(
+        f"{asset} ({'/'.join(sorted(kinds))})" for asset, kinds in sorted(by_asset.items())
+    )
+    return (
+        f"UNREACHABLE THIS CYCLE: {named} -- `refreshed` counts only what WAS refreshed, so it "
+        f"is short by the swaps on those assets rather than reporting them as having no "
+        f"deposit. Every other asset was still credited. A deposit on an unreachable chain is "
+        f"neither credited nor declared absent; the next cycle tries again"
+    )
+
+
 def cycle_line(worker_name: str, cycle: int, seconds: float, counts: dict[str, int], notes: str = "") -> str:
     """Render one cycle's result so that idle and productive cycles differ.
 
@@ -634,6 +702,12 @@ def sleep_until_next_cycle(poll_seconds: float, should_stop: Callable[[], bool])
 #: four times is rule 8's shape with a typo waiting in it.
 DB_PATH_VARIABLE = "SWAP_DB_PATH"
 
+#: The OTHER name for the same fact, which compose reads and which config.py bridges
+#: to DB_PATH_VARIABLE. Named here for the same reason as the line above: two names
+#: for one location is what cost the operator a round on 2026-10-10, and spelling
+#: either one by hand in a report is how the two drift apart again.
+DB_DIR_VARIABLE = "SWAP_DB_DIR"
+
 
 def db_path_source(explicit_db: str = "") -> str:
     """Where a reported database path actually came from. FOUR answers, not two.
@@ -725,6 +799,39 @@ def db_path_source(explicit_db: str = "") -> str:
     state = env_variable_state(DB_PATH_VARIABLE)
     if state == ENV_SET:
         return DB_PATH_VARIABLE
+
+    # ============================================================================
+    # THE FIFTH ANSWER, 2026-10-10: .env SUPPLIED IT AND THE SHELL DID NOT
+    # ============================================================================
+    #
+    # This is the same founding defect one case further in, for the third time.
+    # Measured on the operator's host the day they moved the database out of a MEGA
+    # sync folder: they edited SWAP_DB_DIR in .env, recreated the web container, and
+    # the container followed while every host tool kept opening the old path. The fix
+    # was config.database_path(), which now reads those two keys out of .env when the
+    # shell has not exported anything -- so "the built-in default, because
+    # SWAP_DB_PATH IS NOT SET in this shell" became a FABRICATION in the most common
+    # case on that host: the variable is indeed not set, and the path did not come
+    # from the built-in default.
+    #
+    # ASKED OF config, NOT RE-PARSED HERE (rule 8). config.read_env_file() is the one
+    # reader, config.database_path() is the one derivation, and a second copy of
+    # either would be a bug with a delay on it. This function's whole job is to report
+    # which source won, so it asks the source.
+    from_file = read_env_file()
+    if from_file.get(DB_PATH_VARIABLE):
+        return (
+            f"{DB_PATH_VARIABLE} in {ENV_FILE} -- NOT from this shell, which has it "
+            f"{state}. docker compose reads the same file, so the container agrees"
+        )
+    if from_file.get(DB_DIR_VARIABLE):
+        return (
+            f"{DB_DIR_VARIABLE}/{DB_FILENAME}, from {ENV_FILE} -- NOT from this shell, which has "
+            f"{DB_PATH_VARIABLE} {state}. That is the bridge between the two names for this one "
+            f"fact: compose mounts {DB_DIR_VARIABLE} at /data and sets {DB_PATH_VARIABLE} over it, "
+            f"so the container and this process agree by construction rather than by remembering"
+        )
+
     # BOTH REMAINING STATES GET THE DEFAULT PATH and they must not get the same
     # sentence: one tells the operator to export the variable, the other tells them
     # the export they already wrote did nothing. `env | grep SWAP_DB_PATH` answers
@@ -738,6 +845,7 @@ def db_path_source(explicit_db: str = "") -> str:
         ),
     }[state]
     return (
-        f"the built-in default, because {why}. The workers read "
-        f"whatever {DB_PATH_VARIABLE} named in the shell that STARTED them, which may be a different file"
+        f"the built-in default, because {why} and {ENV_FILE} supplies neither "
+        f"{DB_PATH_VARIABLE} nor {DB_DIR_VARIABLE}. The workers read whatever "
+        f"{DB_PATH_VARIABLE} named in the shell that STARTED them, which may be a different file"
     )

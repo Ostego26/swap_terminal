@@ -32,10 +32,17 @@ already cost an hour of their evening on 2026-10-01:
 
 And the reason a typo became a database rather than an error:
 
-    connect_db() CREATES WHAT IT CANNOT FIND. db.py is a bare sqlite3.connect(),
+    connect_db() CREATED WHAT IT COULD NOT FIND. db.py was a bare sqlite3.connect(),
     which makes a missing file rather than refusing, and no worker applies SCHEMA.
-    So a typo in a path does not fail: it manufactures an empty database and polls
+    So a typo in a path did not fail: it manufactured an empty database and polled
     it forever.
+
+THAT CAUSE IS FIXED AND THIS TOOL IS STILL NEEDED, which is the distinction rule 19
+draws between stopping a symptom and stopping a cause. db.connect_db() refuses a
+missing file as of 2026-10-10 (db.DatabaseNotFound), so no future typo can mint a
+third database -- but the orphan from 2026-10-01 is already on disk with rows in it,
+and a fix to the code does not move a row. This file is the cleanup half; the refusal
+is the cause half. Neither substitutes for the other.
 
 The operator's instruction, 2026-10-10: "you better merge then cull that shit".
 
@@ -359,10 +366,16 @@ def open_both(source: Path, destination: Path):
     on that handle, so no bug in this file can alter the evidence it is reading -- which
     matters because the source is the only copy of whatever it holds.
 
-    BOTH MUST EXIST. The destination is NOT created: db.connect_db() creating a missing
-    file is what produced the orphan this tool exists to absorb (workers/common.
-    database_census() records the hour it cost), and a merge tool that manufactured its
-    own destination would make a third database out of a typo in the same way.
+    BOTH MUST EXIST, AND THIS GUARD IS NOT REDUNDANT WITH db.connect_db()'s REFUSAL --
+    neither connection below goes through connect_db(). Both are raw sqlite3.connect()
+    calls, because the source needs the mode=ro URI and the destination needs
+    sqlite3.Row rather than db.dict_factory, so the refusal that now protects every
+    other caller in the tree does not reach this file and the check has to be here.
+    db.connect_db() creating a missing file is what produced the orphan this tool exists
+    to absorb (workers/common.database_census() records the hour it cost); a merge tool
+    that manufactured its own destination would make a third database out of a typo in
+    exactly the same way, and a tool whose whole subject is that failure is the last
+    place that should reproduce it.
     """
     for path, what in ((source, "source"), (destination, "destination")):
         if not path.is_file():

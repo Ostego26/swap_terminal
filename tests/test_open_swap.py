@@ -622,7 +622,7 @@ def test_the_apply_command_echoes_the_values_that_were_passed():
 # --- end to end, against a database the tool creates ------------------------
 
 def swap_row(db_path):
-    connection = connect_db(str(db_path))
+    connection = connect_db(str(db_path), create=True)
     try:
         return connection.execute("SELECT * FROM swaps").fetchall()
     finally:
@@ -704,7 +704,7 @@ def test_apply_writes_the_quote_the_swap_and_the_tag(monkeypatch, tmp_path, caps
     assert swap["expected_input_amount"] == 1.0
     assert swap["status"] == "awaiting_deposit"
 
-    connection = connect_db(str(db_path))
+    connection = connect_db(str(db_path), create=True)
     try:
         quotes = connection.execute("SELECT id, from_asset, to_asset FROM quotes").fetchall()
         tags = connection.execute(
@@ -760,7 +760,7 @@ def test_the_block_labels_the_tag_as_mandatory_and_names_the_units(monkeypatch, 
     )
     swap = swap_row(db_path)[0]
 
-    connection = connect_db(str(db_path))
+    connection = connect_db(str(db_path), create=True)
     try:
         quote = connection.execute("SELECT * FROM quotes WHERE id = ?", (swap["quote_id"],)).fetchone()
     finally:
@@ -1501,7 +1501,7 @@ def test_the_network_fee_line_does_not_print_a_measured_reserve_in_exponent_form
          "--apply"],
     )
     swap = swap_row(db_path)[0]
-    connection = connect_db(str(db_path))
+    connection = connect_db(str(db_path), create=True)
     try:
         quote = connection.execute("SELECT * FROM quotes WHERE id = ?", (swap["quote_id"],)).fetchone()
     finally:
@@ -1614,7 +1614,7 @@ def test_the_SETTLEMENT_verdict_reaches_BOTH_the_dry_run_and_the_apply_receipt(m
                            "--db", str(db_path), "--apply"])
     capsys.readouterr()
     swap = swap_row(db_path)[0]
-    connection = connect_db(str(db_path))
+    connection = connect_db(str(db_path), create=True)
     try:
         quote = connection.execute("SELECT * FROM quotes WHERE id = ?", (swap["quote_id"],)).fetchone()
     finally:

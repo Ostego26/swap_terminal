@@ -331,7 +331,7 @@ def db_path(tmp_path) -> str:
 def seed(db_path: str, swap_id: str, *, status: str = RETIRABLE_FROM, expires_at: str = LONG_AGO,
          deposit_rows: int = 0) -> None:
     """One swap in `status`, with `deposit_rows` deposit_events rows against it."""
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         connection.execute(
             "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps,"
@@ -363,7 +363,7 @@ def seed(db_path: str, swap_id: str, *, status: str = RETIRABLE_FROM, expires_at
 
 
 def statuses(db_path: str) -> dict[str, str]:
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         return {row["id"]: row["status"] for row in connection.execute("SELECT id, status FROM swaps")}
     finally:
@@ -371,7 +371,7 @@ def statuses(db_path: str) -> dict[str, str]:
 
 
 def audit_rows(db_path: str) -> list[dict]:
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         return [dict(row) for row in connection.execute(
             "SELECT swap_id, old_status, new_status, message FROM swap_audit_log ORDER BY id"
@@ -478,7 +478,7 @@ def test_nothing_but_swaps_and_the_audit_log_is_touched(db_path):
     tests/test_late_deposits.py uses to pin that a late pass rewrites nothing.
     """
     seed(db_path, "s_unfunded")
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         tables = [row["name"] for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
@@ -492,7 +492,7 @@ def test_nothing_but_swaps_and_the_audit_log_is_touched(db_path):
 
     expire_swap.main(["--all", "--db", db_path, "--apply"])
 
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         after = {
             table: connection.execute(f"SELECT * FROM {table}").fetchall()  # noqa: S608 -- checked: same name list, same provenance.
@@ -517,7 +517,7 @@ def test_an_expired_swap_leaves_the_obligation_floor(db_path):
     agreement between two modules that neither one can assert alone.
     """
     seed(db_path, "s_unfunded")
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         before = obligation(connection, "GRC")
     finally:
@@ -527,7 +527,7 @@ def test_an_expired_swap_leaves_the_obligation_floor(db_path):
 
     expire_swap.main(["--all", "--db", db_path, "--apply"])
 
-    connection = connect_db(db_path)
+    connection = connect_db(db_path, create=True)
     try:
         after = obligation(connection, "GRC")
     finally:
@@ -569,7 +569,7 @@ def test_an_expired_swap_is_a_late_deposit_target(tmp_path):
     connection.close()
     seed(path, "s_unfunded")
     expire_swap.main(["--all", "--db", path, "--apply"])
-    connection = connect_db(path)
+    connection = connect_db(path, create=True)
     try:
         targets = late_scan_targets(connection, ["BTC"], cutoff="2026-01-01T00:00:00+00:00")
     finally:

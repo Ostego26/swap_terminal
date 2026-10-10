@@ -57,7 +57,7 @@ SWAP_IDS = ("s_one", "s_two", "s_three")
 @pytest.fixture
 def db(tmp_path):
     """A real database file with the real SCHEMA and three swaps seeded."""
-    conn = connect_db(str(tmp_path / "swap_terminal_icp_subaccounts.db"))
+    conn = connect_db(str(tmp_path / "swap_terminal_icp_subaccounts.db"), create=True)
     conn.executescript(SCHEMA)
     _seed_swaps(conn, SWAP_IDS)
     yield conn

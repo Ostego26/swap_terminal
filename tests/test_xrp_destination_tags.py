@@ -124,7 +124,7 @@ def _fresh_db(tmp_path, swap_ids=("s_one", "s_two", "s_three")) -> str:
     connect_db() does not.
     """
     path = str(tmp_path / "swap_terminal_xrp_tags.db")
-    conn = connect_db(path)
+    conn = connect_db(path, create=True)
     conn.executescript(SCHEMA)
     _seed_swaps(conn, swap_ids)
     conn.close()
@@ -134,7 +134,7 @@ def _fresh_db(tmp_path, swap_ids=("s_one", "s_two", "s_three")) -> str:
 @pytest.fixture
 def db(tmp_path):
     path = _fresh_db(tmp_path)
-    conn = connect_db(path)
+    conn = connect_db(path, create=True)
     conn.executescript(SCHEMA)
     yield conn
     conn.close()
@@ -287,7 +287,7 @@ def test_two_threads_cannot_allocate_the_same_tag(tmp_path):
     lock = threading.Lock()
 
     def worker(mine):
-        conn = connect_db(path)
+        conn = connect_db(path, create=True)
         conn.executescript(SCHEMA)
         # 5s is sqlite3's default busy timeout; named here so the reader knows
         # the loser waits for the winner's commit rather than failing instantly.
@@ -336,7 +336,7 @@ def test_two_threads_cannot_allocate_the_same_tag(tmp_path):
         f"got {sorted(issued)}"
     )
 
-    conn = connect_db(path)
+    conn = connect_db(path, create=True)
     rows = conn.execute("SELECT account, destination_tag, swap_id FROM xrp_destination_tags").fetchall()
     conn.close()
     tags_in_table = [row["destination_tag"] for row in rows]

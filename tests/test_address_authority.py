@@ -605,7 +605,7 @@ class RecordingAdapter:
 
 def _seed_pending(db_path, *, to_asset, payout_address):
     """One swap in `payout_pending` -- the only state process_pending_payouts() acts on."""
-    conn = connect_db(str(db_path))
+    conn = connect_db(str(db_path), create=True)
     conn.executescript(SCHEMA)
     now = "2026-09-27T00:00:00+00:00"
     conn.execute(
@@ -796,7 +796,7 @@ class StubDestination:
         return False
 
 def _quote_db(tmp_path, name):
-    conn = connect_db(str(tmp_path / name))
+    conn = connect_db(str(tmp_path / name), create=True)
     conn.executescript(SCHEMA)
     conn.execute(
         "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps, "
@@ -872,7 +872,7 @@ def test_a_deposit_chain_with_no_validator_still_creates_the_swap(tmp_path, capl
     MUTATION: refuse on `verdict.unchecked` in _refuse_unusable_deposit_address() and the row
     count drops to 0.
     """
-    conn = connect_db(str(tmp_path / "novalidator.db"))
+    conn = connect_db(str(tmp_path / "novalidator.db"), create=True)
     conn.executescript(SCHEMA)
     conn.execute(
         "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps, "

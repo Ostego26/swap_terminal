@@ -61,7 +61,7 @@ LATER = "2026-10-02T04:00:00Z"
 def db_file(tmp_path):
     """A real database on the real SCHEMA, at a real path the tool can be pointed at."""
     path = tmp_path / "swap_terminal_test.db"
-    conn = connect_db(str(path))
+    conn = connect_db(str(path), create=True)
     conn.executescript(SCHEMA)
     conn.commit()
     conn.close()
@@ -69,7 +69,7 @@ def db_file(tmp_path):
 
 
 def seed(db_file, rows, *, now=NOW):
-    conn = connect_db(str(db_file))
+    conn = connect_db(str(db_file), create=True)
     record(conn, rows, now=now)
     conn.commit()
     conn.close()
@@ -117,7 +117,7 @@ def test_the_column_is_why_and_a_wrong_name_RAISES_rather_than_reading_as_empty(
     query against the name I guessed raises instead of answering emptily.
     """
     seed(db_file, [no_reference(STRANDED_A)])
-    conn = connect_db(str(db_file))
+    conn = connect_db(str(db_file), create=True)
     rows = outstanding(conn, "SOL")
     assert len(rows) == 1
     assert rows[0]["why"] == "no memo instruction, so nothing identifies the sender"
@@ -127,7 +127,7 @@ def test_the_column_is_why_and_a_wrong_name_RAISES_rather_than_reading_as_empty(
 
 def test_outstanding_is_the_default_and_resolved_rows_are_hidden(db_file):
     seed(db_file, [no_reference(STRANDED_A), wrong_reference(STRANDED_B)])
-    conn = connect_db(str(db_file))
+    conn = connect_db(str(db_file), create=True)
     resolve_credited(conn, "SOL", [STRANDED_A], now=LATER)
     conn.commit()
     assert [row["txid"] for row in outstanding(conn, "SOL")] == [STRANDED_B]
@@ -135,7 +135,7 @@ def test_outstanding_is_the_default_and_resolved_rows_are_hidden(db_file):
 
 def test_include_resolved_shows_BOTH_and_marks_which(db_file):
     seed(db_file, [no_reference(STRANDED_A), wrong_reference(STRANDED_B)])
-    conn = connect_db(str(db_file))
+    conn = connect_db(str(db_file), create=True)
     resolve_credited(conn, "SOL", [STRANDED_A], now=LATER)
     conn.commit()
     rows = outstanding(conn, "SOL", include_resolved=True)
@@ -161,7 +161,7 @@ def test_the_default_is_the_OPPOSITE_of_the_scanners_skip_set(db_file):
     resolved-and-skippable; neither list is the other's negation.
     """
     seed(db_file, [no_reference(STRANDED_A), wrong_reference(STRANDED_B)])
-    conn = connect_db(str(db_file))
+    conn = connect_db(str(db_file), create=True)
     resolve_credited(conn, "SOL", [STRANDED_A], now=LATER)
     conn.commit()
     assert [row["txid"] for row in outstanding(conn, "SOL")] == [STRANDED_B]
@@ -175,7 +175,7 @@ def test_the_default_is_the_OPPOSITE_of_the_scanners_skip_set(db_file):
 
 def test_the_asset_filter_is_per_asset(db_file):
     seed(db_file, [no_reference(STRANDED_A)])
-    conn = connect_db(str(db_file))
+    conn = connect_db(str(db_file), create=True)
     assert outstanding(conn, "XRP") == []
     assert len(outstanding(conn, None)) == 1, "and no filter means every asset"
 
@@ -184,7 +184,7 @@ def test_the_oldest_deposit_is_FIRST(db_file):
     """Somebody has been waiting longest on the top row, which is why the index exists."""
     seed(db_file, [wrong_reference(STRANDED_B)], now=LATER)
     seed(db_file, [no_reference(STRANDED_A)], now=NOW)
-    conn = connect_db(str(db_file))
+    conn = connect_db(str(db_file), create=True)
     assert [row["txid"] for row in outstanding(conn, "SOL")] == [STRANDED_A, STRANDED_B]
 
 
@@ -344,7 +344,7 @@ def test_last_seen_is_labeled_as_a_READ_and_not_as_a_freshness_check(db_file, ca
 
 def test_resolved_rows_show_their_note_under_include_resolved(db_file, capsys):
     seed(db_file, [no_reference(STRANDED_A)])
-    conn = connect_db(str(db_file))
+    conn = connect_db(str(db_file), create=True)
     resolve_credited(conn, "SOL", [STRANDED_A], now=LATER)
     conn.commit()
     conn.close()

@@ -565,18 +565,34 @@ def test_a_stop_signal_is_not_swallowed_by_the_guard(monkeypatch):
 
 
 def test_a_missing_database_is_named_as_such_before_the_first_cycle(tmp_path):
-    """The one state most worth reporting, and connect() would destroy the evidence.
+    """The one state most worth reporting, and it must be a RETURNED line, not a raise.
 
-    db.connect_db() is a bare sqlite3.connect() (db.py:561): it CREATES a missing
-    file rather than refusing, and no worker applies SCHEMA. So a typo in a path
-    does not fail -- it manufactures an empty database and polls it forever. The
-    census has to look BEFORE anything connects, which is why it is exists()-first
-    and not try/except around a query.
+    db.connect_db() was a bare sqlite3.connect(): it CREATED a missing file rather
+    than refusing, and no worker applies SCHEMA. So a typo in a path did not fail --
+    it manufactured an empty database and polled it forever.
+
+    REWRITTEN 2026-10-10, when connect_db() learned to refuse. The exists()-first
+    shape survived the fix for a reason the fix does not cover: database_census()
+    owes the banner a STRING. If it reached the refusal it would raise, and the
+    banner that was about to print the path, the run directory and the worker grace
+    period would print none of them -- the operator would get a traceback instead of
+    the block that tells them which database they are pointed at. So the census still
+    looks before it connects, and what it now says is that the worker is about to
+    refuse rather than about to manufacture.
+
+    WHAT IT MUST NOT SAY is that connect() creates one, because it no longer does,
+    and a worker banner that described the old behavior would send the reader looking
+    for a file that was never made (rule 16: a wrong comment is a bug, and a wrong
+    line of operator output is the same bug where more people can see it).
     """
     verdict = common.database_census(str(tmp_path / "never-created.db"))
-    assert "DOES NOT EXIST YET" in verdict
-    assert "CREATES a missing file" in verdict
+    assert "DOES NOT EXIST" in verdict
+    assert "about to REFUSE" in verdict
+    assert "DatabaseNotFound" in verdict
     assert "SWAP_DB_PATH is pointing somewhere you did not mean" in verdict
+    # The old wording, pinned as absent. It was true until 2026-10-10 and is the
+    # sentence a reader would most plausibly re-add from memory.
+    assert "CREATES a missing file" not in verdict
 
 
 def test_a_file_with_no_swaps_table_does_not_read_as_an_empty_one(tmp_path):

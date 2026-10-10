@@ -38,7 +38,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "swap_terminal"))
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from config import Config  # noqa: E402  same
-from db import connect_db  # noqa: E402  same
+from db import connect_db, init_db  # noqa: E402  same
 from services.pricing import MarketSnapshot  # noqa: E402  same
 
 import market_context_report  # noqa: E402  the path shims above must run first
@@ -80,7 +80,39 @@ def _run(monkeypatch, argv: list[str]) -> int:
     return market_context_report.main()
 
 
+def _existing_db(tmp_path, name: str = "swap.db") -> str:
+    """A real, initialized database at `name`, because the tool no longer makes one.
+
+    =========================================================================
+    EVERY TEST IN THIS FILE USED TO RUN AGAINST A PATH WITH NOTHING AT IT
+    =========================================================================
+
+    They passed `str(tmp_path / "swap.db")` and the tool CREATED it: db_session()
+    reached a bare sqlite3.connect(), and main() then ran executescript(SCHEMA) on
+    the new file. So a run announcing "read only -- nothing will be written" left a
+    fully initialized database behind, and test_a_bare_run_writes_nothing asserted
+    the opposite and passed, for as long as the file has existed.
+
+    init_db() AND NOT connect_db(create=True): the database an operator points
+    --db at has the real schema and its migrations applied. A bare file with the
+    tool's own executescript() over it is a different artifact, and the difference is
+    exactly what test_it_creates_the_table_in_a_database_that_predates_it exists to
+    cover -- so that case keeps building its own older database by hand, and every
+    other test here starts from the real thing.
+    """
+    path = tmp_path / name
+    init_db(path)
+    return str(path)
+
+
 def _rows(db_path: str) -> list[dict]:
+    """The rows, read from a database that must ALREADY EXIST.
+
+    create=False DELIBERATELY, and it is the assertion's eyes. With create=True a
+    tool that never wrote the database would make this function create an empty one
+    and return [] -- so `assert _rows(db) == []` would pass for "nothing was written"
+    AND for "nothing exists at all", which are the two facts this file is about.
+    """
     conn = connect_db(db_path)
     try:
         return conn.execute("SELECT * FROM market_context ORDER BY id").fetchall()
@@ -94,7 +126,7 @@ def test_a_bare_run_writes_nothing(tmp_path, monkeypatch, stub_fetch, capsys):
 
     Asserted on the ROWS, not on the absence of a log line -- a write that happened and was
     not printed is exactly the failure this is guarding."""
-    db = str(tmp_path / "swap.db")
+    db = _existing_db(tmp_path)
     assert _run(monkeypatch, ["--db", db]) == 0
     assert _rows(db) == []
     printed = capsys.readouterr().out
@@ -105,7 +137,7 @@ def test_record_appends_one_row_per_asset_and_says_how_many(tmp_path, monkeypatc
                                                             capsys):
     """--record is the whole point of the file: without something running this, market_context
     has no writer and "keep track of the market cap" is a claim about zero rows."""
-    db = str(tmp_path / "swap.db")
+    db = _existing_db(tmp_path)
     assert _run(monkeypatch, ["--db", db, "--record"]) == 0
     rows = _rows(db)
     assert [row["asset"] for row in rows] == ["GRC", "BTC"]
@@ -117,7 +149,7 @@ def test_two_records_accumulate_rather_than_overwrite(tmp_path, monkeypatch, stu
     """History is the reason the table exists rather than a print. An UPDATE-shaped writer
     would leave the file looking identical and the question -- what was GRC doing an hour ago
     -- unanswerable."""
-    db = str(tmp_path / "swap.db")
+    db = _existing_db(tmp_path)
     _run(monkeypatch, ["--db", db, "--record"])
     _run(monkeypatch, ["--db", db, "--record"])
     assert len(_rows(db)) == 4
@@ -138,7 +170,7 @@ def test_an_empty_history_prints_none_and_why_rather_than_a_blank_section(tmp_pa
     """Rule 14: `(none)` is a result, a blank gap is ambiguous between zero rows and a query
     that broke -- and on a fresh table zero is the EXPECTED answer, so the line has to say
     what would make it non-zero."""
-    db = str(tmp_path / "swap.db")
+    db = _existing_db(tmp_path)
     _run(monkeypatch, ["--db", db])
     printed = capsys.readouterr().out
     assert "(none)  <- 0 rows" in printed
@@ -147,7 +179,7 @@ def test_an_empty_history_prints_none_and_why_rather_than_a_blank_section(tmp_pa
 
 def test_the_history_section_appears_once_rows_exist(tmp_path, monkeypatch, stub_fetch, capsys):
     """The comparison over time, which is what "better establish grc prices" asks for."""
-    db = str(tmp_path / "swap.db")
+    db = _existing_db(tmp_path)
     _run(monkeypatch, ["--db", db, "--record"])
     capsys.readouterr()
     _run(monkeypatch, ["--db", db])
@@ -180,7 +212,7 @@ def test_the_block_echoes_the_parameters_that_decide_the_answer(tmp_path, monkey
                                                                 stub_fetch, capsys):
     """Pasted output is read a day later, so it has to be self-describing: the database, both
     windows and the fee the drift is measured against. A verdict without them is a word."""
-    db = str(tmp_path / "swap.db")
+    db = _existing_db(tmp_path)
     _run(monkeypatch, ["--db", db])
     printed = capsys.readouterr().out
     assert f"db={db}" in printed
@@ -192,7 +224,7 @@ def test_every_duration_it_prints_is_microfortnights(tmp_path, monkeypatch, stub
     """Rule 6, and the unit is µ (U+00B5) -- an ASCII 'u' in displayed output is a defect the
     same as a wrong number, and every script written for this rule has drifted to "ufn"
     because ASCII is what fingers type and nothing failed when it did."""
-    db = str(tmp_path / "swap.db")
+    db = _existing_db(tmp_path)
     _run(monkeypatch, ["--db", db, "--record"])
     capsys.readouterr()
     _run(monkeypatch, ["--db", db])
@@ -222,6 +254,91 @@ def test_one_fetch_per_run_and_never_two(tmp_path, monkeypatch, stub_fetch):
     """--record must not fetch once to write and again to display. Two requests against a
     rate-limited free tier is how a five-minute cron entry starts getting 429s, and the second
     answer would disagree with the row just written."""
-    db = str(tmp_path / "swap.db")
+    db = _existing_db(tmp_path)
     _run(monkeypatch, ["--db", db, "--record"])
     assert stub_fetch["calls"] == ["fetch"]
+
+
+# =============================================================================
+# A MISSING DATABASE, WHICH THIS TOOL USED TO CREATE WHILE SAYING IT WROTE NOTHING
+# =============================================================================
+#
+# Until 2026-10-10 db_session() reached a bare sqlite3.connect(), which CREATES a
+# missing file, and main() then ran executescript(SCHEMA) on it. So pointing --db at
+# a path with nothing in it produced a fully initialized empty database, from a run
+# whose own first line said "read only -- nothing will be written" -- and
+# test_a_bare_run_writes_nothing above asserted the opposite and passed, because it
+# read the rows out of the file the tool had just made.
+#
+# That is the 2026-10-01 two-database failure with a REPORTING TOOL as the second
+# writer: a typo in --db did not error, it produced another database, schema and all,
+# that the next thing to look at that path would open without complaint.
+
+
+def test_a_missing_database_is_refused_and_no_file_appears(tmp_path, monkeypatch, stub_fetch, capsys):
+    """THE REGRESSION TEST. MUTATION: delete refuse_a_missing_database()'s call in main().
+
+    THE SECOND ASSERTION IS THE ONE THAT MATTERS. "It returned non-zero" would pass
+    for a version that created the file and then failed; what has to be true is that
+    NOTHING IS AT THAT PATH afterwards. A 0-byte file is enough to do the damage --
+    the next caller finds it existing and connects without complaint.
+    """
+    absent = tmp_path / "nothing-here" / "swap.db"
+    absent.parent.mkdir()
+
+    code = _run(monkeypatch, ["--db", str(absent)])
+
+    assert code == market_context_report.NO_DATABASE_EXIT
+    assert not absent.exists(), f"the tool created {absent} on its way to refusing"
+    assert list(absent.parent.iterdir()) == [], "something was written into the directory"
+
+
+def test_the_refusal_distinguishes_no_database_from_no_market_context(tmp_path, monkeypatch,
+                                                                     stub_fetch, capsys):
+    """Those are different facts and must never share a line (rule 14).
+
+    "No market context has been recorded" is the answer a healthy empty table gives,
+    and it is the answer an operator will read into any vaguer wording -- at which
+    point they conclude the recorder is not running, when what is actually wrong is
+    --db.
+    """
+    absent = tmp_path / "swap.db"
+    _run(monkeypatch, ["--db", str(absent)])
+
+    printed = capsys.readouterr().out
+    assert "REFUSED" in printed
+    assert str(absent) in printed, "the path is the thing that is wrong; it has to be on the screen"
+    assert "NOT 'no market context has been recorded'" in printed
+    assert "never been created" in printed
+    # And it admits what it used to do, because an operator who saw the old behavior
+    # needs to know the file they may be looking for was never real.
+    assert "until 2026-10-10 this tool created it" in printed.lower()
+
+
+def test_it_refuses_BEFORE_spending_a_coingecko_fetch(tmp_path, monkeypatch, stub_fetch):
+    """The refusal is knowable from the filesystem, so the network call must not happen.
+
+    A CoinGecko request takes seconds and can hang behind a proxy. Spending them on a
+    run that is about to refuse is exactly the wait that gets Ctrl-C'd -- and on this
+    system a Ctrl-C at the wrong moment is how money ends up on chain with no row
+    beside it. stub_fetch counts the calls, so this is measured rather than argued.
+    """
+    _run(monkeypatch, ["--db", str(tmp_path / "swap.db")])
+    assert stub_fetch["calls"] == [], (
+        f"the fetch ran {len(stub_fetch['calls'])} time(s) before the refusal; the check is a "
+        f"Path.exists() and costs nothing"
+    )
+
+
+def test_the_exit_code_separates_wrong_path_from_failed_report(tmp_path, monkeypatch, stub_fetch):
+    """2, not 1, so a caller can tell the two apart.
+
+    A script or cron entry wrapping this needs "you pointed me at nothing" to be
+    distinguishable from "the report broke" -- the first is fixed by editing a path
+    and the second is not. absorb_db.open_both() uses 2 for the same reason.
+    """
+    assert market_context_report.NO_DATABASE_EXIT == 2
+    assert _run(monkeypatch, ["--db", str(tmp_path / "gone.db")]) == 2
+    # And the success path still returns 0, so the codes are actually distinct in
+    # practice rather than merely different constants.
+    assert _run(monkeypatch, ["--db", _existing_db(tmp_path)]) == 0

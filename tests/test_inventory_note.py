@@ -109,7 +109,7 @@ def test_inventory_assets_reads_the_real_rows_the_real_refresh_wrote(tmp_path):
     read the table. The note's `present` argument has to come from the rows that
     actually exist, not from which adapters were asked.
     """
-    db = connect_db(str(tmp_path / "t.db"))
+    db = connect_db(str(tmp_path / "t.db"), create=True)
     db.executescript(SCHEMA)
     adapters = {
         "GRC": Adapter(balance=3780.09),
@@ -136,7 +136,7 @@ def test_the_reconcile_cycle_LINE_carries_the_derived_note(tmp_path):
     cycle is driven here, with a real database and a real refresh, and the assertion
     is on the line the worker actually prints.
     """
-    db = connect_db(str(tmp_path / "t.db"))
+    db = connect_db(str(tmp_path / "t.db"), create=True)
     db.executescript(SCHEMA)
     adapters = {
         "GRC": Adapter(balance=3780.09),
@@ -152,7 +152,7 @@ def test_the_reconcile_cycle_LINE_carries_the_derived_note(tmp_path):
 
 def test_a_cycle_where_every_adapter_answers_does_not_print_a_warning_shape(tmp_path):
     """`did work` and `something is wrong` must not render alike."""
-    db = connect_db(str(tmp_path / "t.db"))
+    db = connect_db(str(tmp_path / "t.db"), create=True)
     db.executescript(SCHEMA)
     adapters = {"GRC": Adapter(balance=1.0), "SOL": Adapter(balance=2.0)}
     line = reconcile_worker.run_cycle(db, {}, adapters, 4, 0.0)

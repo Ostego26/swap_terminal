@@ -105,7 +105,7 @@ def old_schema() -> str:
 @pytest.fixture
 def legacy(tmp_path):
     """A database carrying the PREVIOUS payment key, with the 2026-10-07 row in it."""
-    conn = connect_db(str(tmp_path / "legacy.db"))
+    conn = connect_db(str(tmp_path / "legacy.db"), create=True)
     conn.executescript(old_schema())
     conn.execute(
         "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps,"
@@ -287,7 +287,7 @@ def test_a_second_run_rebuilds_nothing(legacy):
 
 def test_a_FRESH_database_is_never_rebuilt(tmp_path):
     """A database created from today's SCHEMA already has the key."""
-    conn = connect_db(str(tmp_path / "fresh.db"))
+    conn = connect_db(str(tmp_path / "fresh.db"), create=True)
     conn.executescript(SCHEMA)
     conn.commit()
     assert apply_migrations(conn)["payment_keys_widened"] == []
@@ -458,7 +458,7 @@ def test_every_ON_CONFLICT_target_in_the_tree_names_a_real_unique_index(tmp_path
     fails naming the file, the table, the target it found and the keys that actually
     exist.
     """
-    conn = connect_db(str(tmp_path / "gate.db"))
+    conn = connect_db(str(tmp_path / "gate.db"), create=True)
     conn.executescript(SCHEMA)
     conn.commit()
 

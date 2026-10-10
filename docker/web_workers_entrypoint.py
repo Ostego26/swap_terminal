@@ -61,7 +61,24 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR / "swap_terminal"))
 
-import supervisor  # noqa: E402  -- after the sys.path.insert above, same as every root tool
+# ROOTLESS, after the sys.path.insert above, same as every root tool in this tree.
+#
+# WHY db AND config ARE HERE AT ALL, added 2026-10-10 with connect_db()'s refusal.
+# db.connect_db() no longer creates a missing file (it manufactured a second database
+# out of a mistyped SWAP_DB_PATH on 2026-10-01 and three workers polled it for an
+# hour). That refusal is right for every caller EXCEPT the first one on a fresh
+# volume -- and on this container the first one is a WORKER, because main() calls
+# start_workers() before it execs gunicorn, and gunicorn is what imports
+# wsgi -> app -> create_app() -> init_db(). So the database has to exist BEFORE
+# start_workers() returns, and this file is the only thing that runs earlier.
+#
+# prepare_database() calls db.init_db(path) rather than repeating
+# executescript(SCHEMA): one copy of "create and migrate" (rule 8). Nothing here
+# derives the path -- config.Config does, the same way every other process in the
+# container reads it.
+import db  # noqa: E402
+import supervisor  # noqa: E402
+from config import Config  # noqa: E402
 
 #: Where the workers' pid files and logs go. MUST be the volume, not the image's
 #: writable layer: a pid file that dies with the container is a pid file that can
@@ -90,6 +107,41 @@ def announce(lines: list[str]) -> None:
     """
     for line in lines:
         print(line, flush=True)
+
+
+def prepare_database() -> None:
+    """Create and migrate the swap database before a single worker polls it.
+
+    RUNS BEFORE start_workers() AND THAT ORDER IS THE WHOLE POINT. See the `import db`
+    comment at the top of this file: the workers reach the database before gunicorn
+    does, so if this did not run, a fresh volume would give three workers a
+    DatabaseNotFound at startup for a path that was perfectly correct.
+
+    IT ANNOUNCES WHICH OF THE TWO THINGS HAPPENED, because they want different reactions
+    from whoever is reading the container log (rule 14 -- "make did-nothing look
+    different from did work"):
+
+      CREATED     a database did not exist at this path and now does. On a first
+                  deployment that is expected. On a restart it means the volume is not
+                  the volume you think it is, and the swaps from yesterday are in
+                  another file -- which is precisely the 2026-10-01 failure, now visible
+                  on line one instead of invisible for an hour.
+      already     the normal restart. The schema is reapplied anyway; it is
+      present     CREATE TABLE IF NOT EXISTS plus db.apply_migrations(), both idempotent.
+
+    NO try/except. A database that cannot be created or migrated is not a condition this
+    container can serve through, and the traceback names the path. Starting the workers
+    anyway would hand them the failure one layer further from its cause.
+    """
+    path = Path(str(Config.DB_PATH))
+    existed = path.is_file()
+    db.init_db(path)
+    announce([
+        f"  database        {path}  <- {'already present' if existed else 'CREATED, it did not exist at this path'}",
+        "                  schema applied and migrations run before any worker polls it"
+        if existed
+        else "                  if you expected existing swaps here, SWAP_DB_PATH or the /data mount is not what you meant",
+    ])
 
 
 def start_workers() -> list[dict]:
@@ -161,6 +213,7 @@ def main() -> int:
         "  workers' absence is PROVEN by /proc before gunicorn is asked to go.",
     ])
     RUN_DIR.mkdir(parents=True, exist_ok=True)
+    prepare_database()
 
     start_workers()
 

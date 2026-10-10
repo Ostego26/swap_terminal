@@ -40,7 +40,7 @@ TOOL = REPOSITORY_ROOT / "absorb_db.py"
 
 def build(path, swap_id: str, created: str, status: str, tag: int) -> None:
     """One complete swap and every dependent row, through the REAL schema."""
-    conn = connect_db(str(path))
+    conn = connect_db(str(path), create=True)
     conn.executescript(SCHEMA)
     apply_migrations(conn)
     conn.execute(

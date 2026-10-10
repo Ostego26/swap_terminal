@@ -101,7 +101,7 @@ CONFIG = {"AMOUNT_TOLERANCE_PCT": 0.01}
 
 
 def make_db(path: Path) -> sqlite3.Connection:
-    conn = connect_db(str(path))
+    conn = connect_db(str(path), create=True)
     conn.executescript(SCHEMA)
     conn.commit()
     return conn

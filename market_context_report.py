@@ -126,6 +126,66 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+#: Exit code for a database that is not there. 2 rather than 1, so a caller can tell
+#: "I was pointed at nothing" from a failure inside the report -- the same distinction
+#: absorb_db.open_both() draws for the same reason.
+NO_DATABASE_EXIT = 2
+
+
+def refuse_a_missing_database(db_path) -> list[str] | None:
+    """Refusal lines for a path that names no database, or None if it is there.
+
+    =========================================================================
+    THIS TOOL CREATED A DATABASE AND ITS OWN TEST SAID IT WROTE NOTHING
+    =========================================================================
+
+    Measured 2026-10-10, after db.connect_db() learned to refuse a missing file:
+    tests/test_market_context_report.py had eight tests, including
+    `test_a_bare_run_writes_nothing`, and they ran this tool against a tmp_path with
+    NO DATABASE IN IT. db_session() reached a bare sqlite3.connect(), which CREATES
+    the file, and main() then ran `conn.executescript(SCHEMA)` on it -- so a "read
+    only -- nothing will be written" run left behind a fully initialized empty
+    database, and the test asserting it wrote nothing passed the whole time.
+
+    That is the 2026-10-01 two-database failure with a REPORTING TOOL as the second
+    writer. A typo in --db did not produce an error; it produced a third database,
+    schema and all, that the next thing to look at that path would open without
+    complaint.
+
+    =========================================================================
+    WHY A REFUSAL LINE RATHER THAN LETTING DatabaseNotFound PROPAGATE
+    =========================================================================
+
+    connect_db() already refuses, so the tool is SAFE either way -- this is about
+    output. A traceback is the wrong answer on a terminal (rule 14): it buries the
+    one useful sentence under a stack, and it exits 1, which is the same code as a
+    report that failed halfway through. show_fees.py, show_swap.py, open_swap.py and
+    show_unattributable.py all draw this distinction with an explicit exists() check
+    and their own refusal type; this is the same shape, named here so a reader who
+    finds one is told the others exist (rule 8).
+
+    AND IT SAYS WHAT "NO DATABASE" IS NOT. "No market context" is the answer a
+    healthy empty table gives. A file that was never created is a different fact, and
+    those two must never share a line.
+    """
+    if Path(db_path).exists():
+        return None
+    return [
+        f"  REFUSED: there is no database at {db_path}",
+        "           That is NOT 'no market context has been recorded' -- which is what a healthy",
+        "           empty table says. The file has never been created. The web app and the",
+        "           workers create it on first run.",
+        # ONE CLAUSE PER LINE, not wrapped mid-sentence. A test looking for this
+        # admission across a newline fails, which is the small version of the real
+        # problem: an operator grepping the output for a phrase it prints does not
+        # find it either.
+        "           Nothing was written, INCLUDING that file.",
+        "           Until 2026-10-10 this tool created it and applied the schema, while announcing",
+        "           'nothing will be written' on its own first line.",
+        "           Check --db, and the working directory if the path is relative.",
+    ]
+
+
 def main() -> int:
     args = build_parser().parse_args()
     window = quote_window()
@@ -135,6 +195,16 @@ def main() -> int:
     # this system is how an operator comes to Ctrl-C something healthy.
     action = "APPEND a row per asset" if args.record else "read only -- nothing will be written"
     print(f"market_context_report  db={args.db}  mode: {action}", flush=True)
+
+    # BEFORE THE FETCH, NOT AFTER. A CoinGecko request takes seconds; spending them
+    # on a run that is about to refuse is the kind of wait that gets Ctrl-C'd, and
+    # the refusal is knowable from the filesystem alone.
+    refusal = refuse_a_missing_database(args.db)
+    if refusal is not None:
+        for line in refusal:
+            print(line, flush=True)
+        return NO_DATABASE_EXIT
+
     print(f"  fetching prices and context from CoinGecko (one request, shared cache, "
           f"ttl={format_duration(Config.RATE_CACHE_SECONDS)})...", flush=True)
 

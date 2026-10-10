@@ -700,7 +700,7 @@ def _seed_one_pending_swap(db_path: str, to_asset: str, estimate: float, swap_id
     idx_payouts_one_live_per_swap is part of the database the worker sees, and a
     test against a database without it is a test against something else.
     """
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     now = "2026-10-03T00:00:00+00:00"
     conn.execute(
@@ -734,7 +734,7 @@ def _seed_one_pending_swap(db_path: str, to_asset: str, estimate: float, swap_id
 
 
 def _one_payout_row(db_path: str) -> sqlite3.Row:
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     try:
         rows = conn.execute("SELECT * FROM payouts").fetchall()
     finally:
@@ -773,7 +773,7 @@ def test_the_payouts_ROW_and_the_WIRE_carry_the_same_number(tmp_path, monkeypatc
     _seed_one_pending_swap(db_path, asset, booked)
     adapter = RecordingRPCAdapter(asset)
 
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     try:
         completed = process_pending_payouts(conn, {}, {asset: adapter})
     finally:
@@ -920,7 +920,7 @@ def test_the_reservation_returns_to_zero_and_strands_NO_sub_unit_residue(tmp_pat
     db_path = str(tmp_path / "residue.db")
     _seed_one_pending_swap(db_path, "LTC", booked)
 
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     try:
         before = conn.execute("SELECT hot_reserved FROM wallet_inventory WHERE asset = 'LTC'").fetchone()
         assert before["hot_reserved"] == 0.0, "the fixture must start with nothing reserved"
@@ -1026,7 +1026,7 @@ def test_a_payout_that_quantizes_to_NOTHING_still_reaches_the_adapters_own_refus
     _seed_one_pending_swap(db_path, "BTC", 1e-09)
     adapter = RecordingRPCAdapter("BTC")
 
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     try:
         with caplog.at_level(logging.ERROR):
             completed = process_pending_payouts(conn, {}, {"BTC": adapter})
@@ -1079,7 +1079,7 @@ def test_the_XRP_payouts_row_matches_the_Amount_FIELD_the_ledger_would_receive(
     adapters = {"XRP": XRPAdapter(url=TESTNET_URL, min_confirmations=1)}
     config = {"XRP_DEPOSIT_ACCOUNT": paying.classic_address, "XRP_MIN_CONFIRMATIONS": 1}
 
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     try:
         completed = process_pending_payouts(conn, config, adapters)
     finally:
@@ -1102,7 +1102,7 @@ def _seed_one_pending_xrp_swap(db_path: str, estimate: float, swap_id: str = "s_
     adapter refuses get_balance() by design, holding no hot-wallet account --
     and because its payout address comes from a different fixture.
     """
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     now = "2026-10-03T00:00:00+00:00"
     conn.execute(

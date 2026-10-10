@@ -137,7 +137,7 @@ def event(txid, tag, amount=0.01, confirmations=3):
 
 @pytest.fixture
 def db(tmp_path):
-    conn = connect_db(str(tmp_path / "t.db"))
+    conn = connect_db(str(tmp_path / "t.db"), create=True)
     conn.executescript(SCHEMA)
     apply_migrations(conn)
     conn.execute(
@@ -1103,7 +1103,7 @@ def test_two_processes_sharing_one_cycle_each_credit_the_deposit_once(db, tmp_pa
     = ? WHERE credited_at IS NULL`. Running them twice writes the same figures twice.
     """
     seed_swap(db, "s_both", 11)
-    second = connect_db(str(tmp_path / "t.db"))
+    second = connect_db(str(tmp_path / "t.db"), create=True)
 
     # The deposit_watcher cycle, then the reconcile_worker cycle, each with its own adapter.
     deposit_service.process_active_swaps(

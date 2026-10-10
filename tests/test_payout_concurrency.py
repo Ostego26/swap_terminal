@@ -171,7 +171,7 @@ def _seed_one_pending_swap(
     behind it -- otherwise a regression in the claim would be masked by the
     constraint and nobody would learn which one was holding.
     """
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     now = "2026-09-24T00:00:00+00:00"
     conn.execute(
@@ -239,7 +239,7 @@ def _run_two_overlapping_workers(path: str, adapters: dict, adapter: RecordingAd
         # Each thread opens its own connection, because sqlite3 objects are
         # bound to the thread that created them -- and because that is the
         # faithful shape anyway: two worker PROCESSES each hold their own.
-        conn = connect_db(path)
+        conn = connect_db(path, create=True)
         try:
             process_pending_payouts(conn, CONFIG, adapters)
         except BaseException as exc:  # noqa: BLE001 -- recorded, not swallowed: what escapes is the subject
@@ -275,7 +275,7 @@ def _run_two_overlapping_workers(path: str, adapters: dict, adapter: RecordingAd
 def test_one_worker_alone_pays_exactly_once(db_path):
     """The control. Unchanged by the fix, and it must stay that way."""
     adapter = RecordingAdapter("LTC")
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     process_pending_payouts(conn, CONFIG, {"LTC": adapter, "GRC": RecordingAdapter("GRC")})
     conn.close()
 
@@ -283,7 +283,7 @@ def test_one_worker_alone_pays_exactly_once(db_path):
 
     # And a second pass over the same database sends nothing more, because the
     # swap is no longer payout_pending.
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     process_pending_payouts(conn, CONFIG, {"LTC": adapter, "GRC": RecordingAdapter("GRC")})
     conn.close()
     assert len(adapter.sends) == 1
@@ -308,7 +308,7 @@ def test_two_workers_cannot_pay_the_same_swap_twice(db_path):
         "Two means the claim-by-UPDATE stopped holding."
     )
 
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     payouts = conn.execute("SELECT status, txid FROM payouts WHERE swap_id = 's_double'").fetchall()
     swap = conn.execute("SELECT status, payout_txid FROM swaps WHERE id = 's_double'").fetchone()
     audit = conn.execute(
@@ -336,7 +336,7 @@ def test_the_claim_alone_holds_without_the_index(tmp_path):
     path = str(tmp_path / "claim_only.db")
     _seed_one_pending_swap(path, with_index=False)
 
-    conn = connect_db(path)
+    conn = connect_db(path, create=True)
     has_index = conn.execute(
         "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name = 'idx_payouts_one_live_per_swap'"
     ).fetchone()["n"]
@@ -364,7 +364,7 @@ def test_the_intent_to_pay_is_committed_before_the_send(db_path):
     adapter = RecordingAdapter("LTC")
 
     def observe():
-        other = connect_db(db_path)
+        other = connect_db(db_path, create=True)
         observed["payouts"] = other.execute(
             "SELECT status, txid FROM payouts WHERE swap_id = 's_double'"
         ).fetchall()
@@ -374,7 +374,7 @@ def test_the_intent_to_pay_is_committed_before_the_send(db_path):
         other.close()
 
     adapter.on_send = observe
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     process_pending_payouts(conn, CONFIG, {"LTC": adapter, "GRC": RecordingAdapter("GRC")})
     conn.close()
 
@@ -417,7 +417,7 @@ def test_the_guard_read_that_used_to_go_stale_still_goes_stale(db_path):
     committed yet. This is why the decision had to become a write; the read is
     reproduced here rather than described.
     """
-    conn_a = connect_db(db_path)
+    conn_a = connect_db(db_path, create=True)
     conn_a.execute(
         "INSERT INTO payouts (swap_id, asset, destination_address, amount, txid, status, created_at, sent_at) "
         "VALUES ('s_double', 'LTC', ?, 0.0975, NULL, 'created', '2026-09-24T00:00:00+00:00', NULL)",
@@ -425,7 +425,7 @@ def test_the_guard_read_that_used_to_go_stale_still_goes_stale(db_path):
     )
     # Deliberately NOT committed: this is A mid-send.
 
-    conn_b = connect_db(db_path)
+    conn_b = connect_db(db_path, create=True)
     still_pending = conn_b.execute("SELECT status FROM swaps WHERE id = 's_double'").fetchone()
     guard = conn_b.execute(
         "SELECT * FROM payouts WHERE swap_id = 's_double' AND status IN ('broadcast','completed')"
@@ -446,7 +446,7 @@ def test_claim_by_conditional_update_lets_exactly_one_claimant_through(db_path):
     because the UPDATE takes the writer lock and re-reads the row under it.
     rowcount is the whole mechanism: the loser updates zero rows.
     """
-    conn_a = connect_db(db_path)
+    conn_a = connect_db(db_path, create=True)
     claim_a = conn_a.execute(
         "UPDATE swaps SET status = 'paying', updated_at = ? WHERE id = 's_double' AND status = 'payout_pending'",
         ("2026-09-24T00:00:01+00:00",),
@@ -454,7 +454,7 @@ def test_claim_by_conditional_update_lets_exactly_one_claimant_through(db_path):
     assert claim_a.rowcount == 1  # A won and may send
     conn_a.commit()
 
-    conn_b = connect_db(db_path)
+    conn_b = connect_db(db_path, create=True)
     claim_b = conn_b.execute(
         "UPDATE swaps SET status = 'paying', updated_at = ? WHERE id = 's_double' AND status = 'payout_pending'",
         ("2026-09-24T00:00:02+00:00",),
@@ -484,8 +484,8 @@ def test_a_second_claim_on_the_same_swap_is_refused_by_the_real_function(db_path
     calls reproduce, at the function that decides, with seeded state rather
     than with sleeps.
     """
-    conn_a = connect_db(db_path)
-    conn_b = connect_db(db_path)
+    conn_a = connect_db(db_path, create=True)
+    conn_b = connect_db(db_path, create=True)
     try:
         assert claim_swap_for_payout(conn_a, "s_double") is True
         assert claim_swap_for_payout(conn_b, "s_double") is False, (
@@ -506,7 +506,7 @@ def test_the_partial_unique_index_is_in_place_and_is_partial(db_path):
     still be retried -- which a plain UNIQUE(swap_id) would forbid, turning one
     incident into a stuck swap.
     """
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     assert (
         conn.execute(
             "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='index' AND name='idx_payouts_one_live_per_swap'"
@@ -547,7 +547,7 @@ def test_apply_migrations_refuses_to_destroy_evidence_of_a_past_double_payout(tm
     """
     path = str(tmp_path / "already_doubled.db")
     _seed_one_pending_swap(path, with_index=False)
-    conn = connect_db(path)
+    conn = connect_db(path, create=True)
     insert = (
         "INSERT INTO payouts (swap_id, asset, destination_address, amount, txid, status, created_at, sent_at) "
         "VALUES ('s_double', 'LTC', ?, 0.0975, ?, 'broadcast', '2026-09-24T00:00:00+00:00', NULL)"
@@ -596,7 +596,7 @@ def test_apply_migrations_is_idempotent(db_path):
     separately in tests/test_payment_key_widening.py, against a schema reconstructed from
     today's rather than pasted.
     """
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     first = apply_migrations(conn)
     second = apply_migrations(conn)
     conn.close()
@@ -675,7 +675,7 @@ def test_a_failed_payout_names_the_reason_in_the_log(db_path, caplog, monkeypatc
     # which is a different failure with its own test. This one is about the DAEMON's
     # message surviving, so it has to get as far as the daemon.
     monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     seed_payout_pending_swap(conn, "s_locked")
 
@@ -721,7 +721,7 @@ def test_a_locked_wallet_leaves_the_swap_terminally_failed(db_path, monkeypatch)
     transient failures retryable, this test is the one to change, and it names why.
     """
     monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     seed_payout_pending_swap(conn, "s_locked")
 
@@ -759,7 +759,7 @@ def test_a_designed_refusal_warns_once_not_every_cycle(db_path, caplog):
     log nobody reads the day something real happens."
     """
     caplog.set_level(logging.WARNING)
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
 
     class RefusesByDesign:
@@ -785,7 +785,7 @@ def test_a_different_failure_for_the_same_asset_still_reports(db_path, caplog):
     later one for that chain and a real outage would be invisible.
     """
     caplog.set_level(logging.WARNING)
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
 
     class FailsDifferentlyEachTime:
@@ -856,7 +856,7 @@ def test_the_payout_unlocks_the_wallet_itself_and_completes(db_path, monkeypatch
     wallet was in its normal resting state. Now the worker performs the sequence.
     """
     monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     seed_payout_pending_swap(conn, "s_unlock")
     wallet = GridcoinWalletStub()
@@ -878,7 +878,7 @@ def test_the_order_is_lock_then_full_unlock_then_lock_then_back_to_staking(db_pa
     the wallet in the wrong state.
     """
     monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     seed_payout_pending_swap(conn, "s_order")
     wallet = GridcoinWalletStub()
@@ -898,7 +898,7 @@ def test_a_failed_send_still_returns_the_wallet_to_staking(db_path, monkeypatch)
     context manager's `finally` precisely for this.
     """
     monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     seed_payout_pending_swap(conn, "s_boom")
 
@@ -927,7 +927,7 @@ def test_a_missing_passphrase_refuses_without_touching_the_wallet(db_path, monke
     """
     caplog.set_level(logging.ERROR)
     monkeypatch.delenv(WALLET_UNLOCK_ENV_VAR, raising=False)
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     seed_payout_pending_swap(conn, "s_nokey")
     wallet = GridcoinWalletStub()
@@ -948,7 +948,7 @@ def test_a_chain_that_needs_no_unlock_is_not_given_one(db_path, monkeypatch):
     would fail every BTC and LTC payout.
     """
     monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     conn.execute("UPDATE swaps SET to_asset = 'BTC' WHERE 1 = 0")  # keep the schema honest
     seed_payout_pending_swap(conn, "s_btc")
@@ -1009,7 +1009,7 @@ def test_a_broadcast_payout_stays_completed_when_the_relock_fails(db_path, monke
     """MUTATION: move _record_broadcast() back outside the `with`. This fails, and it
     is the only test that does."""
     monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     seed_payout_pending_swap(conn, "s_relock")
     wallet = RestoreFailsWalletStub()
@@ -1035,7 +1035,7 @@ def test_the_relock_failure_is_written_to_the_audit_log(db_path, monkeypatch):
     """The swap reads `completed`, so the lock problem must be recorded somewhere a
     person will find it -- otherwise fixing the mislabeling would have hidden it."""
     monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     seed_payout_pending_swap(conn, "s_audit")
 
@@ -1081,7 +1081,7 @@ def test_a_failed_send_whose_restore_also_fails_is_a_payout_failure(db_path, mon
             self.sends += 1
             raise RuntimeError("Error: Insufficient funds (rpc code -6)")
 
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     seed_payout_pending_swap(conn, "s_both")
     wallet = SendAndRestoreBothFail()
@@ -1127,7 +1127,7 @@ def test_a_lock_failure_before_the_send_is_still_a_payout_failure(db_path, monke
                 raise RuntimeError("Error: The wallet passphrase entered was incorrect. (rpc code -14)")
             return {}
 
-    conn = connect_db(db_path)
+    conn = connect_db(db_path, create=True)
     conn.executescript(SCHEMA)
     seed_payout_pending_swap(conn, "s_early")
     wallet = FirstUnlockFails()
