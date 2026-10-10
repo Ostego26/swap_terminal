@@ -56,6 +56,7 @@ fails HERE, which is the only place it can fail cheaply.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -125,7 +126,36 @@ def test_there_is_something_to_check():
     )
 
 
-def test_env_example_exists_and_is_not_a_stub():
+def test_env_example_is_TRACKED_BY_GIT_and_not_merely_present():
+    """PRESENT IS NOT SHIPPED, and this gate learned that the hard way within minutes.
+
+    The first version of this file asserted `ENV_EXAMPLE.is_file()` and passed, because
+    the template was sitting in the working tree. It was never committed: `.gitignore`
+    line 24 is `.env.*`, which matches `.env.example`, so `git add -A` skipped it without
+    a word. The commit went up with 13 files instead of 14 and the operator pulled a
+    commit whose own message told them to run `cp .env.example .env` against a file that
+    did not exist.
+
+    THAT IS THIS SUITE'S RECURRING FAILURE SHAPE, three times in one day: a check that
+    passes by looking at the wrong thing. A route asserted at a path that 404s, a
+    constraint checked on an error page, and now a tracked-file claim checked against an
+    untracked file. The fix each time is to assert the thing that actually has to be
+    true -- here, that git knows about it.
+
+    `git ls-files` RATHER THAN `check-ignore`, deliberately: the question is not whether
+    a pattern would ignore it, it is whether the file is IN the repository. A later
+    negation could be added and then removed, and only tracking survives that.
+    """
+    listed = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", ENV_EXAMPLE.name],
+        cwd=REPOSITORY_ROOT, capture_output=True, text=True, check=False,
+    )
+    assert listed.returncode == 0, (
+        f".env.example is not tracked by git, so nobody who clones or pulls this repository "
+        f"gets it. `.gitignore` has `.env.*`, which matches it -- a `!.env.example` negation "
+        f"after that line is what makes it trackable. git said: "
+        f"{(listed.stderr or listed.stdout).strip()}"
+    )
     assert ENV_EXAMPLE.is_file(), (
         ".env.example is missing. It is the file an operator copies to .env so the stack "
         "survives a new terminal -- see this module's docstring for what its absence cost."

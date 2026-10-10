@@ -22,6 +22,17 @@ wallet.dat
 # secrets and backups
 .env
 .env.*
+# .env.example IS THE ONE THAT MUST BE TRACKED, and the negation has to come AFTER
+# `.env.*` because gitignore takes the LAST matching pattern. Added 2026-10-10 the
+# moment the template was pushed and did not arrive: `git add -A` skipped it silently,
+# the commit went up with 13 files instead of 14, and the operator pulled a commit
+# whose message told them to `cp .env.example .env` from a file that was not there.
+#
+# The template holds NO VALUES -- every SECRET-marked line is an empty assignment, which
+# tests/test_env_example_covers_every_compose_variable.py asserts -- so it is safe to
+# track and useless to anybody who steals it. The FILLED-IN `.env` stays ignored by the
+# two patterns above, which is the whole point of having both.
+!.env.example
 *.bak
 *.bak.*
 *keypair*.json
