@@ -457,6 +457,29 @@ def readiness_verdict(outcome: object) -> tuple[bool, str, str]:
 
     Takes the OUTCOME of a probe -- an HTTP status int, or the exception raised --
     rather than performing one, so the interpretation is testable without a socket.
+
+    THERE IS A SECOND FUNCTION WITH THIS EXACT NAME and it is STRICTER:
+    swap_terminal_desktop.readiness_verdict(status_code, body, error, expected_db_path)
+    -> (verdict, explanation), five-valued. Rule 8 asks for the difference at both
+    sites; it is named rather than merged, because a merge would break one caller.
+
+    THE SPLIT IS "ANY SERVER" VERSUS "WHOSE SERVER". This one is asked by
+    `swap_stack up` about six heterogeneous services -- a dfx replica, the web app,
+    the daemons -- whether ANYTHING is serving the port, which is why a non-200 still
+    returns ready=True with its code (the branch above says so). It deliberately does
+    NOT check identity: it has no way to know what each of those six should answer,
+    and a dfx status endpoint has no db_path to compare.
+
+    The launcher's does check identity, because it is about to open a BROWSER, and a
+    foreign responder returning our body shape once made it open one on somebody
+    else's UI. Measured 2026-10-10, the two disagree on three of six observations and
+    this one is the permissive side every time: a 503, a foreign db_path, and a
+    non-JSON 200 are all `ready=True` here and `unhealthy`/`wrong-server` there. The
+    table is in that function's docstring.
+
+    So: this is the right function for "is the port serving" and the WRONG one for
+    "may I send a user to it".
+    tests/test_two_readiness_verdicts_answer_different_questions.py pins both halves.
     """
     if isinstance(outcome, int):
         # dfx's /api/v2/status answers 200. Anything else came from something that

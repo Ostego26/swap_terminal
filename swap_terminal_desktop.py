@@ -184,6 +184,43 @@ def readiness_verdict(status_code: int | None, body: dict | None, error: str,
                               possibly pointed at a different database.
       unhealthy               our server, and it says it is not ok.
       ready                   ours, and healthy.
+
+    THERE IS A SECOND FUNCTION WITH THIS EXACT NAME and it answers a DIFFERENT
+    QUESTION: stack_authority.readiness_verdict(outcome) -> (ready, summary, advice).
+    Rule 8 asks that a reader who finds one be told the other exists, and that where
+    two implementations genuinely differ the difference be named at both sites. It is
+    named here rather than merged, because merging would destroy one of the two.
+
+    THE SPLIT IS "WHOSE SERVER" VERSUS "ANY SERVER". This one is asked, by a launcher
+    about to open a browser, whether the thing on that port is OUR server on OUR
+    database. stack_authority's is asked, by `swap_stack up` about six heterogeneous
+    services -- a dfx replica, the web app, the daemons -- whether ANYTHING is serving
+    the port at all; it cannot know each service's identity payload, so it does not
+    look for one.
+
+    MEASURED 2026-10-10, the same six observations through both. Three of the six get
+    opposite answers, and every one of the three is this function being stricter:
+
+        observation                        here              stack_authority
+        HTTP 503, our db_path              unhealthy         ready=True "answered 503"
+        HTTP 200, status ok, OUR db        ready             ready=True "answered 200"
+        HTTP 200, status ok, FOREIGN db    wrong-server      ready=True "answered 200"
+        HTTP 200, not a JSON object        wrong-server      ready=True "answered 200"
+        connection refused                 not-listening     ready=False
+        timed out                          bound-but-silent  ready=False
+
+    The two disagreements that matter are the foreign db_path and the non-JSON body:
+    both are `wrong-server` here and `ready` there. THAT IS CORRECT IN BOTH PLACES.
+    "Something is listening" is the whole question `swap_stack up` asks, and it is
+    commented as deliberate at that site. It is not the question a launcher may answer
+    with a browser window, which is the defect the wrong-server verdict above exists
+    for -- a foreign responder returning our body shape once opened a browser on
+    somebody else's UI, possibly pointed at a different database.
+
+    So: never call stack_authority's to decide whether to open a browser, and never
+    call this one to decide whether a dfx replica is up -- it would report a 200 from
+    dfx as `wrong-server`, since dfx's status endpoint has no db_path.
+    tests/test_two_readiness_verdicts_answer_different_questions.py pins both halves.
     """
     if error:
         return _transport_verdict(error)
