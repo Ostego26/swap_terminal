@@ -24,7 +24,9 @@ is the formatting:
 
 from __future__ import annotations
 
+import ast
 import inspect
+import textwrap
 
 import base58
 import pytest
@@ -53,6 +55,46 @@ REAL_OUTPUT = """(
 REAL_KEY_HEX = "031c72cccf80f29f74f8fa19e3e4a00e317575683fcb114558241707392703c1f0"
 
 
+def _source_without_docstring(source: str) -> str:
+    """`source` with its leading docstring's own lines removed, by AST.
+
+    WHY NOT `source.replace(func.__doc__, "")`: on Python 3.13 and later the
+    compiler strips common leading whitespace from docstrings, so `__doc__` is not
+    a substring of the source any more and the replace removes nothing, SILENTLY.
+    The measurement and the dates are at the one call site below.
+
+    Line numbers rather than `ast.unparse`, deliberately. Unparsing would return
+    normalized code -- comments gone, strings requoted -- and the caller is
+    scanning for literals that appear in comments as well as in code. Excising the
+    docstring's line range leaves every other byte exactly as written.
+
+    Returns `source` unchanged when there is no docstring, which is the honest
+    answer rather than an error: a function without one has nothing to strip. The
+    call site asserts the length SHRANK, so a silent no-op cannot pass as a strip.
+    """
+    # Dedent because inspect.getsource() of a nested or method-level definition is
+    # indented, and ast.parse refuses a leading indent. A module-level function is
+    # already flush and dedent is then a no-op.
+    tree = ast.parse(textwrap.dedent(source))
+    definition = tree.body[0]
+    if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return source
+    if not definition.body:
+        return source
+    first = definition.body[0]
+    if not (
+        isinstance(first, ast.Expr)
+        and isinstance(first.value, ast.Constant)
+        and isinstance(first.value.value, str)
+    ):
+        return source
+
+    lines = source.splitlines(keepends=True)
+    # ast line numbers are 1-based and end_lineno is inclusive.
+    del lines[first.lineno - 1 : first.end_lineno]
+    return "".join(lines)
+
+
 def test_the_real_dfx_output_yields_the_key_the_operator_saw():
     """Pinned against text dfx actually emitted, not against text shaped like it."""
     got = subject.canister_public_key("be2us-64aaa-aaaaa-qaabq-cai", "icp-replica", 60.0,
@@ -63,10 +105,28 @@ def test_the_real_dfx_output_yields_the_key_the_operator_saw():
 
 
 def test_the_argument_sent_is_the_root_derivation_path():
-    """An empty vec. A different path is a different key and therefore different addresses."""
+    """An empty vec on secp256k1. A different path or curve is a different key.
+
+    THE SHAPE CHANGED IN INCREMENT 1b AND THE DEFAULT DID NOT. The canister's
+    argument became `record { curve; derivation_path }` when it grew ed25519 and
+    BIP-340, so the text is longer -- but it still asks for the SAME key it asked
+    for before: the root path on secp256k1 ECDSA. That is what keeps this file's
+    default output byte-for-byte what the operator has been reading.
+
+    Pinned as literal text rather than built with
+    `candid_public_key_argument(...)`, which would make this assertion agree with
+    the encoder by construction and therefore test nothing. The encoder has its
+    own assertions in tests/test_keyring_paths.py.
+    """
     seen = []
     subject.canister_public_key("c", "s", 1.0, call=lambda canister, method, arg: (seen.append((canister, method, arg)), REAL_OUTPUT)[1])
-    assert seen == [("c", "public_key", "(vec {})")]
+    assert seen == [
+        (
+            "c",
+            "public_key",
+            "(record { curve = variant { secp256k1_ecdsa }; derivation_path = vec {} })",
+        )
+    ]
 
 
 @pytest.mark.parametrize("junk", ["", "(variant { Err = \"no key\" })", "public_key_hex = ''", "nonsense"])
@@ -217,7 +277,34 @@ def test_the_hrp_table_is_not_reimplemented_here():
     # that would mean the function is deciding what bech32 looks like instead of
     # asking modules/address_network. The first version of this assertion scanned the
     # whole source and failed on its own subject's docstring.
-    body = source.replace(subject.comparability.__doc__ or "", "")
+    #
+    # STRIPPED BY AST RATHER THAN BY `source.replace(__doc__, "")`, WHICH WAS
+    # SILENTLY A NO-OP ON PYTHON 3.13 AND LATER. Measured 2026-10-10:
+    #
+    #     Python 3.12.x   __doc__ keeps the source's leading indentation
+    #                     -> `__doc__ in source` is True, replace() strips it, PASS
+    #     Python 3.13.16  the COMPILER strips common leading whitespace from every
+    #                     docstring (CPython gh-81283), so __doc__'s continuation
+    #                     lines have no indentation and the source's do
+    #                     -> `__doc__ in source` is False, replace() removes NOTHING,
+    #                        len(body) == len(source) == 2401, and the check then
+    #                        matched the docstring's own `bcrt1q...` example, FAIL
+    #
+    # docker/web.Dockerfile pins python:3.12-slim-bookworm, which is why this passed
+    # everywhere it had been run and failed the first time the suite met a 3.13
+    # interpreter. A test whose verdict depends on the interpreter's docstring
+    # handling is not testing what it claims to.
+    #
+    # This is the FIFTH prose-reading detector in this tree (HANDOFF.md section 6
+    # counts the first four), and the remedy there is the remedy here: ask the AST
+    # where the docstring is instead of pattern-matching text. An AST excision is
+    # exact and carries no interpreter dependency, because it reads the same source
+    # text the check runs against.
+    body = _source_without_docstring(source)
+    assert len(body) < len(source), (
+        "the docstring was not removed, so the HRP check below would scan it. This "
+        "is the 3.13 regression the comment above describes, arriving a second way."
+    )
     for hrp in ("bcrt", "rltc", "tltc", "tb1"):
         assert hrp not in body, (
             f"comparability() names the HRP {hrp!r} in its code, which means it is deciding what "

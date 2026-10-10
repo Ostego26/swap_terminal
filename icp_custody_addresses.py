@@ -60,6 +60,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -69,6 +70,13 @@ from config import Config
 from microfortnights import format_duration
 from modules.address_authority import expected_network
 from modules.address_network import TESTNET, address_network, decode_segwit_address
+from modules.keyring_paths import (
+    CURVE_FOR_ASSET,
+    ROOT_SECP256K1,
+    KeyRequest,
+    KeyringRefused,
+    request_for,
+)
 from modules.pubkey_address import PublicKeyRefused, address_from_public_key
 
 from swap_terminal.chains.icp import ICPCallFailed, dfx_transport
@@ -105,12 +113,64 @@ _PUBKEY = re.compile(r'public_key_hex\s*=\s*"([0-9a-fA-F]+)"')
 _P2PKH_CHAINS = ("BTC", "LTC", "GRC")
 
 
-def canister_public_key(canister_id: str, service: str, timeout: float, call=None) -> str:
-    """The compressed public key hex from threshold_custody. Raises if unreadable.
+def candid_blob(raw: bytes) -> str:
+    """One derivation-path element as a candid blob literal.
 
-    An empty derivation path, which is the canister's root key -- the same
-    argument the operator ran by hand. A regex miss raises rather than returning
-    "" because an empty key would derive three addresses that look real.
+    EVERY BYTE IS HEX-ESCAPED, including the printable ones. `blob "swap_terminal"`
+    is valid candid and would read better, but the path also carries a four-byte
+    big-endian index whose bytes are mostly unprintable and one of which is
+    routinely 0x00 -- and a literal that is readable for some elements and escaped
+    for others is a literal whose encoding a reader has to work out per element.
+    Uniform escaping has one rule and no edge case.
+
+    A PURE FUNCTION because this is the decision (rule 10): an element encoded
+    wrongly is a different derivation path, which is a different key, which is a
+    different address. tests/test_keyring_paths.py asserts the exact text.
+    """
+    return 'blob "' + "".join(f"\\{b:02x}" for b in raw) + '"'
+
+
+def candid_public_key_argument(request: KeyRequest) -> str:
+    """The candid text for threshold_custody's `public_key` argument.
+
+    THE CANISTER'S ARGUMENT BECAME A RECORD IN INCREMENT 1b, and this function is
+    where that shape lives. It used to be the bare `(vec {})` spelled at the one
+    call site -- fine while there was one curve and one path, and wrong the moment
+    there were three curves, because a curve passed positionally cannot be
+    checked and a missing one cannot be defaulted safely.
+
+    IT TAKES A `KeyRequest` RATHER THAN TWO ARGUMENTS, mirroring the canister's
+    own record. The curve was validated when the request was constructed, so
+    there is nothing left to check here and no way to pair one asset's curve with
+    another's path in between.
+    """
+    elements = "; ".join(candid_blob(bytes(e)) for e in request.derivation_path)
+    path = f"vec {{ {elements} }}" if elements else "vec {}"
+    return (
+        f"(record {{ curve = variant {{ {request.curve} }}; derivation_path = {path} }})"
+    )
+
+
+def canister_public_key(
+    canister_id: str,
+    service: str,
+    timeout: float,
+    call=None,
+    request: KeyRequest = ROOT_SECP256K1,
+) -> str:
+    """The public key hex from threshold_custody for `request`.
+
+    THE DEFAULT IS STILL THE ROOT KEY ON secp256k1 -- an empty derivation path,
+    the same argument the operator ran by hand -- so this function answers the
+    same question it answered before increment 1b and the output of this file is
+    unchanged for anyone who does not ask for more. A regex miss raises rather
+    than returning "" because an empty key would derive three addresses that look
+    real.
+
+    THE DEFAULT IS NOT THE PER-ASSET PATH, and that is deliberate rather than
+    unfinished. The root key is ONE key, which is what makes this file's output a
+    single key over three addresses. Per-asset paths give three unrelated keys,
+    which is a different table; `--per-asset` prints that one and says so.
 
     `call` IS INJECTED for the reason chains/icp.ICPAdapter's is: the parsing is
     the decision here and it has to be callable with seeded text, or the only way
@@ -119,7 +179,7 @@ def canister_public_key(canister_id: str, service: str, timeout: float, call=Non
     second implementation of "run dfx in compose" (rule 8).
     """
     transport = call if call is not None else dfx_transport(service, timeout)
-    out = transport(canister_id, "public_key", "(vec {})")
+    out = transport(canister_id, "public_key", candid_public_key_argument(request))
     found = _PUBKEY.search(out)
     if not found:
         raise ICPCallFailed(
@@ -127,6 +187,85 @@ def canister_public_key(canister_id: str, service: str, timeout: float, call=Non
             f"was read (this is not an empty key): {out.strip()[:300]!r}"
         )
     return found.group(1).lower()
+
+
+def keyring_plan(networks: dict[str, str], assets: Sequence[str]) -> list[dict]:
+    """What `--per-asset` will ask the canister for, decided before anything is asked.
+
+    A PURE FUNCTION AND THEREFORE THE TESTABLE PART (rule 10). It resolves each
+    asset's curve and derivation path from modules/keyring_paths and returns rows;
+    it opens nothing and asks nothing. An asset with no keyring curve, or on a
+    network the scheme will not name, becomes a row carrying its REFUSAL rather
+    than being dropped -- rule 14's "never let an empty result print nothing",
+    applied per row: a chain missing from the table would otherwise look like a
+    chain that was fine.
+    """
+    rows = []
+    for asset in assets:
+        row: dict = {"asset": asset, "network": networks.get(asset, "(unknown)")}
+        try:
+            request = request_for(asset, row["network"])
+            row["request"] = request
+            row["curve"] = request.curve
+            row["path_text"] = request.describe()
+        except KeyringRefused as error:
+            row["refused"] = str(error)
+        rows.append(row)
+    return rows
+
+
+def print_per_asset_keyring(
+    networks: dict[str, str], canister_id: str, service: str, timeout: float
+) -> int:
+    """Ask for one key per asset at its own path, and print the table. Returns an exit code.
+
+    EXTRACTED FROM main() rather than written inline, because inline it pushed
+    main() to 60 statements against a ceiling of 50 -- and CLAUDE.md rule 12 says
+    what to do about that: "a main() past the ceiling is orchestration that has
+    swallowed decisions. The fix is to extract the decision so it can be called
+    with seeded inputs, not to raise the ceiling." The decision this holds is
+    which failures are fatal to the run, and `keyring_plan` above holds the one
+    about what to ask for.
+
+    THE EXIT CODE IS NON-ZERO IF ANY ROW FAILED, which is a deliberate difference
+    from the default report. The default report treats a chain whose daemon is
+    down as information and still exits 0; here a failed row means the keyring
+    could not answer for an asset, and a caller scripting this needs to know that
+    without parsing the table.
+    """
+    print("\nPER-ASSET KEYRING (modules/keyring_paths). One key per asset, not one key for all.")
+    print(
+        "  These are DIFFERENT keys from the root key above and therefore different addresses.\n"
+        "  Nothing here is armed: no desk address changes and no funds move."
+    )
+    print(f"\n{'chain':6} {'curve':17} {'derivation path':52} key")
+    failures = 0
+    for row in keyring_plan(networks, sorted(CURVE_FOR_ASSET)):
+        if "refused" in row:
+            failures += 1
+            print(f"{row['asset']:6} {'(refused)':17} {row['refused'][:52]:52} -")
+            continue
+        try:
+            key_hex = canister_public_key(
+                canister_id, service, timeout, request=row["request"]
+            )
+        except (ICPCallFailed, KeyringRefused) as error:
+            failures += 1
+            # NAMED, NOT SWALLOWED, and the curve is in the line because that is
+            # the field that decides which management call was made -- a schnorr
+            # key the replica does not have fails here and nowhere else.
+            print(f"{row['asset']:6} {row['curve']:17} {row['path_text']:52} FAILED: {error}")
+            continue
+        print(f"{row['asset']:6} {row['curve']:17} {row['path_text']:52} {key_hex}")
+
+    # "did nothing" MUST NOT LOOK LIKE "did work" (rule 14). A table of five
+    # FAILED rows and a table of five keys would otherwise end the same way.
+    total = len(CURVE_FOR_ASSET)
+    print(
+        f"\n{total - failures} of {total} per-asset keys were read"
+        f"{'' if failures == 0 else f'; {failures} FAILED and are named above'}."
+    )
+    return 0 if failures == 0 else 1
 
 
 def desk_addresses(adapters: dict) -> dict[str, str]:
@@ -367,7 +506,30 @@ def main() -> int:
         f"{'/'.join(sorted(set(networks.values())))} addresses above are derivations rather than "
         f"accounts with a balance."
     )
-    return 0
+
+    # =====================================================================
+    # THE PER-ASSET KEYRING, BEHIND A FLAG AND OFF BY DEFAULT
+    # =====================================================================
+    #
+    # OFF BY DEFAULT FOR A MEASURED-FROM-ABSENCE REASON, which is the honest way
+    # to put it: this section makes one canister call PER ASSET, and two of the
+    # five assets are on ed25519, which reaches `schnorr_public_key` rather than
+    # `ecdsa_public_key`. WHETHER A LOCAL dfx REPLICA PROVISIONS A SCHNORR KEY
+    # NAMED dfx_test_key IS UNVERIFIED FROM HERE -- there is no dfx and no replica
+    # in the container this was written in, so it could not be run (rule 17: a
+    # reason to believe is not a check). If the local replica has no schnorr key
+    # the SOL and XRP rows will fail, and that must not be able to break the
+    # default run of a diagnostic the operator relies on. So the default output is
+    # byte-for-byte what it was before increment 1b, and this is `--per-asset`.
+    if "--per-asset" not in sys.argv:
+        print(
+            "\nper-asset keyring not shown. Re-run with --per-asset to ask the canister for "
+            "one key per asset at its own derivation path (5 extra update calls; the two "
+            "ed25519 rows need a schnorr key, which a local replica may not provision)."
+        )
+        return 0
+
+    return print_per_asset_keyring(networks, canister_id, service, timeout)
 
 
 if __name__ == "__main__":
