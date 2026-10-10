@@ -583,13 +583,71 @@ def absence_note(asset: str, name: str) -> str:
     if verdict is None:
         return (
             f"whether {asset} has {capability.name} is NOT RECORDED -- nobody checked. "
-            f"It arrived in {capability.arrived_in}. This says nothing either way."
+            f"History: {capability.arrived_in}. This says nothing either way."
         )
     return (
-        f"{asset} does not have {capability.name}, and it was never there: it arrived in "
-        f"{capability.arrived_in}. Instead: {capability.instead}. "
+        f"{asset} does not have {capability.name}: {history_phrase(capability.arrived_in)}. "
+        f"Instead: {capability.instead}. "
         f"Evidence: {capability.evidence} ({capability.recorded_at})."
     )
+
+
+#: The prefixes `arrived_in` uses when it is recording a REMOVAL rather than an arrival.
+#: Lowercased, and matched as a prefix, because the field is free prose written per entry.
+_REMOVAL_PREFIXES = ("removed", "deprecated")
+
+
+def history_phrase(arrived_in: str) -> str:
+    """One clause about a capability's history, which does NOT assume it ever arrived.
+
+    THE BUG THIS FIXES WAS RENDERED AT THE OPERATOR AND THEY READ IT BACK TO ME,
+    2026-10-10. The absence sentence was
+
+        f"{asset} does not have {capability.name}, and it was never there: it arrived in "
+        f"{capability.arrived_in}."
+
+    and `arrived_in` is free prose that, for two entries in CAPABILITIES, records a
+    REMOVAL. So the page said, verbatim:
+
+        BTC does not have the `account` field, and it was never there: it arrived in
+        removed in Bitcoin Core 0.18 along with the accounts system.
+
+        BTC does not have getinfo, and it was never there: it arrived in deprecated in
+        Bitcoin Core 0.16, removed in 0.18.
+
+    TWO DEFECTS IN ONE SENTENCE, and the second is the serious one:
+
+      "it arrived in removed in"   ungrammatical, and the giveaway. One field was
+                                   carrying two different facts -- when a thing arrived
+                                   and when it went -- and the template only knew about
+                                   the first.
+      "it was never there"         FALSE, and asserted flatly. The `account` field was in
+                                   Bitcoin Core for years and was removed in 0.18;
+                                   getinfo shipped for longer still. The sentence told the
+                                   operator the exact opposite of what happened, in the
+                                   confident register rule 17 is about.
+
+    The second is why this is a fix and not a tidy-up. CLAUDE.md rule 16: "A wrong
+    comment is a bug. A docstring that says a function is testnet-only when it reads a
+    mainnet RPC endpoint will eventually be trusted by someone in a hurry." This is that,
+    on a page, about which daemon build an operator is talking to.
+
+    SO THE CLAIM IS DROPPED RATHER THAN INVERTED. The honest statement is the one the data
+    supports: here is the recorded history, phrased as history. A structural `removed_in`
+    field would be better and would mean touching every entry in CAPABILITIES; this says
+    only what the field can carry, and says it correctly in both directions.
+
+    PREFIX MATCHED, NOT SEARCHED. `in` would fire on any entry whose prose merely MENTIONS
+    a removal -- rpcallowip's note says "wildcards were REMOVED in 0.12" while the
+    capability itself arrived in 0.10, and calling that a removal would be a new wrong
+    sentence replacing the old one.
+    """
+    text = (arrived_in or "").strip()
+    if not text:
+        return "no history is recorded for it"
+    if text.lower().startswith(_REMOVAL_PREFIXES):
+        return f"it was REMOVED -- {text}"
+    return f"it arrived in {text}"
 
 
 def serves_wallet_path(asset: str) -> bool | None:

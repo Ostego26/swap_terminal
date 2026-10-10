@@ -206,22 +206,49 @@
   <p class="eyebrow">Operator surface &#183; read-only &#183; chain wallets</p>
   <h1>{{ marks.asset_mark(data.asset, 32) }} {{ data.asset }}
       <span class="unit" title="{{ data.symbol_title }}">{{ data.symbol }}</span></h1>
-  <p class="lede">{{ data.kind_note }}</p>
-  {#- WHETHER THE RESEMBLANCE IS A CLAIM OR A BORROWING, SAID BEFORE ANYTHING ELSE.
-      Three of these six chains have no Core wallet and never have, and a page
-      arranged like Bitcoin Core under an XRP heading will eventually be read as a
-      claim that one exists. services/chain_wallet_layout.BORROWED_LAYOUT_NOTICE. -#}
+  {#- THREE LEDE PARAGRAPHS AND TWO TABLE ROWS CAME OFF HERE ON 2026-10-10, at the
+      operator's instruction: "superflous bullshit. remove. no needed. why".
+
+      WHAT WENT, and the first clause of each is what it was trying to say:
+
+        data.kind_note          "a Bitcoin Core-derived daemon with its own wallet, so
+                                these are Core's four READ panes..." -- an explanation of
+                                WHY the page has the panes it has, above the panes.
+        data.qt.borrowed        "This is arranged as that chain's own Core Qt wallet
+                                arranges it -- the rail down the left, the Balances card
+                                beside Recent transactions..." -- a description of the
+                                layout, printed on top of the layout. If the arrangement
+                                works, it needs no caption; if it does not, a caption does
+                                not fix it. (It is still rendered on the three chains that
+                                have NO Core wallet, where it is a disclaimer rather than
+                                a description -- see below.)
+        "Nothing on this page   a pointer to a section that has itself now been deleted,
+         changes anything..."   so it was pointing at nothing.
+        Panel kind              `core_wallet`. An internal PANEL_KINDS value. It names this
+                                application's own template branch and tells an operator
+                                nothing about their daemon.
+        Reachability probe      `bitcoin_rpc`. Likewise -- which probe function this
+                                application would call.
+
+      ENDPOINT STAYS, and that is a deliberate exception rather than an oversight. It is
+      the one line that says WHICH DAEMON this page is talking to -- host, port and
+      wallet name -- and Bitcoin Core shows the same class of fact in its Information
+      pane (datadir, client version, network). Deleting it would leave a wallet panel that
+      cannot tell the operator whether they are looking at testnet or mainnet, which is
+      rule 14's one hard requirement: "ALWAYS print the network. A line that does not say
+      mainnet or testnet is a line that will eventually be read as the wrong one."
+  -#}
+  {%- if data.qt.borrowed and not data.qt.is_core %}
+  {#- ONLY WHERE IT IS A DISCLAIMER. On SOL, XRP and ICP there is no Core wallet and never
+      has been, so a page arranged like Bitcoin Core under an XRP heading would eventually
+      be read as a claim that one exists. On BTC, LTC and GRC it was describing the
+      obvious. -#}
   <p class="panel-note">{{ data.qt.borrowed }}</p>
-  <p class="panel-note">Nothing on this page changes anything. There is no Send, no Receive, no unlock and no
-     start/stop &#8212; every one of those is named below with the reason and with the tool at the repository
-     root that has it.</p>
+  {%- endif %}
   <table class="kvt">
     <tbody>
       <tr><th scope="row">Endpoint</th>
-          <td class="mono breakable">{{ data.chain.endpoint or '(no row -- see below)' }}</td></tr>
-      <tr><th scope="row">Panel kind</th><td class="mono">{{ data.kind }}</td></tr>
-      <tr><th scope="row">Reachability probe</th>
-          <td>{{ data.probe_kind }}{% if data.no_probe_reason %} &#8212; {{ data.no_probe_reason }}{% endif %}</td></tr>
+          <td class="mono breakable">{{ data.chain.endpoint or '(not configured)' }}</td></tr>
     </tbody>
   </table>
 </section>
@@ -846,48 +873,36 @@
   </div>{# /cw-panes #}
 </div>{# /cw-shell #}
 
-{#- ===================== WHAT THIS BUILD LACKS (core chains only) ===================== -#}
-{%- if data.differences %}
-<section class="panel">
-  <h2>How this daemon differs from its siblings</h2>
-  <p class="panel-note">Generated from <code>chains/daemon_capabilities.py</code>, which records what each of
-     the three Bitcoin-derived daemons can do and <strong>how we know</strong> &#8212; measured on the operator's
-     own daemon, or Bitcoin Core release history, which are not the same kind of evidence and are never
-     written in the same voice. A capability nobody has checked reads as NOT RECORDED, never as absent.</p>
-  <ul class="finding-list">
-    {%- for sentence in data.differences %}
-    <li class="breakable">{{ sentence }}</li>
-    {%- endfor %}
-  </ul>
-</section>
-{%- endif %}
+{#- ===================== TWO SECTIONS CAME OFF THIS PAGE ON 2026-10-10 =====================
 
-{#- ===================== WHAT THIS PAGE CANNOT DO =====================
-    Rule 14 at the scale of a feature. A wallet GUI missing Send and Receive with
-    nothing saying why reads as half-built, and the operator's next move is to go
-    looking for the button. Every `instead` names a file that exists at the
-    repository root, which tests/test_chain_panel.py checks rather than trusts. -#}
-<section class="panel panel-alarm">
-  <h2>What this panel cannot do, and what can</h2>
-  <p class="panel-note">Bitcoin Core's GUI has six tabs and two of them write. This surface registers no write
-     method of any kind, so it carries the four read panes and neither write one. That is a boundary, not an
-     omission &#8212; here is each one and where the capability actually lives.</p>
-  <div class="scroll-x">
-    <table>
-      <thead><tr><th>absent</th><th>why</th><th>what has it</th></tr></thead>
-      <tbody>
-        {%- for entry in data.absent %}
-        <tr>
-          <td><strong>{{ entry.what }}</strong></td>
-          <td class="breakable">{{ entry.why }}</td>
-          <td class="breakable mono">{{ entry.instead }}</td>
-        </tr>
-        {%- endfor %}
-      </tbody>
-    </table>
-  </div>
-</section>
+    "How this daemon differs from its siblings" (2,047 visible characters) and
+    "What this panel cannot do, and what can" (2,822) were DELETED at the operator's
+    instruction. Together they were 4,869 characters -- 41% of everything visible on
+    this page -- against 3,784 for all eight actual wallet panes combined.
 
+    THE OPERATOR'S WORDS, and both are measurements of this page rather than opinions
+    about it: "i mean the subtabs look nothing the the goddamn gui interface in bitcoin
+    or litcoin or gridcoin core", and then, pointing at these two blocks in turn,
+    "what's all this shit?" and "what's all this vergbose shit we don't need".
+
+    WHY THEY WERE WRITTEN, SO THE MISTAKE IS NOT REPEATED. Both were justified by
+    CLAUDE.md rule 14 -- "silence is a defect", "a wallet GUI missing Send and Receive
+    with nothing saying why reads as half-built". That reasoning is sound for a
+    DIAGNOSTIC that gets pasted into a terminal and is wrong for a GUI. Bitcoin Core
+    does not explain why it lacks a tab, does not print its own capability matrix, and
+    does not cite its source files at the reader. It shows labels and values. Rule 14 is
+    satisfied here the way Qt satisfies it: a short label, a placeholder value, a greyed
+    indicator -- "0.00000000", "n/a", "No block source available".
+
+    AND RULE 1 PUTS THE REASONING NEXT TO THE CODE, which is where this paragraph is.
+    The explanations were not wrong, they were in the wrong place: rendered to a browser
+    instead of written into the source. Nothing was lost -- services/chain_panel.py's
+    absent_capabilities() and chains/daemon_capabilities.py are unchanged, still tested,
+    and still the authority. They are simply no longer PRINTED at the operator.
+
+    The rail already marks Send and Receive inert, which is what the 2,822-character
+    table was explaining in prose. Duplicated information, at twenty times the cost.
+-#}
 <p class="panel-note warn"><strong>This page is not authenticated.</strong> Anyone who can reach this port can
    read every balance, address and endpoint on it. The default bind is 127.0.0.1; if that was changed, this
    page went with it.</p>

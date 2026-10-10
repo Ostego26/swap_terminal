@@ -89,8 +89,23 @@
       would be arithmetic in a template about a surface the template cannot see;
       the test that pins it is test_admin_is_one_surface.py, which counts the
       tabs the strip renders. -#}
-  <p class="admin-tabs-note">The canister's own operator console is a fourth surface, served by
-     <code>operator_admin</code> on the ICP replica rather than by this server &mdash; so this page
-     cannot know its address. <code>swap_stack.py status</code> asks the replica and prints it.</p>
+{#- THE FOURTH-SURFACE PARAGRAPH WAS DELETED HERE ON 2026-10-10, at the operator's
+    instruction: "more unnecessary verbose shit for an operator PANEL."
+
+    It read: "The canister's own operator console is a fourth surface, served by
+    operator_admin on the ICP replica rather than by this server -- so this page cannot
+    know its address. swap_stack.py status asks the replica and prints it."
+
+    Every clause of that was true and it was on EVERY admin page, above the content, in
+    the first thing the eye reaches. A nav strip's job is to say where you can go. Where
+    you CANNOT go from here, and why, and which command to run instead, is three
+    sentences of documentation standing between the operator and the panel they opened.
+
+    THE FACT ITSELF IS NOT LOST, which is the only thing that made this safe to delete
+    (rule 2: prove it is dead rather than assuming). `swap_stack.py status` is still what
+    reports the canister console's address, and it still says so itself when run -- grep
+    operator_admin in swap_stack.py. This paragraph was a second copy of that, rendered
+    where nobody asked for it.
+-#}
 </nav>
 {%- endmacro %}

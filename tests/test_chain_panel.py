@@ -416,15 +416,21 @@ def test_the_encryption_state_is_REPORTED_and_nothing_offers_to_unlock_it():
     # the fact.
     for forbidden in ("<input", "<form", "<textarea", 'type="password"'):
         assert forbidden not in body.lower(), forbidden
-    # `walletpassphrase` MAY APPEAR, IN EXACTLY ONE PLACE: the block that explains what
-    # this panel cannot do. Pinned by location, which is strictly more than absence --
-    # an occurrence in a pane, a table cell or a label still fails.
-    before, marker, after = body.partition("What this panel cannot do")
-    assert marker, "the absence block is gone, so the page no longer says why there is no field"
-    assert "walletpassphrase" not in before.lower(), (
-        "the passphrase RPC is named somewhere other than the block explaining its absence"
+    # `walletpassphrase` IS NOW ABSENT ALTOGETHER, which is STRICTLY STRONGER than where
+    # this assertion started. It used to pin the RPC name to one location -- the block
+    # headed "What this panel cannot do" -- so that an occurrence in a pane or a label
+    # would fail. That block was deleted on 2026-10-10 at the operator's instruction
+    # ("what's all this shit?"): 2,822 visible characters, 20% of the page, explaining
+    # four absences that Bitcoin Core does not explain either.
+    #
+    # So the name has nowhere legitimate left to be, and absence is the whole assertion.
+    # The thing it was protecting is unchanged and is the three lines above: the lock
+    # STATE is reported, and no shape that could collect a passphrase exists.
+    assert "walletpassphrase" not in body.lower(), (
+        "the passphrase RPC is named on the page. There is no longer any block whose job is "
+        "to explain its absence, so any occurrence is a label, a cell or a pane naming the "
+        "call that takes a secret as an argument"
     )
-    assert "walletpassphrase" in after.lower(), "the absence block no longer says what it is about"
 
 
 # ---------------------------------------------------------------------------

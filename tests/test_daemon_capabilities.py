@@ -35,6 +35,7 @@ from chains.daemon_capabilities import (
     calls_for,
     differences_for,
     has,
+    history_phrase,
     jobs_that_diverge,
     refusal_remedy,
     refusal_shape,
@@ -244,16 +245,79 @@ def test_an_unrecorded_capability_or_job_raises_rather_than_reading_as_absent():
         calls_for("GRC", "whatever it is I meant")
 
 
-def test_the_absence_sentence_says_it_was_never_there():
+def test_the_absence_sentence_names_the_history_the_route_and_the_evidence():
     """Rule 14: "GRC has no gettxout" invites somebody to go and install something.
 
-    It was never there, and the sentence has to say so, name the release, and
-    name what to do instead -- otherwise the operator's next move is a bad one.
+    The sentence has to say the capability is absent, say what the recorded history is,
+    name what to do instead, and say whether anybody measured it -- otherwise the
+    operator's next move is a bad one.
+
+    RETARGETED 2026-10-10. It asserted the literal phrase "never there", and the
+    sentence it was pinning asserted that phrase for EVERY absent capability. For
+    gettxout on Gridcoin that is true. For two others it was flatly false and the
+    operator read the false version off their own screen -- see
+    test_a_REMOVED_capability_is_never_described_as_never_there below, which is the
+    property this one could not express.
     """
     said = absence_note("GRC", "gettxout")
-    assert "never there" in said, said
+    assert "does not have gettxout" in said, said
+    assert "never added to Gridcoin" in said, (
+        f"the recorded history has to reach the sentence -- that is the clause telling the "
+        f"operator not to go looking for a build that has it: {said}"
+    )
     assert "getrawtransaction" in said, f"the sentence must name the route that works: {said}"
     assert MEASURED in said, f"and whether this was measured: {said}"
+
+
+def test_a_REMOVED_capability_is_never_described_as_never_there():
+    """THE OPERATOR READ THE BROKEN VERSION OFF THEIR OWN SCREEN, 2026-10-10.
+
+    The absence sentence was f"...and it was never there: it arrived in {arrived_in}",
+    and `arrived_in` is free prose that, for these two entries, records a REMOVAL. So
+    the chain wallet panel rendered, verbatim:
+
+        BTC does not have the `account` field, and it was never there: it arrived in
+        removed in Bitcoin Core 0.18 along with the accounts system.
+
+    Two defects, and the ungrammatical one is not the serious one. "it was never there"
+    is FALSE: the `account` field shipped in Bitcoin Core for years and was removed in
+    0.18, and getinfo shipped for longer. The page told the operator the exact opposite
+    of what happened, in the confident register rule 17 exists to prevent.
+
+    MUTATION: revert history_phrase() to f"it arrived in {arrived_in}" and both
+    assertions below fail.
+    """
+    # The recorded NAMES, not the shorthand -- CAPABILITIES keys on the display name and
+    # absence_note() raises KeyError on a near miss rather than guessing (which is the
+    # behavior test_a_typo_in_a_capability_name_raises pins).
+    for name in ("the `account` field", "getinfo"):
+        said = absence_note("BTC", name)
+        assert "never there" not in said, (
+            f"BTC {name} WAS there and was removed; the sentence must not claim otherwise: {said}"
+        )
+        assert "REMOVED" in said, (
+            f"and it must say which of the two happened, or the reader cannot tell a capability "
+            f"that never existed from one that was taken away: {said}"
+        )
+        assert "it arrived in removed" not in said, f"the two-facts-one-field bug is back: {said}"
+
+
+def test_history_phrase_reads_the_field_rather_than_assuming_an_arrival():
+    """The decision, called with seeded inputs (rule 10).
+
+    PREFIX, NOT SEARCH, and this case is why: rpcallowip's own history MENTIONS a removal
+    ("wildcards were REMOVED in 0.12") while the capability itself arrived in 0.10.
+    Matching anywhere in the string would call that a removal and produce a new wrong
+    sentence in place of the old one.
+    """
+    assert history_phrase("Bitcoin Core 0.17") == "it arrived in Bitcoin Core 0.17"
+    assert history_phrase("removed in Bitcoin Core 0.18").startswith("it was REMOVED")
+    assert history_phrase("deprecated in 0.16, removed in 0.18").startswith("it was REMOVED")
+    assert history_phrase(
+        "Bitcoin Core 0.10, and wildcards were REMOVED in 0.12"
+    ) == "it arrived in Bitcoin Core 0.10, and wildcards were REMOVED in 0.12"
+    assert history_phrase("") == "no history is recorded for it"
+    assert history_phrase("   ") == "no history is recorded for it"
 
 
 def test_the_equivalence_tree_covers_all_three_chains_per_divergent_job():
@@ -315,7 +379,15 @@ def test_the_warning_fires_only_on_a_configuration_that_cannot_work():
     loud = wallet_path_warning("GRC", "desk_hot")
     assert "desk_hot" in loud, f"the warning must name the value that caused it: {loud}"
     assert "/wallet/desk_hot" in loud, f"and the URL it will build: {loud}"
-    assert "never there" in loud, f"and that it is not a daemon to go and fix: {loud}"
+    # RETARGETED 2026-10-10 off the literal "never there", which the sentence no longer
+    # says -- see test_a_REMOVED_capability_is_never_described_as_never_there for why it
+    # was a false claim for two other entries. The PROPERTY this was protecting is that
+    # the warning tells the operator this is a configuration to change rather than a
+    # daemon to go and upgrade, so that is what is asserted now.
+    assert "arrived in Bitcoin Core 0.17" in loud, f"the history has to reach the warning: {loud}"
+    assert "leave the chain" in loud and "empty" in loud, (
+        f"and the remedy must be the CONFIGURATION change, not a daemon upgrade: {loud}"
+    )
 
 
 def test_the_per_chain_difference_list_is_derived_not_written_twice():

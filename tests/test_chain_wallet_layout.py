@@ -598,9 +598,22 @@ def test_the_three_chains_with_no_qt_wallet_SAY_the_layout_is_borrowed():
             f"{asset} disclaims a Core wallet it actually has, which makes the notice on the "
             f"three that genuinely lack one worthless"
         )
-        # NO APOSTROPHE IN THE NEEDLE: Jinja escapes `chain's` to `chain&#39;s`, so a
-        # prose assertion that spans one is a check that can never pass.
-        assert "Core Qt wallet arranges it" in flat, asset
+        # THE POSITIVE HALF OF THIS CHECK WAS DELETED ON 2026-10-10. It asserted that
+        # BTC, LTC and GRC carry the caption "This is arranged as that chain's own Core
+        # Qt wallet arranges it -- the rail down the left, the Balances card beside
+        # Recent transactions...". The operator read that caption off their own screen
+        # and said "dumb shit that needs to be removed", and they are right: it is a
+        # description of the layout printed on top of the layout. If the arrangement
+        # works it needs no caption, and if it does not a caption will not fix it.
+        #
+        # WHAT THE TEST IS FOR SURVIVES INTACT, and it is the assertion above: a chain
+        # that HAS a Core wallet must not disclaim one. That is what keeps the notice
+        # meaningful on the three that genuinely lack one, and it is the mutation this
+        # docstring names. The caption was never the property; it was the vehicle.
+        assert "borrowed" not in flat, (
+            f"{asset} has a real Core wallet, so nothing on its page should describe the "
+            f"resemblance as borrowed"
+        )
 
 
 # ---------------------------------------------------------------------------
