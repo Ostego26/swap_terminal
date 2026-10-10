@@ -263,6 +263,14 @@ SERVICE_SIDE = frozenset({
     # finished and is not", so honoring a conf-resolved HOST would have been two
     # answers to one question in one file.
     "testnet_wallets.py",
+    # chain_sync_rate.py, added 2026-10-10. SERVICE SIDE, and this one is decided by
+    # what the question is FOR. It answers "when will a deposit to this chain become
+    # visible", and the node that decides that is the one deposit_watcher and the
+    # payout worker talk to -- build_adapters(Config.RPC). A conf fallback would
+    # happily measure some other daemon's sync and print a correct-looking ETA for a
+    # node whose progress has no bearing on whether the terminal can see money, which
+    # is the quietest wrong answer available: a right number about the wrong thing.
+    "chain_sync_rate.py",
     # icp_custody_addresses.py, added 2026-10-06. SERVICE SIDE, and this one is not
     # a judgment call: the file prints two columns, and the right-hand column's
     # entire claim is "this is the address the desk is using RIGHT NOW". It gets it

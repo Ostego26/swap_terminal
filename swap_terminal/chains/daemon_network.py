@@ -36,7 +36,7 @@ from __future__ import annotations
 # matters because stack_authority.py imports this module specifically on that
 # promise, to stay stdlib-only for swap_stack.py running on the host. collections.abc
 # is stdlib, so the promise that MATTERS is kept; the sentence is corrected below.
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 #: What each script chain CALLS a network that is safe to lose coins on. Per chain and
 #: not one shared set, because the strings differ and a shared set is how a mainnet
@@ -467,3 +467,228 @@ def test_network_verdict(asset: str, network: str) -> str:
     if network in CHAIN_TEST_NETWORKS.get(asset, frozenset()):
         return NETWORK_IS_TEST
     return NETWORK_NOT_ALLOWED
+
+
+#: WHAT IS ACTUALLY LIMITING AN UNFINISHED SYNC, AND IT IS NOT USUALLY THE PEERS.
+#:
+#: sync_verdict() above answers "is this node caught up". It cannot answer the
+#: question an operator asks next, which is "how long, and is there anything I can do
+#: about it" -- and the obvious answer to the second half is wrong.
+#:
+#: MEASURED ON THE OPERATOR'S HOST 2026-10-10, on LTC testnet at height ~3.1M of
+#: 4.9M, with ONE peer:
+#:
+#:     blocks validated   2153 in 30.0s   (71.7/s)
+#:     bytes received     1,646,379       (0.055 MB/s)
+#:     average block      0.8 kB on the wire
+#:
+#: 0.055 MB/s is a factor of 36 below the 2 MB/s floor below. The single peer was
+#: feeding that node FASTER THAN IT COULD VALIDATE, so the thing everyone reaches for
+#: -- more peers -- would have changed little. The node was CPU- and disk-bound.
+#:
+#: THIS EXISTS BECAUSE I GOT IT WRONG IN THAT REGISTER. A diagnostic handed to the
+#: operator printed `peers now 1  <- want 8+; one peer is why the sync is slow`, and
+#: "one peer is why" was an inference stated as a measurement -- rule 17's exact
+#: failure, in output the operator then pasted back twice and acted on. The node had
+#: 8219 known addresses, no `connect=`, no `maxconnections=`, and nothing capping it
+#: on either the conf or the command line: one peer was what it had ESTABLISHED, not
+#: what it was told to establish, and it was enough. The verdict is computed from a
+#: stated threshold now instead of from an impression.
+SYNC_NETWORK_BOUND = "network-bound"
+SYNC_VALIDATION_BOUND = "validation-bound"
+SYNC_NOT_ADVANCING = "not-advancing"
+SYNC_RATE_NOT_ESTABLISHED = "rate_not_established"
+
+#: TOTAL OVER THE FOUR, so a renderer can assert it covers every verdict rather than
+#: inventing a sentence for one it did not know about -- which is the defect
+#: stack_authority's BECH32 renderer shipped on 2026-10-09 and the reason
+#: TEST_NETWORK_VERDICTS above is spelled the same way.
+BOTTLENECK_VERDICTS = (
+    SYNC_NETWORK_BOUND,
+    SYNC_VALIDATION_BOUND,
+    SYNC_NOT_ADVANCING,
+    SYNC_RATE_NOT_ESTABLISHED,
+)
+
+#: THE THRESHOLD, AND IT IS A CONSTANT SO THAT THE VERDICT IS AUDITABLE. A link that
+#: can carry 2 MB/s is unremarkable; a node pulling far less than that while blocks
+#: keep arriving is not waiting on the network. Chosen as a round number well above
+#: what a saturated IBD needs for small testnet blocks (0.8 kB each, measured above)
+#: and well below any real link, so the two cases are separated by more than an order
+#: of magnitude rather than by a judgement call.
+#:
+#: NAMED IN BYTES PER SECOND, ASCII, because it is an identifier -- rule 6's boundary.
+#: The figure is RENDERED in MB/s because that is the unit a human compares a link in.
+NETWORK_BOUND_FLOOR_BYTES_PER_SECOND = 2_000_000
+
+#: TWO READINGS ARE A RATE; ONE IS A POSITION. Named rather than written as a `2`
+#: in the guard, because ruff PLR2004 is right that the number needs a word next to
+#: it -- and the word is the whole reason the guard exists: a caller whose daemon
+#: stopped answering partway through has one sample and must get a refusal, not a
+#: rate computed against itself.
+MINIMUM_SAMPLES = 2
+
+#: AND THE WINDOW HAS TO BE LONG ENOUGH TO BE A WINDOW. Found by a test 2026-10-10:
+#: with a zero gap between samples the span becomes one RPC round-trip, and 1.6 MB of
+#: `totalbytesrecv` over 0.0002s computes as 16 GB/s -- so a node that is firmly
+#: validation-bound reports NETWORK-BOUND, confidently, with every figure arithmetically
+#: correct.
+#:
+#: That is this module's own founding defect wearing a different hat. The verdict was
+#: added because "one peer is why the sync is slow" was an inference presented as a
+#: measurement; a verdict computed over a round-trip is a measurement of the wrong
+#: interval presented as a rate. Both hand a reader a confident wrong cause.
+#:
+#: ONE SECOND, because `totalbytesrecv` moves in bursts as blocks arrive: a window
+#: shorter than that can land entirely inside or entirely outside a burst, so the byte
+#: rate is dominated by where the samples fell rather than by the throughput. It is a
+#: parameter for the same reason floor_bps is -- so a test can drive the guard without
+#: sleeping through it.
+MINIMUM_WINDOW_SECONDS = 1.0
+
+
+def rate_refusal(samples: object, minimum_window: float = MINIMUM_WINDOW_SECONDS) -> str:
+    """Why these samples cannot produce a rate, or "" when they can.
+
+    FOUR WAYS TO FAIL AND THEY ARE ALL THE SAME KIND, which is what makes this a seam
+    rather than a split for its own sake: every one is a statement about the SAMPLES,
+    none is a statement about the sync. sync_bottleneck() below is then purely about
+    interpreting numbers it has been told are usable --
+    swap_terminal_desktop._transport_verdict/_body_verdict draw the same line for the
+    same reason, and that file says it plainly: "this half knows only about sockets,
+    and the other half knows only about the response".
+
+    EXTRACTED BECAUSE ruff PLR0911 FLAGGED THE COMBINED VERSION at 7 returns > 6, and
+    rule 12's answer to a complexity finding is to extract the decision rather than
+    raise the ceiling. The win is not the lint code: this function can be asserted on
+    directly, so "a window of 0.3s is refused" is one call rather than a dict lookup
+    through a verdict.
+
+    IT RETURNS A SENTENCE, NOT A BOOL. A caller that only learned "unusable" would
+    have to invent the reason, and the reasons are not interchangeable -- a wall clock
+    that stepped backwards and a window too short to clear a burst send an operator to
+    two different places.
+    """
+    if not isinstance(samples, Sequence) or len(samples) < MINIMUM_SAMPLES:
+        return (
+            "fewer than two samples, so no rate could be computed. That is a result and "
+            "not a failure: it means the daemon stopped answering partway through"
+        )
+    try:
+        (t0, _b0, _h0, _n0), (t1, _b1, _h1, _n1) = samples[0], samples[-1]
+    except (TypeError, ValueError):
+        return (
+            "a sample was not a (elapsed_seconds, blocks, headers, bytes_received) "
+            "quadruple, so nothing was computed rather than something guessed"
+        )
+    elapsed = t1 - t0
+    if elapsed <= 0:
+        return (
+            f"the samples span {elapsed}s, which cannot produce a rate. A monotonic clock "
+            f"was expected; a wall clock that stepped backwards reads like this"
+        )
+    if elapsed < minimum_window:
+        return (
+            f"the samples span {elapsed:.4f}s, under the {minimum_window}s minimum. A window "
+            f"that short measures one RPC round-trip rather than throughput: totalbytesrecv "
+            f"moves in bursts as blocks arrive, so the byte rate would say more about where "
+            f"the two samples landed than about what is limiting the sync. Nothing is "
+            f"reported rather than a confident wrong cause"
+        )
+    return ""
+
+
+def sync_bottleneck(
+    samples: object,
+    floor_bps: float = NETWORK_BOUND_FLOOR_BYTES_PER_SECOND,
+    minimum_window: float = MINIMUM_WINDOW_SECONDS,
+) -> dict:
+    """Which resource an unfinished sync is waiting on, from two or more samples.
+
+    Args:
+        samples: a sequence of (elapsed_seconds, blocks, headers, bytes_received).
+            `elapsed_seconds` is a monotonic reading -- the caller's, because this
+            function performs no I/O and takes no clock of its own, which is what
+            lets a test seed it with exact numbers instead of sleeping.
+        floor_bps: the bytes-per-second above which the network could plausibly be
+            the ceiling. A parameter rather than a literal so a test can drive both
+            branches without pretending to have a gigabit link.
+
+    Returns:
+        A dict with `state` (one of BOTTLENECK_VERDICTS), `why`, and the measured
+        figures: blocks_per_second, bytes_per_second, bytes_per_block, behind,
+        eta_seconds. Every figure is None when it could not be computed, never 0 --
+        rule 14, because a zero that means "not measured" and a zero that means
+        "zero" send a reader to two different places.
+
+    ONLY THE FIRST AND LAST SAMPLE DECIDE, deliberately. Averaging the intervals
+    pairwise would weight a momentary stall the same as the whole run, and the
+    question is the throughput over the window, not its variance. The intermediate
+    samples exist so the CALLER can print progress while it waits (rule 14: a
+    thirty-second blank is indistinguishable from a hang), not so this can smooth
+    anything.
+
+    THE ETA IS NAMED AS AN EXTRAPOLATION rather than a prediction, and the caller is
+    expected to say so. Measured twice on the operator's host twenty minutes apart,
+    the rate fell from 79.8 blocks/s to 71.7 -- 6.3 hours became 7.0 -- because block
+    density rises with height. A figure that moves that much in twenty minutes is a
+    current rate, not a finish time.
+    """
+    refusal = rate_refusal(samples, minimum_window)
+    if refusal:
+        return {
+            "state": SYNC_RATE_NOT_ESTABLISHED, "why": refusal,
+            "blocks_per_second": None, "bytes_per_second": None, "bytes_per_block": None,
+            "behind": None, "eta_seconds": None,
+        }
+    blank = {
+        "state": SYNC_RATE_NOT_ESTABLISHED, "why": "",
+        "blocks_per_second": None, "bytes_per_second": None, "bytes_per_block": None,
+        "behind": None, "eta_seconds": None,
+    }
+    (t0, b0, _h0, n0), (t1, b1, h1, n1) = samples[0], samples[-1]
+    elapsed = t1 - t0
+    gained, got, behind = b1 - b0, n1 - n0, h1 - b1
+    per_second = gained / elapsed
+    bytes_per_second = got / elapsed
+    figures = {
+        "blocks_per_second": per_second,
+        "bytes_per_second": bytes_per_second,
+        "bytes_per_block": (got / gained if gained > 0 else None),
+        "behind": behind,
+        "eta_seconds": (behind / per_second if per_second > 0 else None),
+    }
+    if gained <= 0:
+        # NOT ADVANCING MEANS TWO DIFFERENT THINGS and only one of them is a problem.
+        # A CAUGHT-UP node does not advance either: LTC blocks arrive every ~2.5
+        # minutes, so any window shorter than that sees zero on a perfectly healthy
+        # node. Found by a test 2026-10-10 -- the already-synced case produced "THE
+        # SYNC IS NOT ADVANCING", which is the confident wrong cause this whole
+        # verdict exists to stop, aimed at a node with nothing wrong with it.
+        #
+        # `behind` separates them and it is already computed, so the sentence says
+        # which rather than leaving the caller to check. The STATE is deliberately
+        # the same: in both cases there is no rate to extrapolate, and a fifth
+        # verdict would make every renderer handle a case that needs no action.
+        if behind <= 0:
+            return {**blank, **figures, "state": SYNC_NOT_ADVANCING, "why": (
+                f"{gained} blocks in {elapsed:.1f}s, and the node is NOT behind ({behind} to "
+                f"go). This is a caught-up node idling between blocks, not a stalled sync -- "
+                f"there is nothing to wait for and nothing to fix"
+            )}
+        return {**blank, **figures, "state": SYNC_NOT_ADVANCING, "why": (
+            f"{gained} blocks in {elapsed:.1f}s with {behind} still to go. THE SYNC IS NOT "
+            f"ADVANCING, and that is the answer: no amount of extra peers helps a node that "
+            f"is not moving, so what stalled it has to be found first"
+        )}
+    if bytes_per_second >= floor_bps:
+        return {**blank, **figures, "state": SYNC_NETWORK_BOUND, "why": (
+            f"{bytes_per_second / 1_000_000:.2f} MB/s is enough of a link that the peer set "
+            f"could plausibly be the ceiling, so more peers SHOULD help"
+        )}
+    return {**blank, **figures, "state": SYNC_VALIDATION_BOUND, "why": (
+        f"{bytes_per_second / 1_000_000:.3f} MB/s is a trickle next to the "
+        f"{floor_bps / 1_000_000:.0f} MB/s floor, so the peer set is NOT the ceiling -- this "
+        f"node is CPU- and disk-limited verifying signatures and writing the chainstate. "
+        f"More peers would change little; dbcache is the lever, and it needs a restart"
+    )}
