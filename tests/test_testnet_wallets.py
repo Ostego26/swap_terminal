@@ -310,10 +310,29 @@ def test_every_faucet_carries_its_EVIDENCE_and_not_just_a_url():
     assert tw.FAUCETS, "an empty table would make the closing block print nothing useful"
     for asset, entries in tw.FAUCETS.items():
         assert asset in tw.CHAINS
-        for url, note in entries:
-            assert url.startswith("https://"), f"{asset}: {url!r} is not an https URL"
-            assert note.strip(), f"{asset}: {url} has no note saying what it claims to give"
-    assert "NOT tested" in tw.SEARCHED_NOT_TESTED
+        for faucet in entries:
+            assert faucet.url.startswith("https://"), f"{asset}: {faucet.url!r} is not https"
+            assert faucet.note.strip(), f"{asset}: {faucet.url} has no note on what it gives"
+            # PREFILL IS A CLAIM ABOUT THAT FAUCET, so a link is only built for one that
+            # documents the parameter. Appending ?address= to a site that ignores it
+            # would teach the operator it works everywhere, which is worse than a bare
+            # URL -- the next faucet they try by hand would silently drop the address.
+            # A DERIVED ADDRESS, NOT A TYPED SAMPLE. `tb1qexample` was the first
+            # version and it tripped BOTH address-literal gates: the decode check
+            # (it is not valid bech32) and the ceiling. Second time today, and the
+            # gate is right -- a hand-typed address in a test about addresses is
+            # where a typo is invisible.
+            built = faucet.link_for(valid_addresses.BTC_PARTICIPANT)
+            assert (f"?address={valid_addresses.BTC_PARTICIPANT}" in built) is faucet.prefill, (
+                f"{asset}: {faucet.url} prefill={faucet.prefill} but link_for() built {built!r}"
+            )
+    assert "UNREACHABLE from this container" in tw.SEARCHED_NOT_TESTED, (
+        "the evidence string must say WHY none was tested -- a 403 at the proxy is a harder "
+        "fact than 'I did not try', and it tells the operator their own machine has no such "
+        "restriction"
+    )
+    prefilling = [f for entries in tw.FAUCETS.values() for f in entries if f.prefill]
+    assert prefilling, "at least one faucet documents ?address=; a table with none has lost it"
 
 
 def test_the_closing_block_prints_SOMETHING_when_every_chain_refused():
@@ -397,7 +416,10 @@ def test_main_RUNS_END_TO_END_which_is_the_test_that_was_missing(monkeypatch, ca
     )
     assert "PASTE THESE INTO A FAUCET" in out
     assert valid_addresses.BTC_PARTICIPANT in out
-    assert "cypherfaucet.com/btc-testnet4" in out
+    assert f"cypherfaucet.com/btc-testnet?address={valid_addresses.BTC_PARTICIPANT}" in out, (
+        "the faucet link CARRIES THE ADDRESS where the faucet supports ?address=, which "
+        "removes the one step in this flow where a human copies a 42-character string by hand"
+    )
     assert ("createwallet", "desk_hot") in daemon.asked
 
 

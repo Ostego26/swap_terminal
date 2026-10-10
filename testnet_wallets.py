@@ -40,16 +40,33 @@ same one:
 
     fund_testnets.py   mints. regtest only. Refuses testnet, on purpose.
     this file          prepares a wallet and an address, on testnet only, and
-                       CANNOT mint -- the coins come from a faucet, which is a
-                       web form a person fills in.
+                       CANNOT mint -- on testnet there is nothing to mine.
 
-WHAT IT CANNOT DO, said rather than left to be discovered (rule 14). It cannot
-get the coins. A tBTC or tLTC faucet is a page with a captcha or a sign-in, and
-nothing in this tree can fill one in -- XRP is the exception and already has its
-own path in fund_testnets.py, because the XRP testnet faucet is a plain POST API.
-What this does is produce the address to paste, prove it is the right SHAPE for
-the network the daemon is actually on, and say whether a payment would even be
-seen yet.
+WHAT IT CANNOT DO, said rather than left to be discovered (rule 14). It does not
+fetch the coins. What this does is produce the address, prove it is the right
+SHAPE for the network the daemon is actually on, and say whether a payment would
+even be seen yet.
+
+AND THE FIRST VERSION OF THAT PARAGRAPH WAS WRONG, CORRECTED 2026-10-10 THE SAME
+DAY. It said "A tBTC or tLTC faucet is a page with a captcha or a sign-in, and
+nothing in this tree can fill one in". The captcha half is false:
+cypherfaucet.com serves a KEYLESS, CAPTCHA-FREE JSON API over both legs --
+`POST /api/v1/claim` with `{"network":"btc-testnet","address":"tb1q..."}`, read
+verbatim from its own README -- which is the same shape fund_testnets.py already
+uses for the XRP testnet faucet. So "nothing in this tree can" was a statement
+about this tree, dressed up as a statement about faucets.
+
+WHY A CLIENT FOR IT IS NOT IN THIS FILE, which is a reason rather than the same
+claim again. Two things are unestablished and only the operator can settle them:
+that API is **off by default** in the faucet's own config (`'api_enabled' =>
+true`), so whether the live site serves it is not known; and this container cannot
+reach any faucet host to find out -- measured 2026-10-10, `curl` through the
+session proxy answers `CONNECT tunnel failed, response 403` for cypherfaucet.com,
+coinfaucet.eu, faucet.testnet4.dev, tltc.bitaps.com, litecointf.salmen.website and
+mempool.space alike. That is a policy denial at the gateway, not six dead domains.
+Writing a client against a README I cannot execute is rule 16's "a fix you cannot
+test is a proposal"; `GET /api/v1/info` from the operator's own shell settles it in
+one request, and the client can be written against a real response after that.
 
 THE WALLET NAME IS NOT THIS FILE'S TO CHOOSE, and that is the defect it was
 written to avoid. There are four wallet names in this tree -- `desk_hot` (what
@@ -67,6 +84,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
@@ -104,34 +122,79 @@ from regtest.daemons import RegtestSetupError, WalletSite, ensure_wallet_on
 #:         confirmed read-only by fund_testnets.py --sol.
 CHAINS = ("BTC", "LTC")
 
-#: HOW I KNOW EACH FAUCET EXISTS, which is NOT the same as knowing it works.
+#: WHY NONE OF THESE WAS TESTED, which is a harder fact than "I did not try".
 #:
-#: Rule 17 is the whole reason this is a field rather than a flat list of URLs.
-#: These were found by web search on 2026-10-10 and NONE of them was tested from
-#: here -- this container cannot fill in a captcha and the operator's address is
-#: not mine to put in a form. A list of confident-looking URLs that are half dead
-#: wastes exactly the time it was meant to save, and the searches themselves came
-#: back saying so: one result reported faucet.testnet4.dev working in 2025 and
-#: "most of them either empty or completely offline"; another reported the bitaps
-#: tLTC faucet stuck at block 4,887,883 two weeks ago.
+#: MEASURED 2026-10-10: this container cannot reach a single faucet host. `curl`
+#: through the session proxy answers `CONNECT tunnel failed, response 403` for every
+#: one of cypherfaucet.com, coinfaucet.eu, faucet.testnet4.dev, tltc.bitaps.com,
+#: litecointf.salmen.website and mempool.space. A 403 at the CONNECT is a policy
+#: denial by the environment's network allowlist -- NOT six dead domains, which is
+#: what the first read of it looked like (WebFetch reported ENOTFOUND, because its
+#: own resolver is a different path; curl through the proxy resolves at the gateway
+#: and gives the real answer). So the status below is "unreachable from the machine
+#: that wrote this file", and the operator's machine has no such restriction.
+#:
+#: Rule 17 is the whole reason this is a field rather than a flat list of URLs. A
+#: list of confident-looking URLs that are half dead wastes exactly the time it was
+#: meant to save, and the searches said so themselves: one result reported "most of
+#: them either empty or completely offline", and a repository issue 14 days old
+#: reported tltc.bitaps.com stuck at block 4,887,883 while calling CypherFaucet "the
+#: only Litecoin testnet faucet I've found that still works".
 #:
 #: Same shape as chains/daemon_capabilities.py's MEASURED / RELEASE_HISTORY /
-#: UPSTREAM_SOURCE: the claim and its evidence travel together, so a reader can
-#: tell which they are holding.
-SEARCHED_NOT_TESTED = "found by search 2026-10-10, NOT tested from here"
+#: UPSTREAM_SOURCE: the claim and its evidence travel together, so a reader can tell
+#: which they are holding.
+SEARCHED_NOT_TESTED = "listed 2026-10-10; UNREACHABLE from this container (403 at the proxy), so untested"
 
-FAUCETS: dict[str, tuple[tuple[str, str], ...]] = {
-    # CypherFaucet serves BOTH legs, which is why it is first: one page, both
-    # chains, no sign-in according to its own announcement (0.01 per hour, rate
-    # limited per address and per IP).
+
+@dataclass(frozen=True)
+class Faucet:
+    """One faucet, with what it claims to give and whether a link can carry the address.
+
+    `prefill` IS WHY THIS IS A CLASS AND NOT A 2-TUPLE. CypherFaucet documents an
+    `?address=` query parameter on every faucet page -- "the claim box arrives
+    pre-filled, and they solve the captcha and click" -- so the printed URL can
+    carry the address the operator is about to paste. That removes the one step in
+    this whole flow where a human copies a 42-character string by hand, which is
+    exactly where a wrong-prefix address would slip through unnoticed. Faucets with
+    no such parameter get the bare URL, because appending one to a site that
+    ignores it would teach the operator it works everywhere.
+    """
+
+    url: str
+    note: str
+    prefill: bool = False
+
+    def link_for(self, address: str) -> str:
+        """The URL to print, with the address in it where the faucet supports that."""
+        return f"{self.url}?address={address}" if self.prefill else self.url
+
+
+FAUCETS: dict[str, tuple[Faucet, ...]] = {
+    # CypherFaucet IS FIRST BECAUSE IT SERVES BOTH LEGS AND TAKES NO CAPTCHA ON ITS
+    # API -- read verbatim from its own README (AGPL-3.0, Tech1k), which documents
+    # `POST /api/v1/claim` with {"network":"<slug>","address":"<addr>"}, slugs
+    # xmr-stagenet / xmr-testnet / ltc-testnet / btc-testnet, and errors 400 invalid
+    # / 409 empty / 429 rate-limited / 503 node-busy. It is OFF BY DEFAULT in the
+    # faucet's config, so this file does not call it -- see the module docstring.
+    #
+    # THE BTC PAGE SLUG IS NOT ESTABLISHED and is deliberately not guessed. The
+    # README says "Slugs are the URL slugs" and lists `btc-testnet`; a search result
+    # surfaced the page as `/btc-testnet4`. Both are plausible and this container
+    # cannot fetch either to find out. `GET /api/v1/info` lists every faucet with its
+    # slug and settles it from the source in one request, which is the first thing to
+    # run rather than a second URL to try.
     "BTC": (
-        ("https://cypherfaucet.com/btc-testnet4", "0.01 tBTC/hour, no signup, per-IP limit"),
-        ("https://mempool.space/testnet4/faucet", "needs a sign-in"),
-        ("https://faucet.testnet4.dev", "reported working in 2025; may be dry"),
+        Faucet("https://cypherfaucet.com/btc-testnet", "0.01 tBTC/hour, no signup, per-IP limit; "
+               "slug per its README -- /btc-testnet4 also seen, ask /api/v1/info", prefill=True),
+        Faucet("https://mempool.space/testnet4/faucet", "needs a sign-in"),
+        Faucet("https://faucet.testnet4.dev", "1 Mtsat per request, 24h cooldown; may be dry"),
     ),
     "LTC": (
-        ("https://cypherfaucet.com/ltc-testnet", "0.01 tLTC/hour"),
-        ("https://tltc.bitaps.com", "0.01 tLTC per 5 min -- REPORTED STUCK at block 4,887,883"),
+        Faucet("https://cypherfaucet.com/ltc-testnet", "0.01 tLTC/hour; the ?address= form is "
+               "quoted verbatim in its README", prefill=True),
+        Faucet("https://litecointf.salmen.website", "claims up to 1.5 tLTC, 1 request/hour"),
+        Faucet("https://tltc.bitaps.com", "0.01 tLTC per 5 min -- REPORTED STUCK at block 4,887,883"),
     ),
 }
 
@@ -374,9 +437,9 @@ def report(console: Console, rows: list[dict]) -> None:
         console.say(f"        {row['address']}")
         if not row["synced"]:
             console.say("        ^ this daemon is STILL SYNCING: pay it now, see it later")
-        for url, note in FAUCETS[row["asset"]]:
-            console.say(f"        {url}")
-            console.say(f"            {note}  [{SEARCHED_NOT_TESTED}]")
+        for faucet in FAUCETS[row["asset"]]:
+            console.say(f"        {faucet.link_for(row['address'])}")
+            console.say(f"            {faucet.note}  [{SEARCHED_NOT_TESTED}]")
     console.say("")
     console.say("Then, to see the money arrive:  python3 chain_balances.py")
     console.say("Re-running this file is safe and idempotent: an existing wallet is loaded, not")
