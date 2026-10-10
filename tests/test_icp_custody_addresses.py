@@ -217,7 +217,36 @@ def test_the_hrp_table_is_not_reimplemented_here():
     # that would mean the function is deciding what bech32 looks like instead of
     # asking modules/address_network. The first version of this assertion scanned the
     # whole source and failed on its own subject's docstring.
-    body = source.replace(subject.comparability.__doc__ or "", "")
+    #
+    # STRIPPED BY SOURCE SPAN AND NO LONGER BY `source.replace(__doc__, "")`, AND THE
+    # OLD FORM WAS A NO-OP ON PYTHON 3.13. Measured 2026-10-10 on CPython 3.13.16:
+    #
+    #     __doc__ in inspect.getsource(comparability)   ->  False
+    #     __doc__ line 2                                ->  'WHY THIS IS NOT ...'
+    #     source  line 4                                ->  '    WHY THIS IS NOT ...'
+    #
+    # 3.13 strips the common leading indentation from a docstring at COMPILE time, so
+    # `__doc__` is the dedented text while the source still carries its four spaces.
+    # The two no longer match, `str.replace` removes nothing, and the assertion went
+    # back to scanning the docstring -- failing on `bcrt1qpee23n6...` inside the
+    # quoted live run, which is EXACTLY the false failure the paragraph above says
+    # the first version of this test had. It did not weaken into a false pass, which
+    # is the right direction to break in, and it was still a test reporting a defect
+    # that is not there (rule 14: a check nobody can trust is one they learn to
+    # ignore).
+    #
+    # The span is taken rather than the value, so nothing depends on how any Python
+    # version chooses to store the text: the first `\"\"\"` opens the docstring of a
+    # function whose source begins at its own `def`, and the next one closes it.
+    opening = source.index('"""')
+    closing = source.index('"""', opening + 3) + 3
+    body = source[:opening] + source[closing:]
+    assert subject.comparability.__doc__, "the subject must still have a docstring to strip"
+    assert "WHY THIS IS NOT" not in body, (
+        "the docstring was not actually removed from the source before the HRP scan, so "
+        "this test is about to fail on addresses quoted in prose rather than on an HRP in "
+        "code -- which is the defect, not the finding"
+    )
     for hrp in ("bcrt", "rltc", "tltc", "tb1"):
         assert hrp not in body, (
             f"comparability() names the HRP {hrp!r} in its code, which means it is deciding what "
