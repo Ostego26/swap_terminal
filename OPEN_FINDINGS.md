@@ -327,7 +327,8 @@ a bare `docker compose down` reaches the whole terminal and **removes containers
 | 2026-10-07 15:58 UTC | the SAME canister id with the SAME `dfx_test_key` gave **two different public keys** across one ordinary container recreation (`1373fa3`) |
 | 2026-10-07 20:38 UTC | `icp-replica-data:/root/.local/share/dfx` added as a **named volume** (`28de99c`), over a directory measured inside the running container at **180M**, holding `network/local/<hash>/state` |
 
-The key measurement is **three hours older than the volume**, so it describes a
+The key measurement is **four hours and forty minutes older than the volume**
+(15:58 UTC against 20:38 UTC, as the table above states), so it describes a
 topology that no longer exists. `docker compose down` without `-v` removes
 containers and keeps named volumes, so the ledger canister should now survive —
 but **nothing has measured whether the tECDSA key material for `dfx_test_key`
@@ -338,11 +339,20 @@ container the change was written in: no replica, and `docker` was forbidden.
 **The check, read-only, with the replica up. Run it with NOTHING at a
 canister-derived address:**
 
+Through `docker compose exec`, **never host `dfx`**: `HANDOFF.md` §1 records host
+dfx moving to DELETE `icp/.dfx/local` -- the replica's state, ledger included --
+when run with `icp/dfx.json` in scope. `icp-replica` is the compose SERVICE name;
+`docker compose exec` rejects the container name `swap-icp-replica`.
+
 ```
-dfx canister call threshold_custody public_key '(vec {})'
+docker compose exec -T icp-replica dfx canister call threshold_custody public_key '(record { curve = variant { secp256k1_ecdsa }; derivation_path = vec {} })'
 docker compose down && docker compose up -d
-dfx canister call threshold_custody public_key '(vec {})'
+docker compose exec -T icp-replica dfx canister call threshold_custody public_key '(record { curve = variant { secp256k1_ecdsa }; derivation_path = vec {} })'
 ```
+
+The argument is a **record**, not the bare `(vec {})` this check carried until
+2026-10-10: increment 1b gave `threshold_custody` three curves, so the curve is
+named per call and the old form fails a candid decode.
 
 Same hex means `down` is survivable and the warning at
 `docker-compose.yml`'s hazard 1 can be narrowed. A different hex means it is not,

@@ -28,10 +28,14 @@ cross-check and a measurement must not be written in the same voice:
                         name the two commands that would settle it. They were
                         run:
 
-                            dfx identity get-principal
+                            docker compose exec -T icp-replica dfx identity get-principal
                               ybr6p-5dyeb-...-fkhhf-cqe
-                            dfx ledger account-id
+                            docker compose exec -T icp-replica dfx ledger account-id
                               a0263999...6c12042
+
+                        The transport is named because HANDOFF.md section 1
+                        measured host dfx deleting the replica's state; a record
+                        without it reads as an instruction.
 
                         account_identifier() on the first returns the second
                         exactly. The pair is pinned in

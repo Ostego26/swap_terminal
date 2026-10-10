@@ -173,7 +173,8 @@
 # /root/.local/share/dfx -- now on the volume -- or somewhere else inside the
 # container. NO replica is reachable from the container these lines were written
 # in, so this was not measured, and the 2026-10-07 key measurement cannot answer
-# it because it predates the volume by about three hours. A reason to believe the
+# it because it predates the volume by four hours and forty minutes (15:58 UTC
+# against 20:38 UTC, both on 2026-10-07). A reason to believe the
 # key now survives is not the same as having checked.
 #
 # SO: `docker compose stop` IS THE VERB THIS REPOSITORY RECOMMENDS, and
@@ -183,11 +184,23 @@
 # answers a question nobody asked -- "is the container gone" -- where the question
 # an operator means is "is anything of this stack running".
 #
-# THE ONE COMMAND THAT SETTLES IT, read-only, on a host with the replica up:
+# THE ONE COMMAND THAT SETTLES IT, read-only, on a host with the replica up.
 #
-#     dfx canister call threshold_custody public_key '(vec {})'   # note the hex
+# IT GOES THROUGH `docker compose exec`, NOT HOST dfx, and that is not a style
+# preference. HANDOFF.md section 1: host dfx run with icp/dfx.json in scope saw a
+# network directory it had not created, judged it incohesive and moved to DELETE
+# icp/.dfx/local -- the replica's state, including the ledger holding the desk's
+# LICP. Only a permission error stopped it. `icp-replica` is the COMPOSE SERVICE
+# name; the container is `swap-icp-replica` and `docker compose exec` rejects that.
+#
+#     docker compose exec -T icp-replica dfx canister call threshold_custody public_key '(record { curve = variant { secp256k1_ecdsa }; derivation_path = vec {} })'
 #     docker compose down && docker compose up -d
-#     dfx canister call threshold_custody public_key '(vec {})'   # same hex?
+#     docker compose exec -T icp-replica dfx canister call threshold_custody public_key '(record { curve = variant { secp256k1_ecdsa }; derivation_path = vec {} })'
+#
+# THE ARGUMENT IS A RECORD AND WAS A BARE `(vec {})` until 2026-10-10. Increment
+# 1b gave threshold_custody three curves, so the curve is named per call. The old
+# form now fails a candid decode -- which is the safe direction, and is also a
+# check that reads as a broken replica rather than as a stale command.
 #
 # Same hex means the key is on the volume and `down` is survivable. A different
 # hex means it is not, and any address derived from that key is already

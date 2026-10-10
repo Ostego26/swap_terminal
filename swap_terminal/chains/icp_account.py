@@ -57,8 +57,16 @@ project real investigations:
   account identifier MEASURED against dfx, 2026-10-06, on the local replica in
                      docker-compose.icp.yml:
 
-                         dfx identity get-principal  ->  a 29-byte principal
-                         dfx ledger account-id       ->  a0263999...6c12042
+                         docker compose exec -T icp-replica dfx identity get-principal
+                             ->  a 29-byte principal
+                         docker compose exec -T icp-replica dfx ledger account-id
+                             ->  a0263999...6c12042
+
+                     THROUGH `docker compose exec`, NEVER HOST dfx: HANDOFF.md
+                     section 1 measured host dfx moving to DELETE icp/.dfx/local,
+                     the replica's state. The commands as originally recorded here
+                     omitted the transport, which made a measurement record read
+                     as a pasteable instruction.
 
                      account_identifier() on the first returns the second
                      exactly. The pair is pinned in
