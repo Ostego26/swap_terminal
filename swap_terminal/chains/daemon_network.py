@@ -405,3 +405,65 @@ def sync_verdict(info: object) -> dict:
         ),
         **numbers,
     }
+
+
+#: WHETHER A DAEMON MAY BE TOUCHED AT ALL, as three named outcomes rather than a bool.
+#:
+#: CHAIN_TEST_NETWORKS above is the allowlist and four call sites each test membership
+#: of it by hand -- chain_balances.py:321, fund_desk.py:499, atomic_swap_xrp.py:1788,
+#: and as of 2026-10-10 a fifth that creates wallets on the operator's testnet
+#: daemons. One rule, five spellings, which is rule 8's shape; and two of the existing
+#: four COLLAPSE the distinction below, which is the part that has already cost
+#: something.
+#:
+#: THE DISTINCTION IS WHY THIS IS NOT A PREDICATE. "the daemon would not say" and "the
+#: daemon said a network that is not allowed" are different facts with different
+#: remedies -- the first is an RPC or credential problem, the second is a daemon
+#: pointed at the wrong chain -- and only fund_desk.py told them apart. The table's
+#: own comment records what collapsing them cost: fund_desk's refusal reads "*** THIS
+#: IS A MAINNET DAEMON ***", and when the operator's BTC node came up on `testnet4`
+#: (a value that was in no table) that sentence was a confidently wrong claim about a
+#: testnet node. Fail-closed worked; the message did not.
+NETWORK_IS_TEST = "network_is_test"
+NETWORK_NOT_ESTABLISHED = "network_not_established"
+NETWORK_NOT_ALLOWED = "network_not_allowed"
+
+#: Every outcome, so a reader and a test have one list rather than three literals.
+TEST_NETWORK_VERDICTS = (NETWORK_IS_TEST, NETWORK_NOT_ESTABLISHED, NETWORK_NOT_ALLOWED)
+
+
+def test_network_verdict(asset: str, network: str) -> str:
+    """May this daemon be touched? Three outcomes, and the two refusals are different.
+
+    Pure: takes the asset and whatever chain_network() returned, and reads
+    CHAIN_TEST_NETWORKS. No adapter, no socket.
+
+      NETWORK_IS_TEST         the daemon named a network on this chain's allowlist.
+      NETWORK_NOT_ESTABLISHED it did not name one at all -- chain_network() returned
+                              its UNKNOWN_PREFIX sentinel. An RPC or credential
+                              problem, not a wrong chain.
+      NETWORK_NOT_ALLOWED     it named a network, and that network is not allowed.
+
+    FAILS CLOSED, and the ORDER is what makes that true: NOT_ESTABLISHED is checked
+    before membership, so the sentinel string can never be mistaken for a network name
+    that happens not to be in a set. Only NETWORK_IS_TEST is permission; both others
+    refuse, and a caller written `if verdict != NETWORK_IS_TEST: refuse` is correct
+    without knowing which.
+
+    NOT_ALLOWED RATHER THAN "IS MAINNET", and that is the over-claim this exists to
+    stop repeating. For BTC the allowlist already covers signet, so a named-but-refused
+    BTC network is in fact `main` -- but for LTC it is not: Litecoin Core 0.21 has
+    signet too and `signet` is deliberately absent from LTC's row, so a refused LTC
+    network may be signet rather than mainnet. A verdict that said MAINNET would be
+    wrong on exactly the daemon a careful operator set up. Callers that want to say
+    "mainnet" may; they have to look at the network to earn it.
+
+    AN UNKNOWN ASSET REFUSES rather than raising. `CHAIN_TEST_NETWORKS[asset]` on a
+    chain with no row is a KeyError three frames inside whatever was asking, and the
+    honest answer for "I have no allowlist for this chain" is not permission.
+    """
+    if not is_named(network):
+        return NETWORK_NOT_ESTABLISHED
+    if network in CHAIN_TEST_NETWORKS.get(asset, frozenset()):
+        return NETWORK_IS_TEST
+    return NETWORK_NOT_ALLOWED

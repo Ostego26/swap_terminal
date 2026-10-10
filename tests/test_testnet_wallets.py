@@ -1,0 +1,345 @@
+"""testnet_wallets.py: it may create a wallet, and it may NOT reach a mainnet daemon.
+
+Role: tests (seeded adapters; no daemon, no socket, no network)
+Reads: testnet_wallets.py, through conftest.root_entry_point()
+Writes: nothing
+Can move funds: no. Every adapter here is a stub that raises on a method the
+        tool is not supposed to call.
+Mainnet-safe: yes
+Live-safe: yes
+
+WHAT THESE EXIST TO HOLD. The tool's one write is `createwallet`, and it runs
+against the operator's OWN daemons -- not a harness datadir this tree created. So
+the property worth pinning is not "it makes a wallet"; it is WHICH DAEMONS IT
+REFUSES, and that nothing is written to those. Every refusal test asserts on the
+CALLS THE STUB RECEIVED, not on the message: a message is what a refactor keeps
+and a call list is what it breaks.
+
+Per BEHAVIORAL_VERIFICATION_PRINCIPLE: seed the rows the real code reads, run the
+real code, assert on what came out. Nothing here paraphrases the tool's logic.
+"""
+
+from __future__ import annotations
+
+import io
+
+import pytest
+import valid_addresses
+from chains.base import RPCError
+from conftest import root_entry_point
+from regtest.console import Console
+
+tw = root_entry_point("testnet_wallets.py")
+
+
+class _Daemon:
+    """An adapter that answers a seeded script and REMEMBERS what it was asked.
+
+    `url` is present because the tool reads it for the WalletSite's `where`, and a
+    stub missing it would have the tool fall back to a generic phrase -- which is
+    the shape of bug this file is about, so the stub carries the real attribute.
+    """
+
+    url = "http://127.0.0.1:18443/wallet/desk_hot"
+
+    def __init__(self, answers: dict, *, wallets: list[str] | None = None):
+        self.answers = answers
+        self.wallets = [] if wallets is None else list(wallets)
+        self.asked: list[tuple] = []
+
+    def call(self, method, *params):
+        self.asked.append((method, *params))
+        if method == "listwallets":
+            return list(self.wallets)
+        if method == "createwallet":
+            self.wallets.append(params[0])
+            return {"name": params[0]}
+        if method == "loadwallet":
+            if params[0] in self.answers.get("_on_disk", []):
+                self.wallets.append(params[0])
+                return {"name": params[0]}
+            # RPCError SPECIFICALLY, because that is what ensure_wallet_on() catches to
+            # decide "not on disk, so create it". A stub raising anything else -- the
+            # first version of this raised RuntimeError -- escapes that handler and the
+            # test fails for a reason unrelated to its claim, which is the shape this
+            # repository keeps rediscovering.
+            raise RPCError(f"wallet {params[0]} not found")
+        if method in self.answers:
+            return self.answers[method]
+        raise AssertionError(f"{method} was asked and this stub has no answer for it")
+
+    def methods(self) -> list[str]:
+        return [call[0] for call in self.asked]
+
+
+def _run(monkeypatch, asset, answers, *, wallet="desk_hot", wallets=None):
+    """Drive prepare_chain() for one chain against a seeded daemon.
+
+    Config.RPC is patched rather than the environment, because that is the mapping
+    the tool reads (wallet_name_for) and the one registry.build_adapters() reads.
+    """
+    daemon = _Daemon(answers, wallets=wallets)
+    monkeypatch.setattr(tw, "build_adapters", lambda rpc: {asset: daemon})
+    monkeypatch.setattr(tw.Config, "RPC", {asset: {"wallet": wallet}}, raising=False)
+    stream = io.StringIO()
+    console = Console(1, stream=stream)
+    row = tw.prepare_chain(console, asset)
+    return daemon, row, stream.getvalue()
+
+
+_HEALTHY_BTC = {
+    "getblockchaininfo": {"chain": "testnet4", "blocks": 100, "headers": 100,
+                          "initialblockdownload": False},
+    "getwalletinfo": {"descriptors": True, "balance": 0},
+    # DERIVED, NOT TYPED. tests/test_address_literals_are_valid.py holds a CEILING on
+    # address-shaped literals in the tree and I pushed it from 60 to 64 writing this
+    # file; its own message says what to do instead -- "Use tests/valid_addresses.py
+    # rather than writing one -- a derived address cannot be mistyped and says what it
+    # is for". One of the four I added was `tltc1qexampleaddress...`, which is not a
+    # valid bech32 string at all, so the sibling test that DECODES every literal caught
+    # it too. Both were real: a hand-typed address in a test about address shapes is
+    # the one place a typo is invisible.
+    "getnewaddress": valid_addresses.BTC_PARTICIPANT,
+}
+
+
+# ---------------------------------------------------------------------------
+# THE REFUSALS. Each asserts createwallet was NOT called.
+# ---------------------------------------------------------------------------
+
+
+def test_a_MAINNET_daemon_is_refused_and_NOTHING_is_created(monkeypatch):
+    """The whole point of the file. Asserted on the call list, not the sentence.
+
+    A refusal that still created the wallet would pass any message assertion and
+    would have put a wallet in the operator's real Bitcoin wallet directory. The
+    ordering that prevents it -- network before write -- is prepare_chain()'s, and
+    this is what holds it there.
+    """
+    daemon, row, out = _run(monkeypatch, "BTC", {"getblockchaininfo": {"chain": "main"}})
+    assert row["ok"] is False
+    assert "createwallet" not in daemon.methods(), "a wallet was created on a MAINNET daemon"
+    assert "listwallets" not in daemon.methods(), "it did not even ask about wallets, which is right"
+    assert "not on this chain's allowlist" in out
+    assert "mainnet daemon" not in out.lower(), (
+        "it must not CLAIM mainnet -- for LTC a refused network may be signet, and that "
+        "confidently-wrong claim is the defect CHAIN_TEST_NETWORKS' comment records"
+    )
+
+
+def test_an_UNREADABLE_network_gets_the_CREDENTIAL_sentence_not_the_wrong_chain_one(monkeypatch):
+    """Two refusals, two remedies. Collapsing them sends the operator to the wrong place.
+
+    A daemon that will not say which network it is on is almost always a 401 or a
+    closed port -- an RPC problem. A daemon that names `main` is pointed at the
+    wrong chain. The first sentence says to check credentials; the second says the
+    daemon is on a chain this tool will not touch.
+    """
+    daemon, row, out = _run(monkeypatch, "BTC", {"getblockchaininfo": {}})
+    assert row["ok"] is False and "createwallet" not in daemon.methods()
+    assert "did not name its network" in out
+    assert "401" in out, "and it names the failure a 401 actually produces"
+    assert "not on this chain's allowlist" not in out, "that is the OTHER refusal"
+
+
+def test_LTC_reporting_testnet4_is_REFUSED_because_that_is_the_near_match(monkeypatch):
+    """Litecoin's DATADIR is named testnet4; its chain is not. The trap, pinned.
+
+    CHAIN_TEST_NETWORKS deliberately withholds `testnet4` from LTC: Litecoin Core
+    0.21 predates the value entirely and reports `test`. A daemon answering
+    `testnet4` for LTC is therefore not a Litecoin testnet node, and the allowlist
+    is what stands between a command and a mainnet wallet.
+    """
+    daemon, row, _out = _run(monkeypatch, "LTC", {"getblockchaininfo": {"chain": "testnet4"}})
+    assert row["ok"] is False and "createwallet" not in daemon.methods()
+
+
+def test_an_UNSET_wallet_variable_refuses_rather_than_inventing_a_FIFTH_name(monkeypatch):
+    """A funded wallet the payout path cannot read is worse than no wallet.
+
+    config.py defaults BTC_RPC_WALLET to "", and four wallet names already exist in
+    this tree. Picking one here would make a fifth AND make a wallet the
+    application does not look at -- which looks finished and is not.
+    """
+    daemon, row, out = _run(monkeypatch, "BTC", _HEALTHY_BTC, wallet="")
+    assert row["ok"] is False and "createwallet" not in daemon.methods()
+    assert "BTC_RPC_WALLET" in out, "the variable is named, because that is the action"
+    assert "FIFTH" in out
+
+
+def test_an_unconfigured_chain_says_WHY_and_asks_no_daemon(monkeypatch):
+    """No adapter means no calls. The reason comes from registry.why_unconfigured()."""
+    monkeypatch.setattr(tw, "build_adapters", lambda rpc: {})
+    monkeypatch.setattr(tw.Config, "RPC", {}, raising=False)
+    stream = io.StringIO()
+    row = tw.prepare_chain(Console(1, stream=stream), "BTC")
+    out = stream.getvalue()
+    assert row["ok"] is False and row["why"] == "not configured"
+    assert "NO CONF FALLBACK HERE" in out, (
+        "and it says so, because every other direct driver in this tree DOES fall back to a "
+        "conf -- an operator who configured a daemon that way has to be told why this one "
+        "refuses rather than left to think it is broken"
+    )
+
+
+# ---------------------------------------------------------------------------
+# THE PERMITTED PATH
+# ---------------------------------------------------------------------------
+
+
+def test_a_TESTNET_daemon_gets_its_wallet_and_an_address(monkeypatch):
+    """The happy path, and the kind of wallet is REPORTED rather than chosen."""
+    daemon, row, out = _run(monkeypatch, "BTC", _HEALTHY_BTC)
+    assert row["ok"] is True
+    assert "createwallet" in daemon.methods() and ("createwallet", "desk_hot") in daemon.asked
+    assert row["wallet"] == "desk_hot"
+    assert row["address"] == valid_addresses.BTC_PARTICIPANT
+    assert row["address"].startswith("tb1")
+    assert row["kind"] == "descriptor"
+    assert "REPORTED, not chosen" in out, "it must not read as a choice this tool made"
+
+
+def test_an_EXISTING_wallet_is_loaded_and_not_recreated(monkeypatch):
+    """Idempotent by construction: a second run must not try to create it again.
+
+    `createwallet` on an existing name is an error, and an error here would read as
+    "the tool is broken" on the most ordinary second run there is.
+    """
+    daemon, row, _out = _run(monkeypatch, "BTC", _HEALTHY_BTC, wallets=["desk_hot"])
+    assert row["ok"] is True
+    assert "createwallet" not in daemon.methods(), "an already-loaded wallet was recreated"
+
+
+def test_a_CORRECT_address_PASSES_the_shape_check(monkeypatch):
+    """The positive half, and its absence let a mutation live.
+
+    The wrong-prefix test below asserts a bad address FAILS. On its own that is
+    satisfied by a check that fails EVERYTHING -- which is exactly what
+    `address.startswith(prefix + "1")` does, since no address starts with "tb11",
+    and that was the first version of this code. The mutation survived the whole
+    suite. A negative case with no positive case is a test that cannot tell a
+    working check from a broken one.
+    """
+    _daemon, row, out = _run(monkeypatch, "BTC", _HEALTHY_BTC)
+    assert row["ok"] is True, "a correct tb1 address on a testnet4 daemon must pass"
+    assert "address prefix" in out and "OK" in out
+    assert "FAIL" not in out
+
+
+def test_an_address_with_the_WRONG_PREFIX_fails_the_shape_check(monkeypatch):
+    """One base58 byte is six networks. The bech32 HRP is the only thing that tells them apart.
+
+    `0x6F` is shared by BTC testnet, regtest and signet, LTC testnet and regtest,
+    and GRC testnet. So the realistic error -- an address from the OLD regtest
+    datadir pasted into a testnet4 faucet -- is invisible in base58 and obvious in
+    bech32. A `bcrt1...` from a daemon claiming testnet4 is that error.
+    """
+    answers = {**_HEALTHY_BTC, "getnewaddress": valid_addresses.BTC_REGTEST_DEPOSIT}
+    _daemon, row, out = _run(monkeypatch, "BTC", answers)
+    assert "address prefix" in out
+    assert "FAIL" in out, "a regtest address on a testnet4 daemon has to be a failure on screen"
+    assert row["ok"] is False, (
+        "and the row must be refused, not merely annotated -- a mismatched address printed "
+        "under 'PASTE THESE INTO A FAUCET' is a thrown-away faucet payment"
+    )
+    assert "REFUSING to offer this address" in out
+    assert "The wallet WAS created" in out, (
+        "and it says what DID happen, so the operator is not left wondering whether to re-run"
+    )
+
+
+def test_a_SYNCING_daemon_says_PAY_NOW_SEE_LATER_rather_than_refusing(monkeypatch):
+    """33-54 hours of sync must not block the faucet step, and the operator must know why.
+
+    A faucet payment lands on the chain whether or not this node has caught up. The
+    only consequence of an unsynced node is that it will not REPORT the payment
+    yet -- so refusing here would waste two days for nothing, and saying nothing
+    would have the operator think the faucet failed.
+    """
+    answers = {**_HEALTHY_BTC,
+               "getblockchaininfo": {"chain": "testnet4", "blocks": 71056, "headers": 155858,
+                                     "initialblockdownload": True}}
+    _daemon, row, out = _run(monkeypatch, "BTC", answers)
+    assert row["ok"] is True and row["synced"] is False
+    assert "STILL SYNCING" in out
+    assert "SAFE to make now" in out and "will not" in out
+
+
+# ---------------------------------------------------------------------------
+# THE FILE'S OWN CLAIMS ABOUT ITSELF
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("forbidden", [
+    "sendtoaddress", "sendrawtransaction", "sendmany", "signrawtransactionwithwallet",
+    "dumpprivkey", "dumpwallet", "importprivkey", "walletpassphrase", "encryptwallet",
+])
+def test_the_tool_has_NO_send_path_and_touches_NO_key(forbidden):
+    """The header says "Can move funds: NO" and this is what makes that checkable.
+
+    A claim in a module header is read by whoever is deciding whether to run the
+    thing against a live daemon, which is the worst possible place for a sentence
+    nobody verifies. `walletpassphrase` and `encryptwallet` are in the list for the
+    repository's standing rule rather than for funds: a passphrase must never
+    appear in a command this repo emits, and the way that rule breaks is a tool
+    helpfully offering to encrypt the wallet it just made.
+    """
+    source = tw.__file__
+    assert source
+    body = "\n".join(
+        line for line in open(source, encoding="utf-8").read().splitlines()  # noqa: SIM115, PTH123 -- checked: one read of one file in a test; a with-block or Path.read_text here buys nothing and the line is shorter than the noqa
+        if not line.lstrip().startswith("#")
+    )
+    # The docstring NAMES several of these on purpose, which is the point of the
+    # header. So the assertion is on the CODE: the quoted names live in the
+    # docstring, and a real call would be `adapter.call("sendtoaddress", ...)`.
+    assert f'"{forbidden}"' not in body.split('"""')[2], (
+        f"testnet_wallets.py calls {forbidden!r} outside its docstring, and its header says it "
+        f"has no send path and touches no key"
+    )
+
+
+def test_every_faucet_carries_its_EVIDENCE_and_not_just_a_url():
+    """Rule 17 as a structure: the claim and how it is known travel together.
+
+    None of these was tested from this container -- it cannot fill in a captcha.
+    A bare list of confident-looking URLs is how an operator spends twenty minutes
+    on three dead faucets, so the caveat is attached to each entry rather than
+    written once in a paragraph above them.
+    """
+    assert tw.FAUCETS, "an empty table would make the closing block print nothing useful"
+    for asset, entries in tw.FAUCETS.items():
+        assert asset in tw.CHAINS
+        for url, note in entries:
+            assert url.startswith("https://"), f"{asset}: {url!r} is not an https URL"
+            assert note.strip(), f"{asset}: {url} has no note saying what it claims to give"
+    assert "NOT tested" in tw.SEARCHED_NOT_TESTED
+
+
+def test_the_closing_block_prints_SOMETHING_when_every_chain_refused():
+    """A blank tail is ambiguous between "all done" and "it died" (rule 14).
+
+    This is the run an operator is most likely to have: nothing configured yet.
+    """
+    stream = io.StringIO()
+    tw.report(Console(1, stream=stream), [{"asset": "BTC", "ok": False, "why": "not configured"}])
+    out = stream.getvalue()
+    assert "NO CHAIN IS READY" in out
+    assert "BTC" in out and "not configured" in out, "and it says which chain and why"
+
+
+def test_one_chain_FAILING_does_not_cost_the_other_its_address():
+    """The address for the chain that worked is the whole product of a run.
+
+    Losing it because the other daemon was unreachable would make the operator run
+    the tool twice and read the first answer off the floor.
+    """
+    stream = io.StringIO()
+    tw.report(Console(2, stream=stream), [
+        {"asset": "BTC", "ok": False, "why": "OSError"},
+        {"asset": "LTC", "ok": True, "wallet": "desk_hot", "network": "test",
+         "address": valid_addresses.LTC_PARTICIPANT, "kind": "legacy", "synced": True},
+    ])
+    out = stream.getvalue()
+    assert valid_addresses.LTC_PARTICIPANT in out
+    assert "cypherfaucet.com/ltc-testnet" in out, "with a faucet to paste it into"

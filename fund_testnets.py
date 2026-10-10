@@ -28,16 +28,27 @@ WHY EACH CHAIN GETS COINS A DIFFERENT WAY
                rotation on 2026-09-25, so this step only CONFIRMS it rather
                than asking for more.
 
-    ORPHANED FRAGMENT, MARKED RATHER THAN GUESSED AT (2026-10-09). The two lines
-    below were spliced into the SOL entry by an edit and start mid-clause, so as
-    written they read as if Solana needs a chain sync. It does not -- the SOL
-    step above is read-only and needs nothing. The measurement is real and is
-    load-bearing for a decision an operator makes (whether to move a daemon from
-    regtest to testnet), so it is NOT deleted; but which chain it measured cannot
-    be recovered from this text, and the BTC/LTC entry's "testnet3 would mean a
-    faucet AND a chain download" is the likeliest subject rather than a known one.
-    Whoever knows should attribute it and move it (rule 17: a reason to believe is
-    not a reading).
+    FRAGMENT ATTRIBUTED AND ITS DECISION MADE, 2026-10-10. The two lines below
+    were spliced into the SOL entry by an edit on 2026-10-09 and start mid-clause,
+    so as written they read as if Solana needs a chain sync. It does not -- the SOL
+    step above is read-only. The note left here said the subject "cannot be
+    recovered from this text" and that the BTC/LTC entry was "the likeliest subject
+    rather than a known one". It is now known, from the operator themselves:
+
+        "it's okay if it takes 33-54 hours at this point to do a blockchain sync, bro"
+
+    Same figure, same hardware, and said while moving BTC and LTC off regtest --
+    so the fragment is about THOSE TWO, and the decision it asked for ("It needs a
+    decision, not a script") has been taken: both daemons are on full testnet as of
+    2026-10-10. The fragment is left in place rather than moved, because the SOL
+    entry's own correction above is what tells a reader why it looked like it was
+    about Solana, and deleting the evidence of a defect is how the next person
+    re-creates it.
+
+    THE SCRIPT IT SAID IT DID NOT NEED IS testnet_wallets.py, at the root, and the
+    distinction holds: that file cannot MINT and does not try to. It prepares the
+    wallet and the address and names the faucets, because on testnet the coins come
+    from a person filling in a form. BTC and LTC stay regtest-only HERE.
 
         "... see a deposit until it has synced, and that was MEASURED at
         33-54 hours on this hardware. It needs a decision, not a script."

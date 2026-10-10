@@ -180,14 +180,55 @@ class Console:
         """The current step's elapsed time, in microfortnights with seconds."""
         return format_duration(time.monotonic() - self._step_started)
 
-    def check(self, label: str, got: object, expected: object, outcome: str) -> str:
+    def check(self, label: str, got: object, expected: object, outcome: object) -> str:
         """Print one assertion: what it got, what it wanted, how it went.
 
         Returns the outcome so a caller can record it in the same expression.
         Every call increments exactly one tally, and a FAIL is also appended to
         `failures` so the summary at the end can name them without the operator
         scrolling back through several thousand lines of mining output.
+
+        `outcome: object` RATHER THAN `str`, AND THE REFUSAL BELOW IS WHY. This is the
+        MIRROR of step_console.Console.check's refusal, added 2026-10-10 when the
+        crossing finally happened in this direction. That module's header predicted it
+        exactly -- "a reader moving a line between a `from regtest.console import FAIL,
+        OK, Console` file (11 precedents) and a `from step_console import Console`
+        file" -- and C16 hardened only the half that had been crossed.
+
+        WHAT A BOOL DID HERE, MEASURED before this guard existed:
+
+            Console(1).check("a bool failure", "got", "want", False)
+              counts   {'OK': 0, 'FAIL': 0, 'XFAIL': 0, 'SKIP': 0, False: 1}
+              failures []
+              printed  "0     a bool failure: got=... expected=..."
+
+        counts[FAIL] stays ZERO, `failures` stays EMPTY, and a phantom `False` key is
+        added to the tally -- so a failed check is invisible to summary() and to every
+        exit code read off counts[FAIL]. That is C16's incident ("a FAIL produced a
+        clean exit, silently") in the opposite direction, and it is WORSE here, because
+        step_console at least printed the wrong word loudly while this prints `0`.
+
+        MEASURED 2026-10-10 ACROSS THE TREE: 5 files import step_console and pass 68
+        bool outcomes and 0 verdict strings; 8 files import this one and pass 61 verdict
+        strings and 0 bools. Both populations were already clean -- this guard fixes NO
+        existing call. The first violation was testnet_wallets.py, written the same day
+        by the author of this comment, and its own test caught it. That is the argument
+        for a guard rather than a note: the trap is for the NEXT caller, and the next
+        caller arrives by copy-paste rather than by writing a wrong type on purpose.
+
+        `self.counts.get(outcome, 0) + 1` IS WHAT MADE IT SILENT and is deliberately
+        left alone. The `.get` is correct for a verdict this tally has not seen yet;
+        what was missing is that an outcome which is not a verdict never reaches it.
         """
+        if outcome not in self.counts:
+            raise TypeError(
+                f"check({label!r}) was given outcome={outcome!r} ({type(outcome).__name__}), which "
+                f"is not one of {sorted(self.counts)}. If that came from step_console.py, its "
+                f"Console takes a BOOL in this position -- a different class with the same name. A "
+                f"bool here would print '0' or '1', add a phantom key to the tally, leave FAIL at 0 "
+                f"and append nothing to failures, so a failed check would be invisible to the "
+                f"summary and to the exit code."
+            )
         self.counts[outcome] = self.counts.get(outcome, 0) + 1
         line = f"{_INDENT}{outcome:<5} {label}: got={value(got)}  expected={value(expected)}  [{self.elapsed()}]"
         self._write(line)

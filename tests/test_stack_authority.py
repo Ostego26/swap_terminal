@@ -3455,7 +3455,16 @@ def test_a_DRIFTED_subnet_names_both_and_says_the_symptom_is_SILENT():
     )
     blob = " ".join(detail)
     assert "NOT CONFIGURED" in blob and "silent" in blob
-    assert "down" in blob and "up" in blob, "and the remedy, which recreates the network"
+    assert "docker compose" in blob and "down" in blob, "and the remedy, which removes the network"
+    assert "swapterm down` IS NOT ENOUGH" in blob, (
+        "the first version of this remedy said `down` then `up`, and cmd_down() runs "
+        "`docker compose stop` -- which leaves the containers attached, so the network cannot "
+        "be removed and the subnet cannot change. A remedy that does not work is worse than none"
+    )
+    assert "replica state" in blob, (
+        "and it points at the line that says whether a real `docker compose down` is safe here, "
+        "because one took the ledger canister on 2026-10-07"
+    )
 
 
 def test_NO_NETWORK_YET_is_a_result_and_not_a_problem():

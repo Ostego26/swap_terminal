@@ -23,6 +23,7 @@ credentials, no port, and reports "unconfigured" for a daemon that is running.
 
 from __future__ import annotations
 
+import ast
 import pathlib
 
 import pytest
@@ -245,6 +246,23 @@ SERVICE_SIDE = frozenset({
     # is refused rather than connected to, and tests/test_fund_desk.py asserts no
     # adapter is even constructed for it.
     "fund_desk.py",
+    # testnet_wallets.py, added 2026-10-10. SERVICE SIDE, and the register is what
+    # decided it -- the file was written with a conf fallback, copied from
+    # chain_balances.py, and this test refused to let it land without a side. Asking
+    # the question changed the answer.
+    #
+    # IT CREATES THE WALLET THE PAYOUT WORKER SPENDS FROM. That is the same test
+    # fund_desk.py's entry above applies: a conf fallback resolving some other daemon
+    # would create `desk_hot` on a node the service never talks to, print "created
+    # wallet 'desk_hot'", and leave the brokered terminal with no wallet at all --
+    # with every screen saying the step was done. It does not send and does not
+    # credit, so it is the mildest entry here; the shape of the failure is identical.
+    #
+    # It also makes the file's own refusals consistent: it already refuses an unset
+    # $ASSET_RPC_WALLET because "a funded wallet the payout path cannot see looks
+    # finished and is not", so honoring a conf-resolved HOST would have been two
+    # answers to one question in one file.
+    "testnet_wallets.py",
     # icp_custody_addresses.py, added 2026-10-06. SERVICE SIDE, and this one is not
     # a judgment call: the file prints two columns, and the right-hand column's
     # entire claim is "this is the address the desk is using RIGHT NOW". It gets it
@@ -456,11 +474,48 @@ def test_EVERY_entry_point_THAT_RESOLVES_A_CHAIN_is_on_one_side_or_the_other():
     )
 
 
+def code_without_prose(path: pathlib.Path) -> str:
+    """One root script's CODE, with every docstring and comment removed.
+
+    BOTH GATES BELOW READ THIS INSTEAD OF THE RAW TEXT, and that is a fix rather than
+    a refinement. They matched the literal string `conf_fallback_settings` anywhere in
+    the file, so:
+
+      the SERVICE_SIDE gate   failed on a file that NAMES the function in a comment
+                              explaining why it deliberately does NOT call it. That
+                              happened 2026-10-10 with testnet_wallets.py, and the
+                              only ways to satisfy it were to call the function (the
+                              thing the gate forbids) or to stop naming it (making the
+                              comment worse for the reader to satisfy a grep).
+      the DIRECT_DRIVERS gate had the mirror hole and has simply not been hit: a
+                              driver that MENTIONED the resolver in a docstring and
+                              never called it would pass, which is the gate asserting
+                              nothing about the behavior it is named for.
+
+    This is C44's lesson applied to a shipped gate: three of my assertions that day
+    were true of prose ADJACENT to their claim rather than of the thing claimed. An
+    `ast.unparse` of the module with docstrings stripped cannot be satisfied or broken
+    by a comment.
+
+    IT CHANGES NOTHING FOR THE EIGHT ENTRIES THAT WERE ALREADY CORRECT, which is
+    checked rather than assumed: a file that both mentions and calls the function would
+    have been failing the SERVICE_SIDE gate already, and none was.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if isinstance(node, ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) \
+                and body and isinstance(body[0], ast.Expr) \
+                and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+            node.body = body[1:] or [ast.Pass()]
+    return ast.unparse(ast.fix_missing_locations(tree))
+
+
 def test_every_DIRECT_DRIVER_uses_the_shared_resolver():
     """The rule the register exists to enforce on the three that must follow it."""
     root = pathlib.Path(__file__).resolve().parent.parent
     for name in sorted(DIRECT_DRIVERS):
-        source = (root / name).read_text()
+        source = code_without_prose(root / name)
         assert "conf_fallback_settings" in source, (
             f"{name} resolves a chain without the shared conf fallback. An operator who configured "
             f"a daemon by conf will be told by one direct driver that it is there and by this one "
@@ -481,7 +536,7 @@ def test_no_SERVICE_SIDE_script_quietly_gained_a_conf_fallback():
     """
     root = pathlib.Path(__file__).resolve().parent.parent
     for name in sorted(SERVICE_SIDE):
-        source = (root / name).read_text()
+        source = code_without_prose(root / name)
         assert "conf_fallback_settings" not in source, (
             f"{name} speaks for the brokered terminal and now resolves daemons from a conf. It has "
             f"to connect to exactly what the service connects to; this is a live-posture change and "
@@ -513,3 +568,37 @@ def test_an_unknown_chain_gets_a_sentence_rather_than_an_exception():
     settings, line = conf_fallback_settings("DOGE")
     assert settings is None
     assert "DOGE_RPC_PORT" in line, line
+
+
+def test_code_without_prose_sees_a_CALL_and_not_a_MENTION(tmp_path):
+    """The helper both gates above depend on, which would otherwise be the untested part.
+
+    Seeded files rather than reasoning, because the whole point of the change is that
+    the previous version could not tell these four apart:
+
+        a docstring naming the resolver, no call      -> must read as ABSENT
+        a comment naming the resolver, no call        -> must read as ABSENT
+        a real call                                   -> must read as PRESENT
+        a real call AND a docstring explaining it     -> must read as PRESENT
+
+    The last row is the one that matters for a DIRECT DRIVER: stripping prose must not
+    lose a call that happens to be documented. The first two are the SERVICE_SIDE hole
+    that failed testnet_wallets.py for explaining an absence.
+    """
+    cases = {
+        "mentions_only.py": '"""A docstring naming conf_fallback_settings and never calling it."""\nx = 1\n',
+        "comment_only.py": "# conf_fallback_settings is deliberately NOT called here\nx = 1\n",
+        "really_calls.py": "from chains.daemon_conf import conf_fallback_settings\ny = conf_fallback_settings('BTC')\n",
+        "calls_and_explains.py": ('"""Explains conf_fallback_settings at length."""\n'
+                                  "from chains.daemon_conf import conf_fallback_settings\n"
+                                  'y = conf_fallback_settings("BTC")\n'),
+    }
+    expected = {"mentions_only.py": False, "comment_only.py": False,
+                "really_calls.py": True, "calls_and_explains.py": True}
+    for name, source in cases.items():
+        (tmp_path / name).write_text(source, encoding="utf-8")
+        present = "conf_fallback_settings" in code_without_prose(tmp_path / name)
+        assert present is expected[name], (
+            f"{name}: code_without_prose() read the resolver as "
+            f"{'present' if present else 'absent'}, expected {expected[name]}"
+        )

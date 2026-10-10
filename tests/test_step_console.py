@@ -36,11 +36,19 @@ code, is the wrong-comment bug (rule 16).
 
 import ast
 import inspect
+import io
 import pathlib
 
 import pytest
 from conftest import TranscriptConsole
+
+# BOTH Consoles, ALIASED, in the one file whose subject is that they are different.
+# `Console` is step_console's -- the one under test -- and the other is deliberately
+# NOT called Console here: two classes of that name in one module is the confusion
+# this file exists to pin, and reproducing it in the test would make the test's own
+# assertions ambiguous about which class they are about.
 from regtest.console import FAIL, OK, SKIP, XFAIL
+from regtest.console import Console as RegtestConsole
 from step_console import Console
 from test_swap_runners_report_completion import RecordingConsole
 
@@ -370,3 +378,65 @@ def test_no_two_console_stubs_in_tests_SHARE_A_BODY():
           "copies of one recorder is how one unchecked `spec.loader` came to be diagnosed "
           "four separate times in this repository."
     )
+
+
+# ---------------------------------------------------------------------------
+# THE MIRROR REFUSAL, 2026-10-10. C16 hardened step_console against a verdict
+# STRING arriving where a bool belongs. The other direction -- a BOOL arriving
+# where a verdict string belongs -- was left open, and this file's own opening
+# paragraph is what predicted it: the two populations are "one copy-paste apart".
+#
+# It finally happened. testnet_wallets.py, written the same day, imported
+# `from regtest.console import FAIL, OK, Console` and then wrote a step_console-style
+# bool into check(). Its own test caught it, which is why this is a guard rather
+# than an incident.
+# ---------------------------------------------------------------------------
+
+
+def test_a_BOOL_is_refused_by_the_OTHER_Console_too():
+    """Symmetry. Both crossings now raise, and before this one silently printed `0`.
+
+    MEASURED before the guard existed, which is why the numbers are in
+    regtest/console.py's docstring rather than paraphrased here: counts[FAIL] stayed
+    0, `failures` stayed empty, a phantom `False` key was added to the tally, and the
+    line read `0` where a verdict belongs. A failed check invisible to summary() and
+    to any exit code read off counts[FAIL].
+    """
+    console = RegtestConsole(1, stream=io.StringIO())
+    for crossed in (True, False, 1, 0, None, "PASS"):
+        with pytest.raises(TypeError) as raised:
+            console.check("crossed", "got", "want", crossed)
+        assert "not one of" in str(raised.value)
+        assert "step_console" in str(raised.value), "and it names where the value came from"
+    assert console.counts == {OK: 0, FAIL: 0, XFAIL: 0, SKIP: 0}, (
+        "no refused call may leave a phantom key in the tally -- that was half the defect"
+    )
+
+
+@pytest.mark.parametrize("verdict", ["OK", "FAIL", "SKIP", "XFAIL"])
+def test_the_four_REAL_verdicts_still_pass_and_still_tally(verdict):
+    """The guard must not have cost the 61 call sites that were already correct.
+
+    Measured 2026-10-10: 8 files import regtest.console and pass 61 verdict strings
+    and zero bools, so this guard fixes NO existing call. That makes "it changed
+    nothing for them" the property to assert -- a guard that broke the correct
+    population would be a worse defect than the one it closes.
+    """
+    console = RegtestConsole(1, stream=io.StringIO())
+    assert console.check("fine", 1, 1, verdict) == verdict, "it returns the outcome, as before"
+    assert console.counts[verdict] == 1
+
+
+def test_a_FAILED_check_is_named_in_failures_which_is_what_a_bool_lost():
+    """The consequence, end to end: the exit code and the named failure both depend on it.
+
+    summary() reads counts and failures. A bool reached neither, so a run with a
+    failed check reported FAIL=0 and "unexpected failures: (none)" -- which is rule
+    13's "treat skipped plus success in the same output as a defect in the output",
+    one layer down in the thing that produces the output.
+    """
+    stream = io.StringIO()
+    console = RegtestConsole(1, stream=stream)
+    console.check("a real failure", 1, 2, FAIL)
+    assert console.counts[FAIL] == 1
+    assert console.failures and "a real failure" in console.failures[0]

@@ -1315,31 +1315,69 @@ def method_exists(node: RegtestRPC, method: str) -> bool:
     return not str(text).lower().startswith("help: unknown command")
 
 
-def ensure_wallet(console: ConsoleLike, config: ChainConfig, wallet_name: str) -> str:
-    """Load the named wallet, creating it if it is not there. Returns the name.
+@dataclass(frozen=True)
+class WalletSite:
+    """Which daemon a wallet is being ensured on, in the words its messages need.
 
-    Three RPCs in a deliberate order, because the daemons disagree about what
-    happens when a wallet is already loaded and neither agrees with the other
-    about descriptor defaults:
+    THREE FIELDS THAT TRAVEL TOGETHER, and a dataclass rather than three parameters
+    for the reason kill_switch.RequestFacts gives about its four: they are not
+    independent. A caller that passed the asset and forgot `where` would produce a
+    refusal naming no daemon, which is the "a check present in the code and absent
+    from the answer" shape rule 14 is about -- and ruff's PLR0913 flagged the
+    six-parameter version, which rule 12 says to fix by extracting rather than by
+    raising the ceiling.
 
-      listwallets   -- if it is already loaded, do nothing. Loading a loaded
-                       wallet is an error on both families, and catching that
-                       error would be indistinguishable from a real failure.
+    `where` is for the listwallets failure: the first wallet call of a run, and where a
+    --disable-wallet build fails. `if_broken` is for a createwallet that refuses
+    because a wallet of that name exists and is damaged -- the regtest harness can name
+    a path under a datadir it created, and a tool talking to the operator's own daemon
+    cannot, so the sentence belongs to the caller.
+    """
+
+    asset: str
+    where: str
+    if_broken: str
+
+
+def ensure_wallet_on(console: ConsoleLike, node, site: WalletSite, wallet_name: str) -> str:
+    """Load the named wallet on ANY adapter, creating it if it is not there. Returns the name.
+
+    EXTRACTED FROM ensure_wallet() ON 2026-10-10, WHEN A SECOND CALLER APPEARED THAT
+    HAS NO ChainConfig. The operator moved BTC and LTC from regtest to testnet, so
+    their wallets have to be created on daemons this harness did not start and whose
+    datadirs it does not own -- reached through the application's own adapter from
+    Config.RPC rather than through regtest.adapter_for(ChainConfig). Copying the
+    three-RPC sequence into the new caller is rule 8's defect with a delay on it; the
+    sequence is the thing worth having once, and only the two STRINGS differ.
+
+    Three RPCs in a deliberate order, because the daemons disagree about what happens
+    when a wallet is already loaded and neither agrees with the other about descriptor
+    defaults:
+
+      listwallets   -- if it is already loaded, do nothing. Loading a loaded wallet is
+                       an error on both families, and catching that error would be
+                       indistinguishable from a real failure.
       loadwallet    -- for a wallet that exists on disk from a previous run.
       createwallet  -- last, because it is the only one that writes.
 
-    `createwallet` is called with the NAME ONLY. Bitcoin Core 28.1 makes a
-    descriptor wallet; Litecoin Core 0.21.4 makes a legacy one. The harness
-    does not ask for either, and does not pass descriptors=false to force a
-    legacy wallet on Core 28 -- that needs -deprecatedrpc=create_bdb there, and
-    branching on a guess about a deprecation token is exactly what this file
-    refuses to do. Which kind was created is REPORTED by probe_capabilities(),
-    and step 3 says what it means for the real client -- which since 2026-09-25
-    reads the same `getwalletinfo.descriptors` field itself and picks
-    importdescriptors or importaddress accordingly, rather than calling a
-    legacy RPC and raising when it is refused.
+    `createwallet` is called with the NAME ONLY. Bitcoin Core 28.1 makes a descriptor
+    wallet; Litecoin Core 0.21.4 makes a legacy one. Nothing here asks for either, and
+    nothing passes descriptors=false to force a legacy wallet on Core 28 -- that needs
+    -deprecatedrpc=create_bdb there, and branching on a guess about a deprecation token
+    is exactly what this file refuses to do. Which kind was created is REPORTED rather
+    than chosen, and the real client reads the same `getwalletinfo.descriptors` field
+    itself and picks importdescriptors or importaddress accordingly.
+
+    NO PASSPHRASE, AND THAT IS NOT AN OMISSION. `createwallet` takes one, and a
+    passphrase passed here would be an argument in this process's argv -- world
+    readable through /proc -- and would then have to be typed again by every later
+    unlock. This repository's standing rule is that a passphrase never appears in a
+    command it emits. An operator who wants an encrypted wallet runs
+    `encryptwallet` themselves, afterwards, and nothing here asks for the result.
+
+`site` carries the only two sentences that differ between the regtest caller and
+    the testnet one -- see WalletSite above.
     """
-    node = adapter_for(config)
     try:
         loaded = node.call("listwallets") or []
     except RPCError as exc:
@@ -1348,30 +1386,47 @@ def ensure_wallet(console: ConsoleLike, config: ChainConfig, wallet_name: str) -
         # support fails exactly here, with a message nobody would connect to
         # wallets if it arrived as an unhandled exception three frames up.
         raise RegtestSetupError(
-            f"{config.asset}: listwallets failed on {config.base_url}: {exc}. "
-            "A daemon built with --disable-wallet has no wallet RPCs at all; otherwise check that the [regtest] "
-            "credentials in the config match ST_REGTEST_"
-            f"{config.asset}_RPC_USER / _RPC_PASSWORD."
+            f"{site.asset}: listwallets failed on {site.where}: {exc}. "
+            "A daemon built with --disable-wallet has no wallet RPCs at all; otherwise check that "
+            f"the credentials this tool is using for {site.asset} match the ones in its conf."
         ) from exc
     if wallet_name in loaded:
-        console.say(f"{config.asset}: wallet {wallet_name!r} is already loaded")
+        console.say(f"{site.asset}: wallet {wallet_name!r} is already loaded")
         return wallet_name
     try:
         node.call("loadwallet", wallet_name)
-        console.say(f"{config.asset}: loaded existing wallet {wallet_name!r} from disk")
+        console.say(f"{site.asset}: loaded existing wallet {wallet_name!r} from disk")
         return wallet_name
     except RPCError as load_error:
-        console.say(f"{config.asset}: loadwallet said {load_error}; creating {wallet_name!r}")
+        console.say(f"{site.asset}: loadwallet said {load_error}; creating {wallet_name!r}")
     try:
         node.call("createwallet", wallet_name)
     except RPCError as create_error:
         raise RegtestSetupError(
-            f"{config.asset}: could not create wallet {wallet_name!r}: {create_error}. "
-            f"If a wallet of that name exists but is broken, remove {config.regtest_dir / 'wallets' / wallet_name} "
-            "or rerun with --wipe."
+            f"{site.asset}: could not create wallet {wallet_name!r}: {create_error}. "
+            f"{site.if_broken}"
         ) from create_error
-    console.say(f"{config.asset}: created wallet {wallet_name!r}")
+    console.say(f"{site.asset}: created wallet {wallet_name!r}")
     return wallet_name
+
+
+def ensure_wallet(console: ConsoleLike, config: ChainConfig, wallet_name: str) -> str:
+    """ensure_wallet_on(), for a regtest ChainConfig this harness owns.
+
+    The sequence and every word of its reasoning are in ensure_wallet_on() above; this
+    supplies the two strings that are specific to a datadir the harness created, and
+    exists so the regtest callers do not each have to know how to build them.
+    """
+    return ensure_wallet_on(
+        console, adapter_for(config),
+        WalletSite(
+            asset=config.asset,
+            where=config.base_url,
+            if_broken=(f"If a wallet of that name exists but is broken, remove "
+                       f"{config.regtest_dir / 'wallets' / wallet_name} or rerun with --wipe."),
+        ),
+        wallet_name,
+    )
 
 
 def read_pid(config: ChainConfig) -> int | None:
