@@ -103,7 +103,7 @@ from chains.gridcoin_wallet_lock import (
 # chains/payout_quantization.py's header for why that module is not
 # chains/coin_amounts.py (a measured import cycle, reproduced in both directions).
 from chains.payout_quantization import quantize_for_chain
-from chains.registry import why_cannot_pay_out
+from chains.registry import why_cannot_pay_out, why_unconfigured
 
 # THE ARMING TOKEN ONLY, AND DELIBERATELY NOT chains/solana_payout_keypair.
 #
@@ -679,6 +679,613 @@ def broadcast_payout(adapter, asset: str, config, address: str, amount: float) -
     )
 
 
+def warn_if_address_unchecked(swap, verdict, destination_asset: str) -> bool:
+    """Say out loud that a payout address was never verified. True if it warned.
+
+    EXTRACTED FROM process_pending_payouts() ON 2026-10-10, UNCHANGED IN BEHAVIOR. The
+    loop was at ruff's complexity ceiling, and adding defer_for_missing_adapter()'s
+    branch pushed it over. Rule 12 says the fix is to extract a decision rather than
+    raise the ceiling -- and this block is a decision ("does the operator have to be
+    told nothing was checked") that had been written as a logging call inside
+    orchestration, which is rule 10's defect in its mildest form. It is now callable
+    with a seeded verdict and asserted on directly.
+
+    `.unchecked` RATHER THAN `state == NO_VALIDATOR`, since 2026-09-27: there are TWO
+    ways to pass without being verified and the second is the one that actually
+    happened. NO_VALIDATOR is "no validator for this chain"; UNDETERMINED is "a
+    validator ran and could not place the address", which is what Litecoin's regtest hrp
+    `rltc` and its second P2SH byte 0x3A both produced on the operator's live regtest
+    swap. Both proceed, for the same reason -- a gap in our tables is not evidence
+    against a customer's address -- and both must say so.
+
+    IT DOES NOT REFUSE, and that is the decision rather than an omission: refusing an
+    address we cannot place would break a working chain, which is worse than the burn
+    this guard prevents. verdict.refuses is the arm that stops a send, and it is
+    checked by the caller immediately above this call.
+    """
+    if not verdict.unchecked:
+        return False
+    logger.warning(
+        "payout for swap %s is going to a %s address that was NOT CHECKED (%s): %s  <- the send is "
+        "proceeding, because refusing an address we cannot place would break a working chain, which "
+        "is worse than the burn this guard prevents.",
+        swap["id"], destination_asset, verdict.state, verdict.why,
+    )
+    return True
+
+
+def defer_for_missing_adapter(db, swap, destination_asset: str, adapters) -> bool:
+    """True if this worker cannot pay `destination_asset`; the swap is deferred, not failed.
+
+    =========================================================================
+    A CREDITED SWAP WAS KILLED WITH failed_reason "'GRC'"
+    =========================================================================
+
+    `adapter = adapters[destination_asset]` used to sit INSIDE the try in
+    process_pending_payouts(), whose handler writes str(exc) into swaps.failed_reason and
+    sets the swap to 'failed'. str(KeyError('GRC')) is "'GRC'" and nothing else.
+
+    MEASURED: one payout_pending BTC->GRC swap seeded into a throwaway database, the real
+    process_pending_payouts() called with adapters={'BTC': ...} and no GRC entry:
+
+        status        = failed
+        failed_reason = "'GRC'"
+        payouts       = asset=GRC amount=1000.0 status=failed txid=None
+        audit         = paying -> failed : Payout failed: 'GRC'
+
+    after the customer's deposit was already irreversible. And 'failed' invites a retry
+    this worker will never make -- nothing re-queues a failed swap.
+
+    =========================================================================
+    WHY DEFER RATHER THAN IMPROVE THE MESSAGE
+    =========================================================================
+
+    A missing adapter is a configuration fault in THIS PROCESS, not a fact about the
+    swap. workers/payout_worker.py builds adapters once from its own environment
+    (payout_worker.py:97), and the web process that created the swap is a different
+    process with a different environment -- on the host, a different shell. So the next
+    worker start, with the variable set, pays this swap correctly. Marking it failed
+    throws that away for a reason that will not be true in five minutes.
+
+    THE TREE ALREADY FIXED THIS ONCE, IN THE OTHER DIRECTION. On 2026-09-26 the
+    operator's browser produced "No swap was created: GRC" because the SERVER lacked
+    GRC_RPC_PORT while the workers had it, and services/swap_service.py gained
+    unconfigured_chains + why_unconfigured for it. create_swap got a gate; the payout
+    worker did not. Same defect, one process over (rule 8) -- which is why this uses
+    chains/registry.why_unconfigured() rather than composing its own sentence.
+
+    =========================================================================
+    WHAT IT WRITES, AND WHAT IT DELIBERATELY DOES NOT
+    =========================================================================
+
+      status -> payout_pending   AND NOT left in 'paying'. claim_swap_for_payout() moved
+                                 it to 'paying' to claim it against the other worker;
+                                 leaving it there would strand it exactly as 'failed'
+                                 did, because nothing re-queues a 'paying' swap either.
+      an audit row               so the deferral is in the swap's own history and on
+                                 /admin, not only in a worker log the operator is not
+                                 reading at the time.
+      failed_reason             UNTOUCHED. The swap has not failed, and a reason on a
+                                 pending swap is read by show_swap.py and the admin page
+                                 as a post-mortem.
+      no payouts row            it returns before the INSERT, so there is nothing for the
+                                 next cycle's partial unique index to collide with.
+      no inventory reservation   it returns before reserve_inventory(), so there is
+                                 nothing to unwind.
+
+    RETURNS A BOOL AND THE CALLER CONTINUES, rather than raising: a raise would land in
+    the same broad handler this exists to keep the swap out of.
+    """
+    if destination_asset in adapters:
+        return False
+
+    why = why_unconfigured(destination_asset)
+    logger.error(
+        "swap %s is credited and payable but this worker has NO %s ADAPTER, so nothing was sent and "
+        "the swap is LEFT IN payout_pending rather than failed: %s  <- a configuration fault in THIS "
+        "process, not a dead swap. The web process that created the swap and this worker have "
+        "separate environments; a worker restarted with the variable set will pay it. Nothing was "
+        "reserved and no payout row was written.",
+        swap["id"], destination_asset, why,
+    )
+    db.execute(
+        "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (swap["id"], swap["status"], "payout_pending",
+         f"Payout deferred: this worker has no {destination_asset} adapter. {why}", utc_now_iso()),
+    )
+    db.execute(
+        "UPDATE swaps SET status = 'payout_pending', updated_at = ? WHERE id = ?",
+        (utc_now_iso(), swap["id"]),
+    )
+    db.commit()
+    return True
+
+
+def address_check_stops_payout(db, swap, verdict, destination_asset: str, amount) -> bool:
+    """True if the payout address refuses the send. False proceeds, having warned if unchecked.
+
+    ONE FUNCTION FOR BOTH ARMS, because they are two answers to one question and were two
+    branches in the loop. The behavior of each is unchanged and lives in the function it
+    already lived in -- refuse_payout_before_sending() and warn_if_address_unchecked() --
+    so this is a junction and holds no decision of its own beyond the order.
+
+    THE ORDER IS LOAD-BEARING AND IS THE ONLY THING THIS ADDS. `.refuses` is checked
+    first: an address that cannot be spent from must stop the send before anything warns
+    about it being unchecked, and a verdict can carry both states' wording without
+    carrying both meanings.
+
+    WHY A REFUSAL IS TERMINAL AND A DEFERRAL IS NOT, which this loop now has both of.
+    refuse_payout_before_sending() marks the swap failed, and that is correct here:
+    'SgrcPayoutAddress' is not a GRC address in any form, and money sent to it would be
+    unspendable by anybody -- no restart, no variable and no retry changes that. The
+    deferral arms below are the opposite case: a missing adapter or an unset passphrase
+    is a fact about THIS PROCESS, true for as long as it takes to export a variable.
+    Marking those failed is what cost a credited swap, and conflating the two categories
+    is the mistake this comment exists to prevent.
+    """
+    if verdict.refuses:
+        refuse_payout_before_sending(db, swap, verdict, destination_asset, amount)
+        return True
+    warn_if_address_unchecked(swap, verdict, destination_asset)
+    return False
+
+
+def halt_on_duplicate_payout_row(db, swap, exc) -> None:
+    """A live payouts row already exists for this swap. Nothing is sent and nobody retries.
+
+    idx_payouts_one_live_per_swap refused a second LIVE row. Reaching this means
+    claim_swap_for_payout()'s UPDATE and the index disagree, which is a state a human has
+    to look at -- so nothing is sent, nothing is retried, and the reason is written where
+    the operator reads it rather than only raised.
+
+    IT IS A HALT AND NOT A DEFERRAL, which is the distinction worth being precise about
+    now that this loop has two deferral arms beside it. defer_for_missing_adapter() and
+    defer_for_locked_wallet() both return the swap to payout_pending, because in both
+    cases NOTHING HAPPENED and the fix is an environment variable. Here something may
+    very well have happened: a live payout row with a txid is a payout that was
+    broadcast, and this swap is one of the two the 2026-09 double-payout measurement
+    produced. So it stays in 'paying', which is the status nothing picks up, and the
+    operator reconciles the existing payout before releasing it.
+
+    EXTRACTED 2026-10-10 FROM AN INLINE except ARM, behavior unchanged -- see the call
+    site's comment for why (ruff's C901, and rule 12's reading of it).
+    """
+    db.rollback()
+    logger.error(
+        "swap %s: a live payout row already exists (%s). NOTHING SENT. The swap is left in 'paying' and "
+        "will not be retried automatically; reconcile the existing payout before releasing it.",
+        swap["id"],
+        exc,
+    )
+    db.execute(
+        "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at) VALUES (?, ?, ?, ?, ?)",
+        (swap["id"], "paying", "paying", f"Payout suppressed by unique index: {exc}", utc_now_iso()),
+    )
+    db.commit()
+
+
+def defer_for_locked_wallet(db, swap, destination_asset: str, amount, exc) -> None:
+    """Put a swap back in payout_pending because this worker has no wallet passphrase.
+
+    =========================================================================
+    PayoutUnlockUnavailable WAS A TYPE CREATED FOR A DISTINCTION NOBODY MADE
+    =========================================================================
+
+    Its own docstring says why it exists: "categorically different from a send that
+    FAILED: no transaction was created, nothing reached any daemon, and the fix is an
+    environment variable rather than an investigation." payout_unlock_context()'s says
+    "the reason is named and nothing is claimed."
+
+    Both were true of the MESSAGE and false of the OUTCOME. Nothing caught the type, so
+    the raise fell through to `except Exception`, which wrote that sentence into
+    swaps.failed_reason and set the swap to 'failed'. The swap died of an unset
+    environment variable -- the exact thing the raise was written to prevent -- and
+    nothing in this tree re-queues a failed swap, which is why
+    services/payout_rescue.py had to exist at all.
+
+    FOUND BY RUNNING THE CODE, NOT BY READING IT (rule 17, and the ordinary way this
+    goes). A test seeding a BTC->GRC payout with a real GRC adapter failed on
+    `assert sent, "a configured chain's payout was deferred"`, and the captured log
+    read `payout FAILED ... GRIDCOIN_WALLET_PASSPHRASE is not set ... <- the swap is
+    now 'failed' and this worker will NOT retry it`. The test was wrong about its own
+    fixture; the code was wrong about the swap.
+
+    =========================================================================
+    WHY DEFERRING IS SAFE HERE AND NOT IN THE BROAD HANDLER
+    =========================================================================
+
+    NOTHING WAS SENT AND THAT IS CERTAIN. payout_unlock_context() raises BEFORE
+    entering the `with`, so there was no unlock, no signature and no broadcast. That is
+    what separates this from the case the broad handler has to live with -- a timeout
+    that may or may not have been relayed -- and conflating the two is what cost the
+    swap. A deferral is only ever correct when "nothing happened" is a fact rather than
+    a hope.
+
+    IT WITHDRAWS THE PAYOUTS ROW, which is not optional. The row is INSERTed and
+    committed BEFORE the send (see process_pending_payouts()' docstring on ordering),
+    so leaving it at 'created' would block the very retry this deferral exists for:
+    idx_payouts_one_live_per_swap refuses a second live row.
+
+    AND IT RELEASES THE RESERVATION, through release_inventory_after_send() despite
+    nothing having been sent -- the name is the only thing wrong with that. It releases
+    the reservation and deliberately does not touch hot_confirmed, which is what drove
+    XRP's column to -59.231412662192405 twice on the operator's host. A reservation
+    taken for a send that did not happen has to come back, or the hot wallet is
+    permanently short on paper.
+
+    BACK TO payout_pending AND NOT LEFT IN 'paying'. claim_swap_for_payout() moved it to
+    'paying'; nothing re-queues a 'paying' swap either, so leaving it there strands it
+    exactly as 'failed' did.
+    """
+    # The payouts row was INSERTed and committed before the send (see this
+    # function's docstring on ordering), so it has to be withdrawn rather than
+    # left at 'created' -- a live row would block the retry this deferral is
+    # for, via idx_payouts_one_live_per_swap.
+    db.execute(
+        "DELETE FROM payouts WHERE swap_id = ? AND status = 'created' AND txid IS NULL",
+        (swap["id"],),
+    )
+    # release_inventory_after_send() DESPITE NOTHING HAVING BEEN SENT, and the
+    # name is the only thing wrong with that. It releases the RESERVATION and
+    # deliberately does not touch hot_confirmed (see its docstring: debiting
+    # hot_confirmed here is what drove XRP's column to -59.231412662192405
+    # twice on the operator's host). A reservation taken for a send that did not
+    # happen has to come back or the hot wallet is permanently short on paper,
+    # which is the same correction services/payout_rescue.py makes by hand.
+    release_inventory_after_send(db, destination_asset, amount)
+    db.execute(
+        "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (swap["id"], "paying", "payout_pending", f"Payout deferred, NOTHING SENT: {exc}",
+         utc_now_iso()),
+    )
+    db.execute(
+        "UPDATE swaps SET status = 'payout_pending', updated_at = ? WHERE id = ?",
+        (utc_now_iso(), swap["id"]),
+    )
+    db.commit()
+    logger.error(
+        "payout DEFERRED for swap %s (%s -> %s, %s %s): %s  <- NOTHING was sent, nothing was "
+        "signed, no inventory is held and the swap is back in payout_pending. This is a "
+        "configuration fault in THIS worker process, not a failed swap: set the variable, "
+        "restart the worker, and it pays. Before 2026-10-10 this marked the swap 'failed' and "
+        "nothing re-queued it.",
+        swap["id"], swap["from_asset"], swap["to_asset"], amount, destination_asset, exc,
+    )
+
+
+def pay_one_swap(db, config, adapters: dict, swap):
+    """Pay ONE credited swap, or return None having recorded why it was not paid.
+
+    =========================================================================
+    EXTRACTED FROM process_pending_payouts()' LOOP BODY ON 2026-10-10
+    =========================================================================
+
+    A PURE MOVE: every line below was already running, in this order, inside
+    `for swap in swaps:`. What changed is that `continue` became `return None` and the
+    single `completed.append(...)` became the return value.
+
+    WHY IT MOVED, AND IT IS NOT HOUSEKEEPING. Two guard arms were added that day -- a
+    missing adapter and a locked wallet, each of which had been killing a CREDITED swap
+    -- and ruff's C901 took the loop function to 11. Rule 12 is explicit about what that
+    code means: "a main() past the ceiling is orchestration that has swallowed decisions,
+    which is rule 10's defect wearing a lint code. The fix is to extract the decision so
+    it can be called with seeded inputs, not to raise the ceiling." Three successive
+    body-only extractions did not move the number, because the BRANCHES are the
+    complexity and the branches all belong to ONE SWAP'S PAYOUT. That is the unit, so
+    that is the function.
+
+    AND IT IS WHY TODAY'S TWO DEFECTS WERE HARD TO SEE. Both -- `adapters[asset]` inside
+    a try whose handler marks the swap failed, and a PayoutUnlockUnavailable that nothing
+    caught -- were reachable only by seeding a whole payout cycle. One swap's payout is
+    now callable with seeded inputs, which is the whole of rule 10's argument: "when the
+    decision is a function at the bottom, it can be called with seeded inputs and
+    asserted on directly. When it is buried three levels up inside orchestration, the
+    only way to test it is to run the whole thing against a real chain, and the only way
+    to find it is to already know it is there."
+
+    RETURNS the swap row when a payout was broadcast and recorded, and None otherwise.
+    None covers every non-send outcome and they are NOT equivalent to one another -- a
+    refusal, a halt and a deferral leave the swap in three different statuses, each
+    written and logged where it happens. The caller counts sends; the swap's own status
+    and audit trail are where the other outcomes live.
+
+    IT DOES NOT COMMIT AT THE END, deliberately: process_pending_payouts() commits once
+    after the loop, exactly as it did when this was the loop body. The commits INSIDE
+    here are the ones that were always here, and each is load-bearing -- the intent to
+    pay is durable before any money can move (see the caller's docstring on ordering).
+
+    CAN MOVE FUNDS: YES. This is the function that calls send_to_address().
+    """
+    destination_asset = swap["to_asset"]
+    # FROM THE DEPOSIT THAT ARRIVED, not the one that was quoted. See
+    # payout_amount() for the arithmetic and why the difference was silent.
+    amount = amount_decided_and_logged(swap)
+
+    if not claim_swap_for_payout(db, swap["id"]):
+        # Another worker owns this payout. Not an error and not a failure:
+        # the swap is being paid by somebody else, right now.
+        logger.info(
+            "swap %s: payout claimed by another worker, skipping (0 sent by this worker for this swap)",
+            swap["id"],
+        )
+        return None
+
+    # THE BURN GUARD. Added 2026-09-27 at the operator's instruction ("make this burn
+    # proof"), and it is the LAST place a bad address can be stopped: the next fund-path
+    # statement in this function is adapter.send_to_address(), after which the money is
+    # on a chain and nobody -- not us, not the customer, not the miner -- can spend it.
+    # Not stolen. Not recoverable. Gone.
+    #
+    # The defect being closed: modules/address_network.is_valid_address() landed in
+    # f805efa and NOTHING ON THE FUND PATH CALLED IT. An undecodable payout address went
+    # straight through to the daemon.
+    #
+    # WHY NOT THAT FUNCTION, AND WHY THIS IS A TABLE LOOKUP INSTEAD. is_valid_address()
+    # understands bech32, Bitcoin-alphabet base58check and XRP-alphabet base58check.
+    # A Solana address is plain base58 of an ed25519 key with no checksum at all --
+    # measured 2026-09-27, every valid SOL fixture in tests/valid_addresses.py returns
+    # False from it. So the one-line version of this guard would refuse every Solana
+    # payout the day a SOL pair is enabled, on a swap whose deposit is ALREADY OURS and
+    # already credited. That is a worse outcome than
+    # the burn: the burn costs one payout, the false refusal costs every customer of
+    # that chain while their money sits in our wallet. modules/address_authority.py is
+    # the per-asset table that avoids it.
+    #
+    # NO_VALIDATOR PASSES THROUGH, LOUDLY, for the same reason: refusing a chain we
+    # cannot check IS that outage, arriving by the door a future chain comes in by.
+    # tests/test_address_authority.py closes the hole at the other end by asserting
+    # every asset this terminal can reach HAS a validator, so the gap fails the suite
+    # instead of either burning money or stranding a payout.
+    #
+    # PLACED AFTER THE CLAIM AND BEFORE reserve_inventory(), which is not arbitrary.
+    # Claiming first means exactly one worker owns this swap, so the refusal is written
+    # once. Refusing before the reserve and before the INSERT means a refused payout
+    # leaves NO reserved-inventory row and NO payouts row in 'created' -- the two
+    # dangling states this function's own docstring is about. The swap lands in 'failed'
+    # by the same route a failed send does (set_swap_status + failed_reason + audit),
+    # because 'payout_pending' would be re-read and re-refused on every cycle forever,
+    # which is rule 14's "did nothing must not look like did work" turned into a loop.
+    verdict = check_address(destination_asset, swap["payout_address"])
+    # ONE CALL FOR BOTH ARMS OF ONE QUESTION, since 2026-10-10. The question is
+    # "what does the address check say about this payout", and it has exactly two
+    # answers that matter here: stop, or proceed having said that nothing was
+    # checked. They were two separate `if`s in this loop, which is two branches for
+    # one decision -- rule 10's shape, and what took ruff's C901 over the ceiling
+    # when the two deferral guards were added below.
+    if address_check_stops_payout(db, swap, verdict, destination_asset, amount):
+        return None
+
+    # EXTRACTED, NOT INLINED, AND ruff's C901 IS WHY -- rule 12: "a main() past the
+    # ceiling is orchestration that has swallowed decisions. The fix is to extract the
+    # decision so it can be called with seeded inputs, not to raise the ceiling." This
+    # loop went to complexity 11 the moment the check was written inline, which is the
+    # linter pointing at the layering rather than at the line count.
+    if defer_for_missing_adapter(db, swap, destination_asset, adapters):
+        return None
+
+    reserve_inventory(db, destination_asset, amount)
+    try:
+        db.execute(
+            "INSERT INTO payouts (swap_id, asset, destination_address, amount, txid, status, created_at, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (swap["id"], destination_asset, swap["payout_address"], amount, None, "created", utc_now_iso(), None),
+        )
+    except sqlite3.IntegrityError as exc:
+        # EXTRACTED for ruff's C901 (rule 12: extract the decision, do not raise the
+        # ceiling). The loop grew two guard arms on 2026-10-10 -- a missing adapter
+        # and a locked wallet -- and this third arm's body is what took it over.
+        halt_on_duplicate_payout_row(db, swap, exc)
+        return None
+
+    # Durable BEFORE the send. See this function's docstring.
+    db.commit()
+
+    try:
+        # LOCK -> UNLOCK past staking -> send -> LOCK -> back to staking, for any
+        # chain in WALLET_UNLOCK_ASSETS; a no-op context for the rest. The
+        # re-lock is in the context manager's `finally`, so it runs even when
+        # the send raises -- a wallet left fully unlocked because a payout failed
+        # is the outcome that must not happen.
+        # GUARANTEED PRESENT by the refusal above, which returns before this try is
+        # entered. Kept as a lookup rather than threaded in, because the membership
+        # check and this line are twenty lines apart and a reader of either needs the
+        # other: a KeyError here would mean `adapters` was mutated mid-loop.
+        adapter = adapters[destination_asset]
+        # ONE NAME CARRYING BOTH FACTS, 2026-10-09, AND NO BEHAVIOR CHANGE.
+        #
+        # This was `recorded = False` plus a `txid` assigned INSIDE the `with` below, and
+        # the two could only be read together by trusting that they were set on adjacent
+        # lines. A checker cannot: it reports `txid` as possibly unbound at both reads in
+        # the `except GridcoinLockError` handler, because the only thing that makes them
+        # safe is `if not recorded: raise` -- a different variable.
+        #
+        # `recorded_txid is None` IS `not recorded`. Both were set at the identical point,
+        # immediately after _record_broadcast() returns, so the branch takes the same arm
+        # for every input. `is None` rather than falsiness, deliberately: a daemon that
+        # ever returned an empty txid must still count as RECORDED here, because the
+        # payouts row and the swap status were already committed and treating that as "not
+        # recorded" would re-raise and mark a delivered payment failed -- which is the
+        # 2026-09-26 defect this whole block exists to prevent, arrived at from the other
+        # direction.
+        #
+        # tests/test_payout_concurrency.py's
+        # test_a_failed_send_whose_restore_also_fails_is_a_payout_failure() is the one that
+        # pins the re-raise arm, and it asserts on the recorded reason specifically so that
+        # a NameError from THIS handler cannot pass as the daemon's own failure.
+        recorded_txid: str | None = None
+        try:
+            with payout_unlock_context(destination_asset, adapter):
+                # broadcast_payout() rather than adapter.send_to_address() since
+                # 2026-10-02: XRP's send needs a source account, a signing seed and
+                # an arming token, and every other chain's needs exactly the two
+                # positional arguments this line used to pass. The dispatch is a
+                # function so it can be tested with a stub adapter and a seeded
+                # environment; see its docstring for the full refusal order.
+                txid = broadcast_payout(adapter, destination_asset, config, swap["payout_address"], amount)
+                # RECORDED INSIDE THE CONTEXT, BEFORE THE RE-LOCK CAN RAISE.
+                #
+                # This block sat AFTER the `with` until 2026-09-26, and the first
+                # real payout this code ever made is what found it. The send
+                # succeeded -- 55.52645238 GRC left the wallet, txid
+                # 3e09dc9cfd7a61da..., confirmed afterwards in the operator's own
+                # listtransactions -- and then the context's restore raised,
+                # because the staking unlock was being sent a timeout of 0 that
+                # Gridcoin refuses. Control jumped from the `with` straight to the
+                # except clause below, `txid` was discarded, and the swap was
+                # marked `failed` with `txid (none)`.
+                #
+                # Money out, no record: the single worst outcome available on this
+                # path, and it was caused by a wallet-housekeeping call that has
+                # nothing to do with whether the payment was delivered.
+                #
+                # The commit is what makes it durable, and `recorded_txid` is set
+                # only after it returns -- so a database failure here is still a
+                # payout failure, while a LOCK failure after it is not.
+                _record_broadcast(db, swap, amount, txid)
+                recorded_txid = txid
+        except GridcoinLockError:
+            # THE PAYOUT IS ALREADY DURABLE. The wallet's lock state is a separate
+            # problem with its own loud message (chains/gridcoin_wallet_lock.py
+            # distinguishes "locked, not staking" from "may still be unlocked"),
+            # and treating it as a payout failure is what mislabeled a delivered
+            # payment. Re-raised when the send never got as far as being recorded,
+            # because then it IS the payout's failure -- `recorded_txid is None` is that
+            # test, and it holds the txid the message below needs for the same reason.
+            if recorded_txid is None:
+                raise
+            logger.exception(
+                "payout for swap %s WAS BROADCAST as %s and is recorded as completed. The wallet's "
+                "lock state could not be restored afterwards -- read the message above and act on "
+                "the wallet, NOT on the swap.",
+                swap["id"],
+                recorded_txid,
+            )
+            db.execute(
+                "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (
+                    swap["id"],
+                    "completed",
+                    "completed",
+                    f"payout broadcast {recorded_txid}; wallet lock restore FAILED afterwards",
+                    utc_now_iso(),
+                ),
+            )
+            db.commit()
+        # THE RETURN VALUE, which was `completed.append(...)` while this was a
+        # loop body. The caller collects it; this function knows one swap.
+        return db.execute("SELECT * FROM swaps WHERE id = ?", (swap["id"],)).fetchone()
+    # Checked, and this broad catch is the right one: `send_to_address`
+    # can fail for transport reasons, daemon reasons, insufficient funds,
+    # or a rejected transaction, and EVERY one of them must land the swap
+    # in `failed` with the reason recorded rather than aborting the loop
+    # and leaving the remaining swaps unprocessed. The caller can tell the
+    # failure from success because the swap's status and failed_reason both
+    # say so -- rule 12's test is met in the return value, not by narrowing.
+    #
+    # What it does NOT establish is whether the transaction was broadcast.
+    # A timeout after the daemon accepted it looks identical to a refusal,
+    # and this marks both 'failed'. That is a real gap on the fund path and
+    # it is named in the enforcement report rather than changed here. Note
+    # what the partial unique index does about it: 'failed' is not a live
+    # status, so a retry CAN insert a new payout row -- which is the right
+    # behavior for a refusal and the wrong one for a timeout that was
+    # actually relayed. Same gap, now with a name.
+    # =====================================================================
+    # A MISSING PASSPHRASE IS A CONFIGURATION FAULT, NOT A DEAD SWAP
+    # =====================================================================
+    #
+    # CAUGHT BEFORE THE BROAD HANDLER BELOW, and before 2026-10-10 it was not --
+    # which made PayoutUnlockUnavailable a type created for a distinction nobody
+    # ever made. Its own docstring says why it exists: "categorically different
+    # from a send that FAILED: no transaction was created, nothing reached any
+    # daemon, and the fix is an environment variable rather than an
+    # investigation." And payout_unlock_context()'s says "the reason is named and
+    # nothing is claimed". Both were true of the MESSAGE and false of the OUTCOME:
+    # the raise fell through to `except Exception`, which wrote the sentence into
+    # swaps.failed_reason and set the swap to 'failed'. The swap died of an unset
+    # environment variable, which is the exact thing the raise was written to
+    # prevent.
+    #
+    # FOUND BY RUNNING IT, not by reading it. A test seeding a BTC->GRC payout with
+    # a real GRC adapter failed with `assert sent, "a configured chain's payout was
+    # deferred"` and the captured log showed `payout FAILED ... GRIDCOIN_WALLET_
+    # PASSPHRASE is not set ... <- the swap is now 'failed' and this worker will NOT
+    # retry it`. The test was wrong about its own fixture; the code was wrong about
+    # the swap.
+    #
+    # SAME REMEDY AS defer_for_missing_adapter(), FOR THE SAME REASON. Both are
+    # facts about THIS PROCESS's environment rather than about the swap or the
+    # customer: set the variable, restart the worker, and the swap pays. Marking it
+    # failed throws that away, and nothing in this tree re-queues a failed swap --
+    # which is why services/payout_rescue.py had to be written at all.
+    #
+    # NOTHING WAS SENT AND THAT IS CERTAIN HERE, which is what makes deferring safe:
+    # payout_unlock_context() raises BEFORE entering the `with`, so no unlock, no
+    # signature and no broadcast occurred. This is not the ambiguous case the broad
+    # handler below has to live with (a timeout that may or may not have been
+    # relayed) -- it is the unambiguous one, and conflating them is what cost the
+    # swap.
+    except PayoutUnlockUnavailable as exc:
+        # EXTRACTED for ruff's C901, which went to 11 the moment this arm was
+        # written inline -- rule 12: extract the decision, do not raise the ceiling.
+        defer_for_locked_wallet(db, swap, destination_asset, amount, exc)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        db.execute(
+            "UPDATE payouts SET status = ? WHERE swap_id = ? AND status = 'created'",
+            ("failed", swap["id"]),
+        )
+        db.execute(
+            "UPDATE swaps SET failed_reason = ?, updated_at = ? WHERE id = ?",
+            (str(exc), utc_now_iso(), swap["id"]),
+        )
+        if not set_swap_status(db, swap["id"], "failed", f"Payout failed: {exc}", old_status="paying"):
+            # Same anomaly and same reasoning as the address-refusal path above: an
+            # exclusive claim was committed, so 'paying' should still be there. The send
+            # may or may not have reached the chain -- that is what this except clause is
+            # about -- and raising from here would replace a recorded failure with an
+            # unrecorded one.
+            logger.error(
+                "swap %s: the payout FAILED (%s) and the reason is recorded in "
+                "swaps.failed_reason and on the payouts row, but the swap could not be "
+                "marked failed -- it is no longer 'paying', so another process moved it "
+                "out of a committed payout claim. Read it back with show_swap.py --swap %s.",
+                swap["id"], exc, swap["id"],
+            )
+        db.commit()
+        # LOGGED, not only recorded. The reason reached swaps.failed_reason and
+        # the audit log; it reached NOTHING the operator was looking at. Their
+        # run 2026-09-26 printed
+        #
+        #     payout_worker cycle=1 WORKED pending_at_start=1 broadcast=0 failed_total=1
+        #
+        # and nothing else -- so a locked wallet, an insufficient balance, a
+        # rejected address and an unreachable daemon all look identical from the
+        # terminal, and the one that is a five-second fix is indistinguishable
+        # from the one that needs an investigation.
+        #
+        # At ERROR because a failed payout on a CREDITED swap is the most
+        # serious routine outcome this worker has: the customer's deposit is
+        # already ours and they have not been paid.
+        logger.error(
+            "payout FAILED for swap %s (%s -> %s, %s %s to %s): %s  <- the swap is now 'failed' "
+            "and this worker will NOT retry it",
+            swap["id"],
+            swap["from_asset"],
+            swap["to_asset"],
+            # THE AMOUNT ACTUALLY ATTEMPTED, not the quoted estimate. These were the
+            # same figure until 2026-10-03 and are not any more, and a failure log
+            # naming a number that was never sent is how an investigation starts
+            # from the wrong premise.
+            amount,
+            swap["to_asset"],
+            swap["payout_address"],
+            exc,
+        )
+
+
 def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
     """Broadcast the payout for every swap that is waiting for one.
 
@@ -718,261 +1325,13 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
     ).fetchall()
     completed = []
     for swap in swaps:
-        destination_asset = swap["to_asset"]
-        # FROM THE DEPOSIT THAT ARRIVED, not the one that was quoted. See
-        # payout_amount() for the arithmetic and why the difference was silent.
-        amount = amount_decided_and_logged(swap)
-
-        if not claim_swap_for_payout(db, swap["id"]):
-            # Another worker owns this payout. Not an error and not a failure:
-            # the swap is being paid by somebody else, right now.
-            logger.info(
-                "swap %s: payout claimed by another worker, skipping (0 sent by this worker for this swap)",
-                swap["id"],
-            )
-            continue
-
-        # THE BURN GUARD. Added 2026-09-27 at the operator's instruction ("make this burn
-        # proof"), and it is the LAST place a bad address can be stopped: the next fund-path
-        # statement in this function is adapter.send_to_address(), after which the money is
-        # on a chain and nobody -- not us, not the customer, not the miner -- can spend it.
-        # Not stolen. Not recoverable. Gone.
-        #
-        # The defect being closed: modules/address_network.is_valid_address() landed in
-        # f805efa and NOTHING ON THE FUND PATH CALLED IT. An undecodable payout address went
-        # straight through to the daemon.
-        #
-        # WHY NOT THAT FUNCTION, AND WHY THIS IS A TABLE LOOKUP INSTEAD. is_valid_address()
-        # understands bech32, Bitcoin-alphabet base58check and XRP-alphabet base58check.
-        # A Solana address is plain base58 of an ed25519 key with no checksum at all --
-        # measured 2026-09-27, every valid SOL fixture in tests/valid_addresses.py returns
-        # False from it. So the one-line version of this guard would refuse every Solana
-        # payout the day a SOL pair is enabled, on a swap whose deposit is ALREADY OURS and
-        # already credited. That is a worse outcome than
-        # the burn: the burn costs one payout, the false refusal costs every customer of
-        # that chain while their money sits in our wallet. modules/address_authority.py is
-        # the per-asset table that avoids it.
-        #
-        # NO_VALIDATOR PASSES THROUGH, LOUDLY, for the same reason: refusing a chain we
-        # cannot check IS that outage, arriving by the door a future chain comes in by.
-        # tests/test_address_authority.py closes the hole at the other end by asserting
-        # every asset this terminal can reach HAS a validator, so the gap fails the suite
-        # instead of either burning money or stranding a payout.
-        #
-        # PLACED AFTER THE CLAIM AND BEFORE reserve_inventory(), which is not arbitrary.
-        # Claiming first means exactly one worker owns this swap, so the refusal is written
-        # once. Refusing before the reserve and before the INSERT means a refused payout
-        # leaves NO reserved-inventory row and NO payouts row in 'created' -- the two
-        # dangling states this function's own docstring is about. The swap lands in 'failed'
-        # by the same route a failed send does (set_swap_status + failed_reason + audit),
-        # because 'payout_pending' would be re-read and re-refused on every cycle forever,
-        # which is rule 14's "did nothing must not look like did work" turned into a loop.
-        verdict = check_address(destination_asset, swap["payout_address"])
-        if verdict.refuses:
-            refuse_payout_before_sending(db, swap, verdict, destination_asset, amount)
-            continue
-        if verdict.unchecked:
-            # Rule 14 again. `.unchecked` rather than `state == NO_VALIDATOR` since
-            # 2026-09-27: there are TWO ways to pass without being verified, and the second
-            # one is the one that actually happened. NO_VALIDATOR is "no validator for this
-            # chain"; UNDETERMINED is "a validator ran and could not place the address",
-            # which is what Litecoin's regtest hrp `rltc` and its second P2SH byte 0x3A both
-            # produced on the operator's live regtest swap. Both proceed, for the same reason
-            # -- a gap in our tables is not evidence against a customer's address -- and both
-            # must say out loud that nothing was checked.
-            logger.warning(
-                "payout for swap %s is going to a %s address that was NOT CHECKED (%s): %s  <- the send is "
-                "proceeding, because refusing an address we cannot place would break a working chain, which "
-                "is worse than the burn this guard prevents.",
-                swap["id"], destination_asset, verdict.state, verdict.why,
-            )
-
-        reserve_inventory(db, destination_asset, amount)
-        try:
-            db.execute(
-                "INSERT INTO payouts (swap_id, asset, destination_address, amount, txid, status, created_at, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (swap["id"], destination_asset, swap["payout_address"], amount, None, "created", utc_now_iso(), None),
-            )
-        except sqlite3.IntegrityError as exc:
-            # idx_payouts_one_live_per_swap refused a second LIVE payout row.
-            # Reaching this means the claim and the index disagree, which is a
-            # state a human has to look at -- so nothing is sent, nothing is
-            # retried, and the reason is written down where the operator reads
-            # it rather than only raised.
-            db.rollback()
-            logger.error(
-                "swap %s: a live payout row already exists (%s). NOTHING SENT. The swap is left in 'paying' and "
-                "will not be retried automatically; reconcile the existing payout before releasing it.",
-                swap["id"],
-                exc,
-            )
-            db.execute(
-                "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at) VALUES (?, ?, ?, ?, ?)",
-                (swap["id"], "paying", "paying", f"Payout suppressed by unique index: {exc}", utc_now_iso()),
-            )
-            db.commit()
-            continue
-
-        # Durable BEFORE the send. See this function's docstring.
-        db.commit()
-
-        try:
-            # LOCK -> UNLOCK past staking -> send -> LOCK -> back to staking, for any
-            # chain in WALLET_UNLOCK_ASSETS; a no-op context for the rest. The
-            # re-lock is in the context manager's `finally`, so it runs even when
-            # the send raises -- a wallet left fully unlocked because a payout failed
-            # is the outcome that must not happen.
-            adapter = adapters[destination_asset]
-            # ONE NAME CARRYING BOTH FACTS, 2026-10-09, AND NO BEHAVIOR CHANGE.
-            #
-            # This was `recorded = False` plus a `txid` assigned INSIDE the `with` below, and
-            # the two could only be read together by trusting that they were set on adjacent
-            # lines. A checker cannot: it reports `txid` as possibly unbound at both reads in
-            # the `except GridcoinLockError` handler, because the only thing that makes them
-            # safe is `if not recorded: raise` -- a different variable.
-            #
-            # `recorded_txid is None` IS `not recorded`. Both were set at the identical point,
-            # immediately after _record_broadcast() returns, so the branch takes the same arm
-            # for every input. `is None` rather than falsiness, deliberately: a daemon that
-            # ever returned an empty txid must still count as RECORDED here, because the
-            # payouts row and the swap status were already committed and treating that as "not
-            # recorded" would re-raise and mark a delivered payment failed -- which is the
-            # 2026-09-26 defect this whole block exists to prevent, arrived at from the other
-            # direction.
-            #
-            # tests/test_payout_concurrency.py's
-            # test_a_failed_send_whose_restore_also_fails_is_a_payout_failure() is the one that
-            # pins the re-raise arm, and it asserts on the recorded reason specifically so that
-            # a NameError from THIS handler cannot pass as the daemon's own failure.
-            recorded_txid: str | None = None
-            try:
-                with payout_unlock_context(destination_asset, adapter):
-                    # broadcast_payout() rather than adapter.send_to_address() since
-                    # 2026-10-02: XRP's send needs a source account, a signing seed and
-                    # an arming token, and every other chain's needs exactly the two
-                    # positional arguments this line used to pass. The dispatch is a
-                    # function so it can be tested with a stub adapter and a seeded
-                    # environment; see its docstring for the full refusal order.
-                    txid = broadcast_payout(adapter, destination_asset, config, swap["payout_address"], amount)
-                    # RECORDED INSIDE THE CONTEXT, BEFORE THE RE-LOCK CAN RAISE.
-                    #
-                    # This block sat AFTER the `with` until 2026-09-26, and the first
-                    # real payout this code ever made is what found it. The send
-                    # succeeded -- 55.52645238 GRC left the wallet, txid
-                    # 3e09dc9cfd7a61da..., confirmed afterwards in the operator's own
-                    # listtransactions -- and then the context's restore raised,
-                    # because the staking unlock was being sent a timeout of 0 that
-                    # Gridcoin refuses. Control jumped from the `with` straight to the
-                    # except clause below, `txid` was discarded, and the swap was
-                    # marked `failed` with `txid (none)`.
-                    #
-                    # Money out, no record: the single worst outcome available on this
-                    # path, and it was caused by a wallet-housekeeping call that has
-                    # nothing to do with whether the payment was delivered.
-                    #
-                    # The commit is what makes it durable, and `recorded_txid` is set
-                    # only after it returns -- so a database failure here is still a
-                    # payout failure, while a LOCK failure after it is not.
-                    _record_broadcast(db, swap, amount, txid)
-                    recorded_txid = txid
-            except GridcoinLockError:
-                # THE PAYOUT IS ALREADY DURABLE. The wallet's lock state is a separate
-                # problem with its own loud message (chains/gridcoin_wallet_lock.py
-                # distinguishes "locked, not staking" from "may still be unlocked"),
-                # and treating it as a payout failure is what mislabeled a delivered
-                # payment. Re-raised when the send never got as far as being recorded,
-                # because then it IS the payout's failure -- `recorded_txid is None` is that
-                # test, and it holds the txid the message below needs for the same reason.
-                if recorded_txid is None:
-                    raise
-                logger.exception(
-                    "payout for swap %s WAS BROADCAST as %s and is recorded as completed. The wallet's "
-                    "lock state could not be restored afterwards -- read the message above and act on "
-                    "the wallet, NOT on the swap.",
-                    swap["id"],
-                    recorded_txid,
-                )
-                db.execute(
-                    "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (
-                        swap["id"],
-                        "completed",
-                        "completed",
-                        f"payout broadcast {recorded_txid}; wallet lock restore FAILED afterwards",
-                        utc_now_iso(),
-                    ),
-                )
-                db.commit()
-            completed.append(db.execute("SELECT * FROM swaps WHERE id = ?", (swap["id"],)).fetchone())
-        # Checked, and this broad catch is the right one: `send_to_address`
-        # can fail for transport reasons, daemon reasons, insufficient funds,
-        # or a rejected transaction, and EVERY one of them must land the swap
-        # in `failed` with the reason recorded rather than aborting the loop
-        # and leaving the remaining swaps unprocessed. The caller can tell the
-        # failure from success because the swap's status and failed_reason both
-        # say so -- rule 12's test is met in the return value, not by narrowing.
-        #
-        # What it does NOT establish is whether the transaction was broadcast.
-        # A timeout after the daemon accepted it looks identical to a refusal,
-        # and this marks both 'failed'. That is a real gap on the fund path and
-        # it is named in the enforcement report rather than changed here. Note
-        # what the partial unique index does about it: 'failed' is not a live
-        # status, so a retry CAN insert a new payout row -- which is the right
-        # behavior for a refusal and the wrong one for a timeout that was
-        # actually relayed. Same gap, now with a name.
-        except Exception as exc:  # noqa: BLE001
-            db.execute(
-                "UPDATE payouts SET status = ? WHERE swap_id = ? AND status = 'created'",
-                ("failed", swap["id"]),
-            )
-            db.execute(
-                "UPDATE swaps SET failed_reason = ?, updated_at = ? WHERE id = ?",
-                (str(exc), utc_now_iso(), swap["id"]),
-            )
-            if not set_swap_status(db, swap["id"], "failed", f"Payout failed: {exc}", old_status="paying"):
-                # Same anomaly and same reasoning as the address-refusal path above: an
-                # exclusive claim was committed, so 'paying' should still be there. The send
-                # may or may not have reached the chain -- that is what this except clause is
-                # about -- and raising from here would replace a recorded failure with an
-                # unrecorded one.
-                logger.error(
-                    "swap %s: the payout FAILED (%s) and the reason is recorded in "
-                    "swaps.failed_reason and on the payouts row, but the swap could not be "
-                    "marked failed -- it is no longer 'paying', so another process moved it "
-                    "out of a committed payout claim. Read it back with show_swap.py --swap %s.",
-                    swap["id"], exc, swap["id"],
-                )
-            db.commit()
-            # LOGGED, not only recorded. The reason reached swaps.failed_reason and
-            # the audit log; it reached NOTHING the operator was looking at. Their
-            # run 2026-09-26 printed
-            #
-            #     payout_worker cycle=1 WORKED pending_at_start=1 broadcast=0 failed_total=1
-            #
-            # and nothing else -- so a locked wallet, an insufficient balance, a
-            # rejected address and an unreachable daemon all look identical from the
-            # terminal, and the one that is a five-second fix is indistinguishable
-            # from the one that needs an investigation.
-            #
-            # At ERROR because a failed payout on a CREDITED swap is the most
-            # serious routine outcome this worker has: the customer's deposit is
-            # already ours and they have not been paid.
-            logger.error(
-                "payout FAILED for swap %s (%s -> %s, %s %s to %s): %s  <- the swap is now 'failed' "
-                "and this worker will NOT retry it",
-                swap["id"],
-                swap["from_asset"],
-                swap["to_asset"],
-                # THE AMOUNT ACTUALLY ATTEMPTED, not the quoted estimate. These were the
-                # same figure until 2026-10-03 and are not any more, and a failure log
-                # naming a number that was never sent is how an investigation starts
-                # from the wrong premise.
-                amount,
-                swap["to_asset"],
-                swap["payout_address"],
-                exc,
-            )
+        # ONE SWAP, ONE FUNCTION (rule 10). This loop is orchestration and holds no
+        # decision of its own: pay_one_swap() returns the swap row when it broadcast,
+        # and None for every outcome that did not -- each of which it has already
+        # recorded and logged where it happened.
+        paid = pay_one_swap(db, config, adapters, swap)
+        if paid is not None:
+            completed.append(paid)
     db.commit()
     return completed
 
