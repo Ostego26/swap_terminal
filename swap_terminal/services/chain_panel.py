@@ -127,6 +127,18 @@ from chains.daemon_network import (
 from microfortnights import format_duration
 from services.admin_view import chain_rows, no_probe_reason, probe_kind
 from services.asset_identity import color_class_for, symbol_for, symbol_title_for
+
+# THE QT SHAPE, 2026-10-10. Operator: "make each sub tab for each chain daemon to look
+# almost identical to it's qt core gui wallets."
+#
+# A SECOND MODULE AND NOT MORE OF THIS ONE, for the reason rule 10 gives about decision
+# distance: this file answers "what can this chain tell me", and that one answers "where
+# does a Core user look for it". They are different questions with different per-chain
+# tables, and this file was already 1111 lines. Everything over there is pure and takes
+# the payload below as its input, so a test can seed a `live` dict and assert on the
+# rail, the balance card, the columns and the status bar without a Flask app -- which is
+# the half of this that could not be tested while the arrangement lived in markup.
+from services.chain_wallet_layout import Asking, qt_layout
 from services.deadline import MINIMUM_USEFUL_CALL_SECONDS, call_timeout
 from services.swap_service import TAG_ATTRIBUTION
 
@@ -1052,6 +1064,17 @@ def chain_panel(config: Mapping, adapters: Mapping, asset: object = "", *,
         ),
     }
     if not ask or adapter is None:
+        # THE QT SHAPE IS BUILT ON THIS PATH TOO, and that is the whole point of
+        # qt_layout() taking `asked` as its own argument. A wallet with no status bar is
+        # not a wallet; what an unasked render gets is a bar with one cell saying
+        # nothing was asked, and a `cannot_ask` render gets a different cell saying
+        # there is no adapter. Rule 14: those are two facts and the first version of
+        # this page had one sentence for both.
+        panel["qt"] = qt_layout(
+            asset, kind,
+            Asking(asked=False, cannot_ask=panel["cannot_ask"]),
+            panes=PANE_QUESTIONS,
+        )
         return panel
     started = budget.now()
     panel["live"] = _ask(config, adapter, asset, kind, budget.start())
@@ -1060,6 +1083,15 @@ def chain_panel(config: Mapping, adapters: Mapping, asset: object = "", *,
     # already appears in one place and a second multiplication would be a second place
     # for it to be wrong.
     panel["elapsed"] = format_duration(budget.now() - started)
+    # AFTER `live`, NECESSARILY. qt_layout() reads the balances, the transaction rows,
+    # the peer rows and the sync verdict out of the payload _ask() just produced -- it
+    # is an ARRANGEMENT of what was collected and never a second collection of it, so
+    # it cannot run before there is something to arrange. It makes no call: `?ask` costs
+    # exactly what it cost before this page grew a rail, which is what keeps the budget
+    # arithmetic printed above true without being re-derived.
+    panel["qt"] = qt_layout(
+        asset, kind, Asking(asked=True, live=panel["live"]), panes=PANE_QUESTIONS,
+    )
     return panel
 
 
