@@ -1,0 +1,514 @@
+/*
+ * The Qt wallet's shape, for /admin/wallets/<asset> and for nothing else.
+ *
+ * Role: stylesheet (presentation only)
+ * Reads: nothing
+ * Writes: nothing
+ * Can move funds: no. There is no selector here for a control, because the page has
+ *       none -- no form, no input, no button. `.cw-inert` styles PROSE that stands
+ *       where Qt's Send and Receive tabs stand, and it is deliberately styled NOT to
+ *       look like a disabled control (see THE INERT REGIONS below).
+ * Mainnet-safe: yes
+ *
+ * A SEPARATE FILE FROM styles.css, following the precedent kill_switch.css set and for
+ * the same two reasons it records: every selector here is prefixed `cw-`, so this sheet
+ * and the shared one cannot reach into each other's rules, and the whole file can be
+ * deleted in one move if a restructured styles.css later wants to own this page. It is
+ * loaded SECOND, after styles.css, so :root's palette is already defined -- which is
+ * what lets everything below point at that palette instead of carrying its own colors.
+ * kill_switch.css's own header records what the alternative cost: thirteen literal
+ * colors describing a LIGHT page, inside a terminal whose every other page is phosphor
+ * green on near-black, and two palettes that agreed about nothing.
+ *
+ * =========================================================================
+ * NOTHING HERE HIDES ANYTHING, AND THAT IS A MEASUREMENT RATHER THAN A TASTE.
+ * =========================================================================
+ *
+ * There is no `display: none` in this file, no `visibility: hidden`, no zero-height
+ * collapse and no off-screen positioning of content. templates/admin.html carries the
+ * measurement that settled it, taken on that page before any of this was built: marking
+ * every panel but one hidden, exactly as a tab mechanism does, made a browser copy
+ * return 923 of 12,502 characters -- 7.4% -- and 0 of the 14 panel headings, with
+ * nothing in the copy saying the rest existed. This operator reads these pages by
+ * pasting them back.
+ *
+ * So Qt's tabs are STACKED SECTIONS and the icon rail is an IN-PAGE JUMP LIST. What the
+ * operator gets is one click to any pane; what they do not get is anything hidden from
+ * a copy, from Ctrl-F, or from a screen reader. A future change that adds a tab
+ * mechanism here will make this page's paste a fraction of itself, silently -- which is
+ * why the reasoning is in three places (this file, the template's header, and
+ * services/chain_wallet_layout.py's) rather than one.
+ *
+ * `:target` HIGHLIGHTING IS THE ONLY DYNAMIC BEHAVIOR AND IT IS CSS. No JavaScript is
+ * loaded by this page at all, so there is nothing to degrade when a script does not
+ * load, and the jump links work with scripting off.
+ *
+ * =========================================================================
+ * THE INERT REGIONS. Qt's Send and Receive, as prose rather than as controls.
+ * =========================================================================
+ *
+ * `.cw-inert` is styled to read as a NOTICE and explicitly NOT as a greyed-out button.
+ * That is a deliberate inversion of the obvious choice, and the reason is that a
+ * disabled control is a promise: it says the capability is one permission away. Here it
+ * is not -- there is no POST route to enable, no signing path wired to a browser, and
+ * the operator's standing instruction is that a passphrase must never appear in a
+ * command this repository emits. So the region gets a dashed rule, the page's ordinary
+ * ink, and no affordance whatsoever: no raised edge, no fill, no pointer cursor, no
+ * focus ring, nothing a hand goes to.
+ *
+ * `.cw-unreadable` IS A DIFFERENT TREATMENT FOR A DIFFERENT FACT, and the two must not
+ * converge. Inert means the capability is deliberately elsewhere; unreadable means
+ * nothing in this repository reads the data -- Gridcoin's magnitude, its beacon, its
+ * polls. The first is a boundary and the second is a gap that would be closed by code,
+ * so the second carries the `--slow` hue and a heavier left rule, because it is the one
+ * a reader might want to do something about.
+ *
+ * =========================================================================
+ * COLOR IS THE THIRD CHANNEL, NEVER THE FIRST.
+ * =========================================================================
+ *
+ * This stylesheet's standing requirement, and on the status bar it is load-bearing
+ * rather than decorative. Every cell carries an ASCII glyph and a word from
+ * services/chain_wallet_layout.CELL_GLYPHS -- `[ok]`, `[!]`, `[?]` -- so the three
+ * states are distinguishable in a grayscale screenshot and in a paste where no CSS
+ * travels at all. What is here only makes the distinction louder on a screen; nothing
+ * here is the only thing saying it.
+ *
+ * The glyphs are ASCII rather than Unicode shapes on purpose: a shape that arrives as a
+ * replacement character is worse than no shape, because the reader can see a signal and
+ * cannot read it.
+ */
+
+/* ===========================================================================
+ * THE SHELL: rail on the left, panes on the right. Qt's arrangement.
+ *
+ * A CSS GRID AND NOT A FLEX ROW, because the rail must be able to stay put while the
+ * panes scroll -- which is what `position: sticky` on the rail inside a grid cell
+ * gives, with no script. In Qt the rail does not move; a rail that scrolled away would
+ * be the one piece of the arrangement that did not survive the translation to a
+ * document.
+ *
+ * THE BREAKPOINT STACKS RATHER THAN HIDES. Below 900px the rail becomes a horizontal
+ * band of the same links above the panes. It is the same markup and the same links --
+ * nothing is removed from the document at any width, which is the constraint at the top
+ * of this file applied to the responsive case, where it is easiest to forget.
+ * =========================================================================== */
+.cw-shell {
+  display: grid;
+  grid-template-columns: 13rem minmax(0, 1fr);
+  gap: var(--s5);
+  align-items: start;
+  margin-top: var(--s5);
+}
+
+@media (max-width: 900px) {
+  .cw-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.cw-panes {
+  min-width: 0;
+}
+
+/* ===========================================================================
+ * THE RAIL
+ * =========================================================================== */
+.cw-rail {
+  position: sticky;
+  top: var(--s4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: var(--s3);
+}
+
+.cw-rail-title {
+  margin: 0 0 var(--s2);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
+}
+
+.cw-rail-group {
+  margin: var(--s3) 0 var(--s2);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+  border-top: 1px solid var(--line);
+  padding-top: var(--s2);
+}
+
+.cw-rail-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.cw-rail-list li {
+  margin: 0 0 var(--s1);
+}
+
+/* ONE LINK PER ENTRY, AND THE WHOLE ROW IS THE TARGET. Qt's rail entries are large
+ * click targets with an icon and a word; a bare inline link would be a different
+ * interaction for the same purpose. */
+.cw-rail-link {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  padding: var(--s2);
+  border-radius: var(--radius-sm);
+  border-left: 3px solid transparent;
+  text-decoration: none;
+  color: var(--ink);
+  font-size: var(--t-sm);
+}
+
+.cw-rail-link:hover,
+.cw-rail-link:focus-visible {
+  background: var(--surface-2);
+  border-left-color: var(--ink);
+}
+
+/* THE STATE MARK. A glyph in the rail, not a color on the text -- see the header. */
+.cw-rail-mark {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--ink-soft);
+  flex: 0 0 auto;
+}
+
+.cw-rail-inert .cw-rail-mark {
+  color: var(--ink-faint);
+}
+
+.cw-rail-unreadable {
+  border-left-color: var(--slow);
+}
+
+.cw-rail-unreadable .cw-rail-mark {
+  color: var(--slow);
+}
+
+/* AN ENTRY WITH A PARTIAL ANSWER IS MARKED IN THE RAIL AND NOT ONLY IN ITS SECTION.
+ * GRC's Staking is readable in one half and not the other, and an operator who clicks
+ * it expecting a weight figure should be able to see from the rail that it is not
+ * there. */
+.cw-rail-partial .cw-rail-mark {
+  color: var(--slow);
+}
+
+/* ===========================================================================
+ * THE OVERVIEW: the Balances card BESIDE Recent transactions, as Qt puts them.
+ *
+ * THE TWO-UP IS THE SINGLE MOST RECOGNIZABLE THING ABOUT CORE'S OVERVIEW and it is
+ * what the panel before this change did not have: the three balance figures were a
+ * key/value table and the recent transactions were 400 lines further down the
+ * document. Side by side is the arrangement the operator asked for.
+ *
+ * `minmax(0, …)` ON BOTH TRACKS because the right cell holds a monospace table of
+ * addresses and txids. Without it a long unbroken string makes the grid wider than its
+ * container and the whole page scrolls sideways, which on a pasted page is the defect
+ * that eats the right-hand column.
+ * =========================================================================== */
+.cw-overview {
+  display: grid;
+  grid-template-columns: minmax(0, 20rem) minmax(0, 1fr);
+  gap: var(--s4);
+  align-items: start;
+}
+
+@media (max-width: 760px) {
+  .cw-overview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.cw-card {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  padding: var(--s3);
+}
+
+.cw-card-title {
+  margin: 0 0 var(--s2);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
+}
+
+.cw-money {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.cw-money th {
+  text-align: left;
+  font-weight: 400;
+  color: var(--ink-soft);
+  font-size: var(--t-sm);
+  padding: var(--s2) 0;
+  vertical-align: top;
+}
+
+/* NUMBERS RIGHT-ALIGNED AND MONOSPACE, so the decimal points line up down the card.
+ * Qt does this and it is not cosmetic: eight decimal places in a proportional font is
+ * a column an operator cannot compare at a glance, which is the only way a balance
+ * card is ever read. */
+.cw-money td {
+  text-align: right;
+  font-family: var(--mono);
+  font-size: var(--t-sm);
+  padding: var(--s2) 0;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+/* THE TOTAL ROW IS SEPARATED BY A RULE, as Qt separates it. It is a derived figure and
+ * the three above it are measurements, so the rule is carrying a real distinction. */
+.cw-money-total th,
+.cw-money-total td {
+  border-top: 1px solid var(--line-strong);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* A FIGURE THE DAEMON DID NOT REPORT IS NOT A NUMBER AND MUST NOT LOOK LIKE ONE. No
+ * monospace, no right alignment -- it is a sentence, so it is set as one. */
+.cw-money-absent td {
+  text-align: left;
+  font-family: var(--font);
+  white-space: normal;
+  color: var(--slow);
+}
+
+.cw-money-note {
+  display: block;
+  font-family: var(--font);
+  font-size: var(--t-xs);
+  color: var(--ink-faint);
+  white-space: normal;
+  text-align: left;
+  margin-top: var(--s1);
+}
+
+/* ===========================================================================
+ * THE TRANSACTIONS TABLE. Qt's columns, Qt's order, newest first.
+ * =========================================================================== */
+.cw-txwrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.cw-txtable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-sm);
+}
+
+.cw-txtable th {
+  text-align: left;
+  font-weight: 600;
+  color: var(--ink-soft);
+  border-bottom: 1px solid var(--line-strong);
+  padding: var(--s2) var(--s3);
+  white-space: nowrap;
+}
+
+.cw-txtable td {
+  padding: var(--s2) var(--s3);
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+/* ZEBRA ROWS, because Qt has them and because a nine-column table of hex strings is
+ * unreadable without a row anchor. */
+.cw-txtable tbody tr:nth-child(even) {
+  background: var(--surface-2);
+}
+
+.cw-cell-mono,
+.cw-cell-amount,
+.cw-cell-count,
+.cw-cell-unix {
+  font-family: var(--mono);
+}
+
+.cw-cell-amount,
+.cw-cell-count {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.cw-cell-mono {
+  word-break: break-all;
+  max-width: 24ch;
+}
+
+/* AN EMPTY CELL IS A DASH AND IS MARKED AS ONE. A blank cell is ambiguous between
+ * "this field is empty" and "this column broke"; an explicit mark is not. The region's
+ * own empty state covers the no-rows case, and the column heading's title says what
+ * the field is. */
+.cw-cell-empty {
+  color: var(--ink-faint);
+  font-family: var(--mono);
+}
+
+/* ===========================================================================
+ * THE STATUS BAR. Qt puts it across the bottom of the window; this puts it at the
+ * bottom of the panes and makes it stick, which is the same thing in a document.
+ *
+ * STICKY AND NOT FIXED. `fixed` would take it out of the flow and float it over the
+ * page, which on a short viewport covers the content it describes and in a print or a
+ * paste lands in the wrong place. Sticky keeps it in the document and in the copy.
+ * =========================================================================== */
+.cw-statusbar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s5);
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+.cw-status-cell {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  padding: var(--s1) var(--s2);
+  border-left: 3px solid var(--line-strong);
+  font-size: var(--t-sm);
+  min-width: 0;
+}
+
+.cw-status-label {
+  color: var(--ink-soft);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.cw-status-value {
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
+.cw-status-glyph {
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+}
+
+.cw-status-ok {
+  border-left-color: var(--ok);
+}
+
+.cw-status-ok .cw-status-glyph {
+  color: var(--ok);
+}
+
+.cw-status-warn {
+  border-left-color: var(--slow);
+}
+
+.cw-status-warn .cw-status-glyph {
+  color: var(--slow);
+}
+
+.cw-status-unknown {
+  border-left-color: var(--unknown);
+}
+
+.cw-status-unknown .cw-status-glyph {
+  color: var(--unknown);
+}
+
+/* THE NOTE UNDER THE BAR, NOT INSIDE IT. Every cell carries a sentence saying what its
+ * figure means (rule 14: state what the number means, next to the number), and five
+ * sentences will not fit in a bar. So the bar is the figures and the sentences are a
+ * list below it -- in the same document, in the same copy, in the same order. */
+.cw-status-notes {
+  list-style: none;
+  margin: var(--s2) 0 0;
+  padding: 0;
+  font-size: var(--t-xs);
+  color: var(--ink-faint);
+}
+
+.cw-status-notes li {
+  margin: 0 0 var(--s1);
+}
+
+.cw-status-notes strong {
+  color: var(--ink-soft);
+  font-weight: 600;
+}
+
+/* ===========================================================================
+ * THE TWO KINDS OF ABSENCE. See THE INERT REGIONS in the header for why these are
+ * styled differently rather than alike.
+ * =========================================================================== */
+.cw-inert {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  background: transparent;
+  padding: var(--s3);
+  color: var(--ink-soft);
+}
+
+.cw-unreadable {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--slow);
+  border-radius: var(--radius);
+  background: var(--slow-soft);
+  padding: var(--s3);
+  color: var(--ink-soft);
+}
+
+.cw-absence-mark {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-right: var(--s2);
+  color: var(--ink-faint);
+}
+
+.cw-unreadable .cw-absence-mark {
+  color: var(--slow);
+}
+
+/* THE SECTION A RAIL LINK JUMPED TO GETS A RULE, so an operator who clicked can see
+ * where they landed on a long page. `:target` is CSS and needs no script. */
+.cw-pane:target {
+  outline: 2px solid var(--accent);
+  outline-offset: var(--s2);
+}
+
+.cw-pane {
+  /* Enough room above a jumped-to heading that it is not flush with the viewport edge,
+   * and `scroll-margin-top` rather than a margin so it costs nothing in the layout. */
+  scroll-margin-top: var(--s4);
+}
+
+/* A PARTIAL ANSWER'S SENTENCE, inside an otherwise live pane. GRC's Staking is the
+ * case: the lock half is a real reading and the weight figures are not available at
+ * all, and the two must not sit in the same paragraph looking alike. */
+.cw-missing {
+  margin: var(--s3) 0 0;
+  padding: var(--s2) var(--s3);
+  border-left: 3px solid var(--slow);
+  background: var(--slow-soft);
+  font-size: var(--t-sm);
+  color: var(--ink-soft);
+}

@@ -4,10 +4,13 @@
 {% set surface = 'admin' %}
 {% block title %}{{ data.asset or 'Chain' }} wallet &#183; Operator &#183; Swap Terminal{% endblock %}
 {#
-  One chain's wallet panel. Six chains, six URLs, one template.
+  One chain's wallet panel, arranged as that chain's own Qt wallet arranges it.
+  Six chains, six URLs, one template.
 
-  Role: template (rendering only; every decision is services/chain_panel.py)
-  Reads: the dict chain_panel() returned
+  Role: template (rendering only; every decision is services/chain_panel.py and
+        services/chain_wallet_layout.py)
+  Reads: the dict chain_panel() returned, including the `qt` sub-dict
+        chain_wallet_layout.qt_layout() built
   Writes: nothing
   Can move funds: no. THERE IS NO FORM ON THIS PAGE AND NO INPUT ELEMENT OF ANY
         KIND -- not a text box, not a button that posts, and above all not a
@@ -15,8 +18,22 @@
         page with `?ask`, which is a GET. routes/admin.py registers no write
         verb at all and tests/test_web_surfaces.py asserts that over the app's
         real url_map; tests/test_chain_panel.py additionally asserts this
-        rendered page contains no `<input` and no `<form`.
+        rendered page contains no `<input`, no `<form`, no `<textarea`, no
+        `<button` and no `type="password"`, on all six chains, in both the asked
+        and the unasked state.
   Mainnet-safe: yes
+
+  =========================================================================
+  THE QT ARRANGEMENT, 2026-10-10. Operator:
+  =========================================================================
+
+      "spin up an agent for the gui to make each sub tab for each chain daemon
+       to look almost identical to it's qt core gui wallets."
+
+  So: the icon rail down the left, an Overview with the Balances card BESIDE
+  Recent transactions, a Transactions list under Qt's own column headings, and
+  the status bar across the bottom. The furniture is the same on all six chains
+  and the vocabulary is each chain's own.
 
   IT BRANCHES ON `data.kind` AND NEVER ON AN ASSET STRING. The three kinds are
   services/chain_panel.PANEL_KINDS and the page has one block per kind, which is
@@ -24,20 +41,109 @@
   all" true here (the same guard WALLET_STATES and SYNC_STATES carry). A
   `{% if data.asset == 'GRC' %}` would be a chain decision in markup -- the thing
   rule 10 says cannot be called with seeded inputs and cannot be found by looking.
+  Gridcoin's four extra rail entries, XRP's account reserve, Solana's commitment
+  rung and ICP's subaccounts all arrive as DATA, out of the keyed tables in
+  services/chain_wallet_layout.py, where a test can reach them with a seeded
+  asset string.
+
+  =========================================================================
+  QT'S TABS HIDE EACH OTHER AND NOTHING HERE MAY BE HIDDEN. THE RAIL IS A JUMP
+  LIST, AND THAT WAS DECIDED BY A MEASUREMENT.
+  =========================================================================
+
+  templates/admin.html carries the measurement, taken on that page before any of
+  this was built: marking every panel but one `display: none`, exactly as a tab
+  mechanism does, made a browser copy return 923 of 12,502 characters -- 7.4% --
+  and 0 of the 14 panel headings, with nothing in the copy saying the rest
+  existed. THIS OPERATOR READS THESE PAGES BY PASTING THEM BACK.
+
+  So Qt's tabs are VISIBLE STACKED SECTIONS and the rail is an in-page jump list
+  over them -- the same mechanism admin.html's own tab strip uses, and for the
+  same reason. There is no `display: none` in static/chain_wallet.css, no
+  `visibility: hidden`, and no script of any kind on this page: `:target`
+  highlighting is CSS, so the jump links work with scripting off.
+
+  THE NEXT PERSON WILL WANT TO MAKE THESE REAL TABS. It is the obvious
+  improvement and it would make this page's paste a fraction of itself, silently,
+  on the one instrument this operator uses to read it. That is why the reasoning
+  is written in three places -- here, in static/chain_wallet.css, and in
+  services/chain_wallet_layout.py's header -- rather than in one.
+
+  EVERY SECTION IS IN THE DOCUMENT ON EVERY RENDER, asked or not, and that is a
+  consequence of the above rather than a separate choice: a rail entry whose
+  section only exists after `?ask` is a dead jump link on the page an operator
+  lands on. So each section renders either its figures or the sentence saying
+  which of the three states it is in, and
+  tests/test_chain_wallet_layout.py asserts every rail anchor resolves to an id
+  in the markup, on both renders, in both directions.
 
   EVERY REGION RENDERS A SENTENCE WHEN IT IS EMPTY. Rule 14: `(none)` is a result
   and a blank gap is ambiguous between zero rows and a query that broke. On this
   page the difference between "this wallet holds nothing" and "nobody asked the
   daemon" and "the daemon refused" is the difference between going to bed and
-  not, so each of the three has its own words and none of them is a blank.
+  not, so each of the three has its own words and none of them is a blank. The
+  `unasked()` macro below is the first two of those three, in one place, because
+  they are rendered by eleven sections and eleven copies would drift.
 
-  NOTHING HERE IS HIDDEN. templates/admin.html's own tab strip records the
-  measurement: marking panels `display: none` the way a tab mechanism does made a
-  browser copy return 923 of 12,502 characters and none of the headings, and this
-  operator reads these pages by pasting them back. So the six chains are six URLs
-  rather than six hidden divs, and a paste of this page contains this chain's
-  panel whole.
+  QT'S SEND AND RECEIVE TABS ARE NAMED, INERT REGIONS AND NOT DISABLED FORMS.
+  A `<input disabled>` is still an `<input>`, so it would fail the test above --
+  but the real reason is that a greyed-out Send button promises the capability is
+  one setting away, and on this surface there is no POST route to enable and no
+  signing path wired to a browser. See services/chain_wallet_layout.py's header
+  for the whole argument and static/chain_wallet.css for why `.cw-inert` is
+  deliberately styled to look like a notice rather than like a dead control.
 #}
+
+{#- chain_wallet.css SECOND, after styles.css, so :root's palette is already
+    defined when this sheet's rules reference it -- the same ordering
+    kill_switch_page.html uses and for the same reason. -#}
+{% block head_extra %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='chain_wallet.css') }}">
+{% endblock %}
+
+{#- THE TWO REASONS NOTHING WAS ASKED, IN ONE PLACE. They are not the same fact
+    (rule 14): "you have not clicked" is a page waiting for the operator, and
+    "there is no adapter for this chain" is a configuration fault they have to go
+    and fix. `what` names the figures THIS section would have carried, so the
+    sentence is about the pane the reader is looking at rather than about the page. -#}
+{% macro unasked(asset, cannot_ask, what) -%}
+{%- if cannot_ask %}
+<p class="empty"><span class="empty-mark">(nothing to ask)</span>
+   <span class="empty-what">{{ cannot_ask }} No figure here is zero, missing or stale &#8212; there is
+   no endpoint for this chain in this process at all, so nothing was contacted and nothing could have
+   been.</span>
+   <span class="empty-params">asset={{ asset }} &#183; adapter=absent &#183; would have shown: {{ what }}</span></p>
+{%- else %}
+<p class="empty"><span class="empty-mark">(not asked)</span>
+   <span class="empty-what">{{ what }} is not shown because nobody has asked {{ asset }} yet. This is not
+   a figure of zero and not an outage &#8212; it is a page that contacts nothing until told to. Use
+   <em>Ask {{ asset }} now</em> above.</span>
+   <span class="empty-params">asset={{ asset }} &#183; asked=no</span></p>
+{%- endif %}
+{%- endmacro %}
+
+{#- ONE GENERATED SECTION PER INERT OR UNREADABLE RAIL ENTRY. The entry's whole
+    content is its own `what` and `why`, so this renders it rather than the
+    template carrying eight near-identical blocks.
+
+    THE TWO STATES GET DIFFERENT TREATMENTS AND MUST NOT CONVERGE. Inert means the
+    capability is deliberately elsewhere -- a boundary. Unreadable means nothing in
+    this repository reads the data -- a gap that would be closed by code. A reader
+    deciding whether to go and do something about it needs to be able to tell. -#}
+{% macro absence(entry) -%}
+<div class="{{ 'cw-inert' if entry.state == 'inert' else 'cw-unreadable' }}">
+  <p class="panel-note"><span class="cw-absence-mark">{{ '[inert]' if entry.state == 'inert' else '[unreadable]' }}</span>
+     <strong>{{ entry.what }}.</strong></p>
+  <p class="panel-note">{{ entry.why }}.</p>
+  {%- if entry.state == 'inert' %}
+  <p class="panel-note">There is no control here, and there is no disabled one either. Nothing on this
+     page would collect an amount, an address or a passphrase.</p>
+  {%- else %}
+  <p class="panel-note">This is a gap rather than a boundary: it would be closed by a reader in
+     <code>chains/</code> and an entry on that module's read-only allowlist, not by a setting.</p>
+  {%- endif %}
+</div>
+{%- endmacro %}
 
 {% block content %}
 {{ admin_tabs.admin_tabs('wallets') }}
@@ -96,6 +202,11 @@
   <h1>{{ marks.asset_mark(data.asset, 32) }} {{ data.asset }}
       <span class="unit" title="{{ data.symbol_title }}">{{ data.symbol }}</span></h1>
   <p class="lede">{{ data.kind_note }}</p>
+  {#- WHETHER THE RESEMBLANCE IS A CLAIM OR A BORROWING, SAID BEFORE ANYTHING ELSE.
+      Three of these six chains have no Core wallet and never have, and a page
+      arranged like Bitcoin Core under an XRP heading will eventually be read as a
+      claim that one exists. services/chain_wallet_layout.BORROWED_LAYOUT_NOTICE. -#}
+  <p class="panel-note">{{ data.qt.borrowed }}</p>
   <p class="panel-note">Nothing on this page changes anything. There is no Send, no Receive, no unlock and no
      start/stop &#8212; every one of those is named below with the reason and with the tool at the repository
      root that has it.</p>
@@ -202,279 +313,524 @@
   {%- endif %}
 </section>
 
-{#- ===================== THE LIVE HALF, ONE BLOCK PER KIND ===================== -#}
-{%- if not data.asked %}
-<section class="panel">
-  <h2>Wallet</h2>
-  {#- TWO REASONS NOTHING WAS ASKED AND THEY ARE NOT THE SAME FACT (rule 14). "You
-      have not clicked" is a page waiting for the operator; "there is no adapter" is
-      a configuration fault they have to go and fix. The first version of this block
-      had one sentence for both. -#}
-  {%- if data.cannot_ask %}
-  <p class="empty"><span class="empty-mark">(nothing to ask)</span>
-     <span class="empty-what">{{ data.cannot_ask }} No figure below is zero, missing or stale &#8212; there is no
-     endpoint for this chain in this process at all, so nothing was contacted and nothing could have
-     been.</span>
-     <span class="empty-params">asset={{ data.asset }} &#183; adapter=absent</span></p>
-  {%- else %}
-  <p class="empty"><span class="empty-mark">(not asked)</span>
-     <span class="empty-what">no balance, transaction, peer or node figure is shown because nobody has asked
-     {{ data.asset }} yet. This is not a balance of zero and not an outage &#8212; it is a page that contacts
-     nothing until told to. Use <em>Ask {{ data.asset }} now</em> above.</span></p>
-  {%- endif %}
-</section>
+{#- ===================== THE WALLET WINDOW =====================
+    Everything from here down is the Qt arrangement: rail on the left, panes on
+    the right, status bar across the bottom. -#}
+<div class="cw-shell">
 
-{%- elif data.kind == 'core_wallet' %}
-{% set live = data.live %}
-{% set pane = live.panes %}
-<section class="panel">
-  <h2>Overview</h2>
-  {%- set wallet = pane.wallet %}
-  <p class="panel-note">Wallet state: <strong>{{ wallet.state }}</strong>{% if wallet.why %} &#8212; {{ wallet.why }}{% endif %}</p>
-  {%- if wallet.balances %}
-  <table class="kvt">
-    <tbody>
-      {%- for label, figure in wallet.balances.items() %}
-      <tr><th scope="row">{{ label }}</th>
-          <td>{% if figure.reported %}<span class="num">{{ '%.8f'|format(figure.value) }}</span>
-              {% else %}<strong>not reported</strong> &#8212; this daemon build does not carry the field, which is
-              not the same as zero{% endif %}
-              <span class="subtle">{{ figure.note }}</span></td></tr>
+  {#- THE RAIL. Qt's icon rail, as an in-page jump list over sections that are all
+      in the document -- see this file's header for the measurement.
+
+      A <nav> OF REAL LINKS AND NOT role="tablist", which is the same call
+      admin.html's strip makes and its comment argues: the ARIA tab pattern
+      promises arrow-key movement between tabs and exactly one visible panel, and
+      neither is true here. Claiming the role would describe the page wrongly to
+      the reader who depends on the description most. -#}
+  <nav class="cw-rail" aria-label="{{ data.asset }} wallet panes">
+    <p class="cw-rail-title">{{ data.asset }} wallet</p>
+    {%- for group in data.qt.rail_groups %}
+    {%- if not loop.first %}
+    <p class="cw-rail-group">{{ group.label }}</p>
+    {%- endif %}
+    <ul class="cw-rail-list" role="list">
+      {%- for entry in data.qt.rail if entry.group == group.key %}
+      <li>
+        <a class="cw-rail-link cw-rail-{{ entry.state }}{% if entry.missing %} cw-rail-partial{% endif %}"
+           href="#{{ entry.anchor }}"
+           title="{{ entry.what }}{% if entry.why %} &#183; {{ entry.why }}{% endif %}">
+          {#- THE STATE IS A GLYPH AND A WORD, NOT A COLOR. This operator pastes
+              these pages back and no CSS travels in a paste, so the mark has to be
+              in the markup. ASCII, so it survives any encoding on the way. -#}
+          <span class="cw-rail-mark" aria-hidden="true">{{ {'live': '[>]', 'inert': '[-]', 'unreadable': '[x]'}[entry.state] }}</span>
+          <span>{{ entry.label }}</span>
+          {%- if entry.state != 'live' %}<span class="skip">{{ entry.state }}</span>{% endif %}
+          {%- if entry.missing %}<span class="skip">partly unreadable</span>{% endif %}
+        </a>
+      </li>
       {%- endfor %}
-      <tr><th scope="row">Transactions in wallet</th>
-          <td>{% if wallet.txcount is not none %}<span class="num">{{ wallet.txcount }}</span>
-              {% else %}not reported{% endif %}</td></tr>
-    </tbody>
-  </table>
-  {%- else %}
-  <p class="empty"><span class="empty-mark">(no balance)</span>
-     <span class="empty-what">no figure is shown because none was established. Read the wallet state above:
-     a node with no wallet loaded has no balance to have, which is a different fact from a balance of
-     zero.</span></p>
-  {%- endif %}
-  {#- THE LOCK. Reported, never offered -- see services/chain_panel's absent list. -#}
-  <div class="subbox">
-    <p class="subbox-title">Encryption</p>
+    </ul>
+    {%- endfor %}
+    <p class="panel-note">Every pane is on this page below; these jump to one. Copying the page copies all
+       of it &#8212; nothing here is hidden, which is why these are links and not tabs.</p>
+  </nav>
+
+  <div class="cw-panes">
+
+  {%- if data.kind == 'core_wallet' %}
+  {%- set live = data.live %}
+  {%- set pane = live.panes if data.asked else none %}
+  {%- set wallet = pane.wallet if data.asked else none %}
+
+  {#- ===== OVERVIEW: the Balances card BESIDE Recent transactions, as Qt has it.
+      The single most recognizable thing about Core's Overview, and the one thing
+      the panel this replaced did not have -- its three balance figures were a
+      key/value table and its recent transactions were 400 lines further down. -#}
+  <section class="panel cw-pane" id="cw-overview">
+    <h2>Overview</h2>
+    {%- if data.asked %}
+    <p class="panel-note">Wallet state: <strong>{{ wallet.state }}</strong>{% if wallet.why %} &#8212; {{ wallet.why }}{% endif %}</p>
+    <div class="cw-overview">
+      <div class="cw-card">
+        <p class="cw-card-title">Balances</p>
+        {%- if data.qt.balances %}
+        <table class="cw-money">
+          <tbody>
+            {%- for line in data.qt.balances %}
+            <tr class="{% if line.label == 'Total' %}cw-money-total{% endif %}{% if not line.reported %} cw-money-absent{% endif %}">
+              <th scope="row">{{ line.label }}</th>
+              <td>{% if line.reported %}{{ line.value }}
+                  {%- else %}<strong>not reported</strong>{% endif %}
+                  <span class="cw-money-note">{{ line.note }}</span></td>
+            </tr>
+            {%- endfor %}
+            <tr><th scope="row">Transactions in wallet</th>
+                <td>{% if wallet.txcount is not none %}{{ wallet.txcount }}
+                    {%- else %}not reported{% endif %}
+                    <span class="cw-money-note">a COUNT of wallet entries, never a duration</span></td></tr>
+          </tbody>
+        </table>
+        {%- else %}
+        <p class="empty"><span class="empty-mark">(no balance)</span>
+           <span class="empty-what">no figure is shown because none was established. Read the wallet state
+           above: a node with no wallet loaded has no balance to have, which is a different fact from a
+           balance of zero.</span></p>
+        {%- endif %}
+      </div>
+      <div>
+        <p class="cw-card-title">Recent transactions</p>
+        {%- if data.qt.tx_rows %}
+        <div class="cw-txwrap">
+          <table class="cw-txtable">
+            <thead><tr>
+              {%- for column in data.qt.tx_columns[:5] %}<th title="{{ column.note }}">{{ column.label }}</th>{% endfor %}
+            </tr></thead>
+            <tbody>
+              {#- QT SHOWS A HANDFUL HERE AND THE FULL LIST IN ITS Transactions TAB.
+                  Same split: five rows beside the balance card, all twenty-five
+                  under Transactions below. Both are in the document, so a paste
+                  carries both. -#}
+              {%- for cells in data.qt.tx_rows[:5] %}
+              <tr>
+                {%- for cell in cells[:5] %}
+                <td class="cw-cell-{{ cell.kind }}{% if not cell.shown %} cw-cell-empty{% endif %}">{% if cell.shown %}{{ cell.text }}{% else %}&mdash;{% endif %}</td>
+                {%- endfor %}
+              </tr>
+              {%- endfor %}
+            </tbody>
+          </table>
+        </div>
+        <p class="panel-note">The newest {{ data.qt.tx_rows[:5]|length }} of
+           {{ data.qt.tx_rows|length }} entries read. The full list, with every column, is under
+           <a href="#cw-transactions">Transactions</a> below.</p>
+        {%- else %}
+        <p class="empty"><span class="empty-mark">(none)</span>
+           <span class="empty-what">{{ pane.transactions.error or 'this wallet has no transactions at all.
+           That is a result: nothing has ever been paid into or out of it.' }}</span>
+           <span class="empty-params">asked for {{ pane.transactions.asked_for }}</span></p>
+        {%- endif %}
+      </div>
+    </div>
+    <div class="subbox">
+      <p class="subbox-title">Wallets</p>
+      <p class="panel-note">Loaded: {% if wallet.loaded %}<span class="mono">{{ wallet.loaded|join(', ') }}</span>
+         {% else %}<strong>(none)</strong> &#8212; the node answered and holds no loaded wallet{% endif %}</p>
+      <p class="panel-note">On disk: {% if wallet.on_disk %}<span class="mono">{{ wallet.on_disk|join(', ') }}</span>
+         {% else %}<strong>(none reported)</strong> &#8212; either the directory is empty or this daemon has no
+         <code>listwalletdir</code>; the two are not distinguished from here{% endif %}</p>
+    </div>
+    {%- else %}
+    {{ unasked(data.asset, data.cannot_ask, 'The balance card and the recent transactions') }}
+    {%- endif %}
+  </section>
+
+  {#- ===== TRANSACTIONS: Qt's own columns, newest first. -#}
+  <section class="panel cw-pane" id="cw-transactions">
+    <h2>Transactions</h2>
+    {%- if data.asked %}
+    <p class="panel-note">The newest {{ pane.transactions.asked_for }} wallet entries, newest first, under
+       Qt's own column headings. Hover a heading for what the field is. Dates are UTC and are a MOMENT, not
+       a duration, so they are not in microfortnights; confirmations are a COUNT, for the same reason.</p>
+    {%- if data.qt.tx_rows %}
+    <div class="cw-txwrap">
+      <table class="cw-txtable">
+        <thead><tr>
+          {%- for column in data.qt.tx_columns %}<th title="{{ column.note }}">{{ column.label }}</th>{% endfor %}
+        </tr></thead>
+        <tbody>
+          {%- for cells in data.qt.tx_rows %}
+          <tr>
+            {%- for cell in cells %}
+            <td class="cw-cell-{{ cell.kind }}{% if not cell.shown %} cw-cell-empty{% endif %}">{% if cell.shown %}{{ cell.text }}{% else %}&mdash;{% endif %}</td>
+            {%- endfor %}
+          </tr>
+          {%- endfor %}
+        </tbody>
+      </table>
+    </div>
+    <ul class="cw-status-notes">
+      {%- for column in data.qt.tx_columns if column.note %}
+      <li><strong>{{ column.label }}</strong> &#8212; {{ column.note }}</li>
+      {%- endfor %}
+    </ul>
+    {%- else %}
+    <p class="empty"><span class="empty-mark">(none)</span>
+       <span class="empty-what">{{ pane.transactions.error or 'this wallet has no transactions at all. That is a
+       result: nothing has ever been paid into or out of it.' }}</span>
+       <span class="empty-params">asked for {{ pane.transactions.asked_for }}</span></p>
+    {%- endif %}
+    {%- else %}
+    {{ unasked(data.asset, data.cannot_ask, "Qt's five transaction columns -- date, type, label, address, amount") }}
+    {%- endif %}
+  </section>
+
+  {#- ===== THE LOCK. Reported, never offered.
+
+      ITS OWN SECTION RATHER THAN A SUBBOX OF OVERVIEW, because Gridcoin's rail
+      links at it under Gridcoin's own word for it -- Staking, since a wallet
+      unlocked FOR STAKING is a different state from one unlocked for spending.
+      One section, linked from two vocabularies, rather than the same reading
+      under two headings. -#}
+  <section class="panel cw-pane" id="cw-lock">
+    <h2>Wallet encryption</h2>
+    {%- if data.asked %}
     <p class="panel-note"><strong>{{ wallet.encryption.state }}</strong> &#8212; {{ wallet.encryption.why }}
        {% if wallet.encryption.unlocked_until is not none %}
        <span class="mono">unlocked_until={{ wallet.encryption.unlocked_until }}</span>{% endif %}</p>
-  </div>
-  <div class="subbox">
-    <p class="subbox-title">Wallets</p>
-    <p class="panel-note">Loaded: {% if wallet.loaded %}<span class="mono">{{ wallet.loaded|join(', ') }}</span>
-       {% else %}<strong>(none)</strong> &#8212; the node answered and holds no loaded wallet{% endif %}</p>
-    <p class="panel-note">On disk: {% if wallet.on_disk %}<span class="mono">{{ wallet.on_disk|join(', ') }}</span>
-       {% else %}<strong>(none reported)</strong> &#8212; either the directory is empty or this daemon has no
-       <code>listwalletdir</code>; the two are not distinguished from here{% endif %}</p>
-  </div>
-</section>
+    <p class="panel-note">This is the fact that decides whether a payout can be made at all, and nothing on
+       this page offers to change it. Qt shows it as a padlock in the status bar; it is in the status bar
+       below too.</p>
+    {%- else %}
+    {{ unasked(data.asset, data.cannot_ask, 'Whether this wallet is encrypted, and whether it is unlocked') }}
+    {%- endif %}
+    {#- A PARTIAL ANSWER'S SENTENCE, FROM THE RAIL ENTRY THAT POINTS HERE. GRC's
+        Staking entry carries it; BTC's and LTC's rails have no entry for this
+        section at all, so the loop renders nothing and no empty box appears. -#}
+    {%- for entry in data.qt.rail if entry.anchor == 'cw-lock' and entry.missing %}
+    <p class="cw-missing"><strong>{{ entry.label }}:</strong> {{ entry.missing }}.</p>
+    {%- endfor %}
+  </section>
 
-<section class="panel">
-  <h2>Transactions</h2>
-  <p class="panel-note">The newest {{ pane.transactions.asked_for }} wallet entries, newest first.
-     <code>category</code> is the daemon's own word &#8212; send, receive, generate, immature, orphan &#8212; and is
-     not collapsed to a direction, because <code>generate</code> and <code>immature</code> are the two that
-     matter on a desk that mined its own coins and both would read as <code>receive</code>.</p>
-  {%- if pane.transactions.rows %}
-  <div class="scroll-x">
-    <table>
-      <thead><tr><th>txid</th><th>category</th><th>amount</th><th>fee</th><th>conf</th><th>address</th><th>label</th></tr></thead>
+  {#- ===== PEERS. Core's Node window, not its rail. -#}
+  <section class="panel cw-pane" id="cw-peers">
+    <h2>Peers</h2>
+    {%- if data.asked %}
+    {%- if pane.peers.rows %}
+    <div class="cw-txwrap">
+      <table class="cw-txtable">
+        <thead><tr><th>address</th><th>build</th><th>direction</th><th>ping</th><th>their height</th></tr></thead>
+        <tbody>
+          {%- for peer in pane.peers.rows %}
+          <tr>
+            <td class="cw-cell-mono">{{ peer.addr }}</td>
+            <td class="cw-cell-mono">{{ peer.subver or '&mdash;'|safe }}</td>
+            <td>{{ 'inbound' if peer.inbound else 'outbound' }}</td>
+            <td>{{ peer.ping_display or '(not reported)' }}</td>
+            <td class="cw-cell-count">{{ peer.synced_blocks if peer.synced_blocks is not none else '(none)' }}</td>
+          </tr>
+          {%- endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="panel-note">Ping is a duration and is in microfortnights (rule 6). Their height is a COUNT and
+       is not.</p>
+    {%- else %}
+    <p class="empty"><span class="empty-mark">(none)</span>
+       <span class="empty-what">{{ pane.peers.error or pane.peers.note }}</span></p>
+    {%- endif %}
+    {%- else %}
+    {{ unasked(data.asset, data.cannot_ask, 'One row per connected peer') }}
+    {%- endif %}
+  </section>
+
+  {#- ===== INFORMATION. Core's Node window tab of the same name. -#}
+  <section class="panel cw-pane" id="cw-information">
+    <h2>Information</h2>
+    {%- if data.asked %}
+    <table class="kvt">
       <tbody>
-        {%- for row in pane.transactions.rows %}
-        <tr>
-          <td class="mono breakable">{{ row.txid }}</td>
-          <td>{{ row.category }}</td>
-          <td class="num">{{ '%.8f'|format(row.amount) if row.amount is not none else '(none)' }}</td>
-          <td class="num">{{ '%.8f'|format(row.fee) if row.fee is not none else '&mdash;'|safe }}</td>
-          <td class="num">{{ row.confirmations if row.confirmations is not none else '(none)' }}</td>
-          <td class="mono breakable">{{ row.address or '&mdash;'|safe }}</td>
-          <td class="breakable">{{ row.label or '&mdash;'|safe }}</td>
-        </tr>
+        <tr><th scope="row">Network the daemon says</th>
+            <td>{% if live.network_named %}<strong class="mono">{{ live.network }}</strong>
+                {% else %}<strong>NOT NAMED</strong> &#8212; {{ live.network }}. Reachable is not the question: an
+                alias pointing at mainnet reads the same as one pointing at testnet until a daemon says
+                which{% endif %}</td></tr>
+        <tr><th scope="row">May this be touched</th>
+            <td class="mono">{{ live.network_verdict }}
+                <span class="subtle">chains/daemon_network.test_network_verdict &#8212; only
+                <code>network_is_test</code> is permission; the other two both refuse and for different
+                reasons</span></td></tr>
+        <tr><th scope="row">Synced</th>
+            <td><strong>{{ live.sync.state }}</strong>{% if live.sync.why %} &#8212; {{ live.sync.why }}{% endif %}
+                <span class="subtle">blocks {{ live.sync.blocks if live.sync.blocks is not none else '(not reported)' }},
+                headers {{ live.sync.headers if live.sync.headers is not none else '(not reported)' }},
+                behind {{ live.sync.behind if live.sync.behind is not none else '(not established)' }}</span></td></tr>
+        <tr><th scope="row">Addresses this network pays</th>
+            <td class="mono">{{ live.bech32[0] }}{% if live.bech32[1] %} &#8212; {{ live.bech32[1] }}{% endif %}</td></tr>
+        {%- for key, label in [('chain', 'chain'), ('blocks', 'blocks'), ('headers', 'headers'),
+                               ('verificationprogress', 'verification progress'), ('pruned', 'pruned'),
+                               ('size_on_disk', 'size on disk (bytes)'), ('version', 'version'),
+                               ('subversion', 'build'), ('protocolversion', 'protocol'),
+                               ('connections', 'connections')] %}
+        <tr><th scope="row">{{ label }}</th>
+            <td class="mono">{% if pane.node[key].reported %}{{ pane.node[key].value }}
+                {%- else %}<strong>not reported</strong>{% endif %}</td></tr>
         {%- endfor %}
       </tbody>
     </table>
-  </div>
-  {%- else %}
-  <p class="empty"><span class="empty-mark">(none)</span>
-     <span class="empty-what">{{ pane.transactions.error or 'this wallet has no transactions at all. That is a
-     result: nothing has ever been paid into or out of it.' }}</span>
-     <span class="empty-params">asked for {{ pane.transactions.asked_for }}</span></p>
-  {%- endif %}
-</section>
+    {%- if pane.node.errors %}
+    <ul class="finding-list">
+      {%- for why in pane.node.errors %}<li class="breakable">{{ why }}</li>{%- endfor %}
+    </ul>
+    {%- endif %}
+    {%- else %}
+    {{ unasked(data.asset, data.cannot_ask, "The daemon's own account of itself -- network, build, chain position, disk") }}
+    {%- endif %}
+  </section>
 
-<section class="panel">
-  <h2>Peers</h2>
-  {%- if pane.peers.rows %}
-  <div class="scroll-x">
-    <table>
-      <thead><tr><th>address</th><th>build</th><th>direction</th><th>ping</th><th>their height</th></tr></thead>
+  {%- elif data.kind == 'translated' %}
+  {%- set live = data.live %}
+
+  {#- ===== OVERVIEW. The figures that decide how much of the balance can move,
+      read out of the calls this render already made. XRP's rail links its
+      "Account reserve" entry here, because on that chain the reserve IS the
+      difference between the balance and what a payout may draw on. -#}
+  <section class="panel cw-pane" id="cw-overview">
+    <h2>Overview</h2>
+    {%- if data.asked %}
+    <table class="kvt">
       <tbody>
-        {%- for peer in pane.peers.rows %}
-        <tr>
-          <td class="mono breakable">{{ peer.addr }}</td>
-          <td class="mono breakable">{{ peer.subver or '&mdash;'|safe }}</td>
-          <td>{{ 'inbound' if peer.inbound else 'outbound' }}</td>
-          <td>{{ peer.ping_display or '(not reported)' }}</td>
-          <td class="num">{{ peer.synced_blocks if peer.synced_blocks is not none else '(none)' }}</td>
-        </tr>
-        {%- endfor %}
+        <tr><th scope="row">Account asked about</th>
+            <td class="mono breakable">{{ live.account or '(none configured)' }}
+                <span class="subtle">the shared deposit account from the configuration, not the payout
+                account &#8212; deriving the payout account would mean decoding the signing seed, and a
+                read-only page must not touch key material to decide what to display</span></td></tr>
+        <tr><th scope="row">Calls made</th>
+            <td><span class="num">{{ live.rpc_calls }}</span> for {{ data.panes|length }} questions, because
+                one call on this chain answers more than one of them &#8212; each pane below says which</td></tr>
       </tbody>
     </table>
-  </div>
+    {%- if data.qt.figures %}
+    <div class="cw-overview">
+      <div class="cw-card">
+        <p class="cw-card-title">Account figures</p>
+        <table class="cw-money">
+          <tbody>
+            {%- for row in data.qt.figures %}
+            <tr class="{% if not row.found %}cw-money-absent{% endif %}">
+              <th scope="row">{{ row.label }}</th>
+              <td>{% if row.found %}{{ row.value }}{% else %}<strong>not read</strong>{% endif %}
+                  <span class="cw-money-note">{{ row.why or row.note }}</span></td>
+            </tr>
+            {%- endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <p class="cw-card-title">Where each figure came from</p>
+        <ul class="cw-status-notes">
+          {%- for row in data.qt.figures %}
+          <li><strong>{{ row.label }}</strong> &#8212; <code>{{ row.where }}</code>.
+              {{ 'read' if row.found else 'NOT read' }}</li>
+          {%- endfor %}
+        </ul>
+        <p class="panel-note">Each path is one a module in <code>chains/</code> already reads, so a reply
+           whose shape changed renders here as a named absence rather than as a plausible figure. A ledger
+           index, a slot, a sequence and a peer count are COUNTS and are never shown as durations.</p>
+      </div>
+    </div>
+    {%- else %}
+    <p class="empty"><span class="empty-mark">(no figures)</span>
+       <span class="empty-what">this chain has no figure table in
+       <code>services/chain_wallet_layout._FIGURES</code>, so the raw answers below are everything this
+       panel knows. That is a gap in this repository rather than a fact about the chain.</span>
+       <span class="empty-params">asset={{ data.asset }}</span></p>
+    {%- endif %}
+    {%- else %}
+    {{ unasked(data.asset, data.cannot_ask, 'What this account holds, and how much of it the reserve locks') }}
+    {%- endif %}
+  </section>
+
+  {#- ===== ONE SECTION PER PANE QUESTION, in PANE_QUESTIONS' order, so XRP and SOL
+      read down the page in the same order as the three Core chains. The ids come
+      from services/chain_wallet_layout.pane_anchor() so the rail can link at them.
+
+      TWO LOOPS, GUARDED BY `data.asked`, because an unasked render has no answers
+      and the sections still have to exist -- a rail entry whose section only
+      appears after a click is a dead link on the page the operator lands on. -#}
+  {%- if data.asked %}
+  {%- for row in live.answers %}
+  <section class="panel cw-pane" id="{{ data.qt.pane_anchors[row.pane.title] }}">
+    <h2>{{ row.pane.title }}</h2>
+    <p class="panel-note">{{ row.pane.what }}<br>
+       <span class="subtle">asked as <code>{{ row.pane.question }}</code>{% if row.translated %},
+       sent as <code>{{ row.translated }}</code>{% endif %}</span></p>
+    {%- if row.refusal %}
+    <p class="empty"><span class="empty-mark">(no equivalent)</span>
+       <span class="empty-what">{{ row.refusal }}</span></p>
+    {%- elif row.shared_with %}
+    <p class="panel-note"><strong>Answered by the same <code>{{ row.translated }}</code> call as
+       {{ row.shared_with }}</strong> &#8212; one measurement, shown twice on purpose rather than asked twice. Two
+       independent calls could legitimately disagree, and a reader could not tell.</p>
+    {%- endif %}
+    {%- if row.answer %}
+    {%- if row.answer.ok %}
+    <table class="kvt">
+      <tbody>
+        <tr><th scope="row">The field that answers it</th><td class="mono breakable">{{ row.answer.answers }}</td></tr>
+        {%- if row.answer.note %}
+        <tr><th scope="row">How this differs</th><td class="breakable">{{ row.answer.note }}</td></tr>
+        {%- endif %}
+        <tr><th scope="row">Parameters sent</th><td class="mono breakable">{{ row.answer.params }}</td></tr>
+      </tbody>
+    </table>
+    <pre class="mono breakable chain-raw">{{ row.answer.result }}</pre>
+    {%- else %}
+    <p class="empty"><span class="empty-mark">{{ '(refused)' if row.answer.refused else '(did not answer)' }}</span>
+       <span class="empty-what">{{ row.answer.error }}</span>
+       {%- if row.answer.needs %}
+       <span class="empty-params">this question needs an account and none was supplied; the account is a
+       custody decision with no safe default, so nothing here invents one</span>
+       {%- endif %}</p>
+    {%- endif %}
+    {%- elif not row.refusal %}
+    <p class="empty"><span class="empty-mark">(not asked)</span>
+       <span class="empty-what">no answer was recorded for this question, which should not happen &#8212; every
+       question in <code>services/chain_panel.PANE_QUESTIONS</code> is either refused, shared or asked. If you
+       are reading this, that invariant broke.</span></p>
+    {%- endif %}
+  </section>
+  {%- endfor %}
   {%- else %}
-  <p class="empty"><span class="empty-mark">(none)</span>
-     <span class="empty-what">{{ pane.peers.error or pane.peers.note }}</span></p>
+  {%- for pane in data.panes %}
+  <section class="panel cw-pane" id="{{ data.qt.pane_anchors[pane.title] }}">
+    <h2>{{ pane.title }}</h2>
+    <p class="panel-note">{{ pane.what }}<br>
+       <span class="subtle">would be asked as <code>{{ pane.question }}</code>, translated through this
+       chain's command map</span></p>
+    {{ unasked(data.asset, data.cannot_ask, 'This answer') }}
+  </section>
+  {%- endfor %}
   {%- endif %}
-</section>
 
-<section class="panel">
-  <h2>Information</h2>
-  <table class="kvt">
-    <tbody>
-      <tr><th scope="row">Network the daemon says</th>
-          <td>{% if live.network_named %}<strong class="mono">{{ live.network }}</strong>
-              {% else %}<strong>NOT NAMED</strong> &#8212; {{ live.network }}. Reachable is not the question: an
-              alias pointing at mainnet reads the same as one pointing at testnet until a daemon says
-              which{% endif %}</td></tr>
-      <tr><th scope="row">May this be touched</th>
-          <td class="mono">{{ live.network_verdict }}
-              <span class="subtle">chains/daemon_network.test_network_verdict &#8212; only
-              <code>network_is_test</code> is permission; the other two both refuse and for different
-              reasons</span></td></tr>
-      <tr><th scope="row">Synced</th>
-          <td><strong>{{ live.sync.state }}</strong>{% if live.sync.why %} &#8212; {{ live.sync.why }}{% endif %}
-              <span class="subtle">blocks {{ live.sync.blocks if live.sync.blocks is not none else '(not reported)' }},
-              headers {{ live.sync.headers if live.sync.headers is not none else '(not reported)' }},
-              behind {{ live.sync.behind if live.sync.behind is not none else '(not established)' }}</span></td></tr>
-      <tr><th scope="row">Addresses this network pays</th>
-          <td class="mono">{{ live.bech32[0] }}{% if live.bech32[1] %} &#8212; {{ live.bech32[1] }}{% endif %}</td></tr>
-      {%- for key, label in [('chain', 'chain'), ('blocks', 'blocks'), ('headers', 'headers'),
-                             ('verificationprogress', 'verification progress'), ('pruned', 'pruned'),
-                             ('size_on_disk', 'size on disk (bytes)'), ('version', 'version'),
-                             ('subversion', 'build'), ('protocolversion', 'protocol'),
-                             ('connections', 'connections')] %}
-      <tr><th scope="row">{{ label }}</th>
-          <td class="mono">{% if pane.node[key].reported %}{{ pane.node[key].value }}
-              {%- else %}<strong>not reported</strong>{% endif %}</td></tr>
-      {%- endfor %}
-    </tbody>
-  </table>
-  {%- if pane.node.errors %}
-  <ul class="finding-list">
-    {%- for why in pane.node.errors %}<li class="breakable">{{ why }}</li>{%- endfor %}
-  </ul>
-  {%- endif %}
-</section>
+  {%- else %}
+  {%- set live = data.live %}
 
-{%- elif data.kind == 'translated' %}
-{% set live = data.live %}
-<section class="panel">
-  <h2>The same questions, asked of {{ data.asset }}</h2>
-  <p class="panel-note">This chain has no Core wallet to copy, so each of Core's read panes is asked through
-     <code>chains/{{ live.protocol }}_rpc_map</code> &#8212; the command map built when the operator asked for
-     &ldquo;control commands that are congruent to btc/ltc/grc rpc commands&rdquo;. Where a question has no
-     answer on this chain, the map's own reason is printed instead of a figure.</p>
-  <table class="kvt">
-    <tbody>
-      <tr><th scope="row">Account asked about</th>
-          <td class="mono breakable">{{ live.account or '(none configured)' }}
-              <span class="subtle">the shared deposit account from the configuration, not the payout
-              account &#8212; deriving the payout account would mean decoding the signing seed, and a
-              read-only page must not touch key material to decide what to display</span></td></tr>
-      <tr><th scope="row">Calls made</th>
-          <td><span class="num">{{ live.rpc_calls }}</span> for {{ data.panes|length }} questions, because
-              one call on this chain answers more than one of them &#8212; each row says which</td></tr>
-    </tbody>
-  </table>
-</section>
+  {#- ===== THE LEDGER. ICP's Overview and its Subaccounts rail entry both link
+      here: the desk's own account identifier, and the three ICRC-1 reads. -#}
+  <section class="panel cw-pane" id="cw-ledger">
+    <h2>{{ data.asset }} ledger</h2>
+    {%- if data.asked %}
+    <table class="kvt">
+      <tbody>
+        <tr><th scope="row">The desk's own account</th>
+            <td class="mono breakable">{% if live.own_address.address %}{{ live.own_address.address }}
+                <span class="subtle">derived locally from the configured principal &#8212; no call, so it is
+                readable with the replica down</span>
+                {%- else %}<strong>NOT DERIVED</strong> &#8212; {{ live.own_address.error }}{% endif %}</td></tr>
+        <tr><th scope="row">Calls made</th><td><span class="num">{{ live.rpc_calls }}</span></td></tr>
+      </tbody>
+    </table>
+    {%- if live.rows %}
+    <div class="cw-txwrap">
+      <table class="cw-txtable">
+        <thead><tr><th>what</th><th>answer</th></tr></thead>
+        <tbody>
+          {%- for row in live.rows %}
+          <tr>
+            <td class="breakable">{{ row.what }}</td>
+            <td class="breakable">{% if row.ok %}<span class="mono">{{ row.value }}</span>
+                {%- else %}<strong>could not be read</strong> &#8212; {{ row.error }}{% endif %}</td>
+          </tr>
+          {%- endfor %}
+        </tbody>
+      </table>
+    </div>
+    {%- else %}
+    <p class="empty"><span class="empty-mark">(none)</span>
+       <span class="empty-what">no ledger question was even attempted, which should not happen &#8212; the list is
+       fixed in <code>services/chain_panel.icp_live()</code>.</span></p>
+    {%- endif %}
+    <div class="subbox">
+      <p class="subbox-title">Why there is no Peers pane</p>
+      <p class="panel-note">{{ live.no_peers_pane }}</p>
+    </div>
+    {%- else %}
+    {{ unasked(data.asset, data.cannot_ask, "The desk's own account, its balance, and the ledger's own fee") }}
+    {%- endif %}
+    {%- for entry in data.qt.rail if entry.anchor == 'cw-ledger' and entry.missing %}
+    <p class="cw-missing"><strong>{{ entry.label }}:</strong> {{ entry.missing }}.</p>
+    {%- endfor %}
+  </section>
 
-{%- for row in live.answers %}
-<section class="panel">
-  <h2>{{ row.pane.title }}</h2>
-  <p class="panel-note">{{ row.pane.what }}<br>
-     <span class="subtle">asked as <code>{{ row.pane.question }}</code>{% if row.translated %},
-     sent as <code>{{ row.translated }}</code>{% endif %}</span></p>
-  {%- if row.refusal %}
-  <p class="empty"><span class="empty-mark">(no equivalent)</span>
-     <span class="empty-what">{{ row.refusal }}</span></p>
-  {%- elif row.shared_with %}
-  <p class="panel-note"><strong>Answered by the same <code>{{ row.translated }}</code> call as
-     {{ row.shared_with }}</strong> &#8212; one measurement, shown twice on purpose rather than asked twice. Two
-     independent calls could legitimately disagree, and a reader could not tell.</p>
-  {%- endif %}
-  {%- if row.answer %}
-  {%- if row.answer.ok %}
-  <table class="kvt">
-    <tbody>
-      <tr><th scope="row">The field that answers it</th><td class="mono breakable">{{ row.answer.answers }}</td></tr>
-      {%- if row.answer.note %}
-      <tr><th scope="row">How this differs</th><td class="breakable">{{ row.answer.note }}</td></tr>
+  {#- ===== THE TRANSACTIONS REGION THAT SAYS THERE IS NO TRANSACTION LIST. The
+      rail's Transactions entry links here and is marked `unreadable`; the
+      sentence is services/chain_panel.icp_live()'s, so there is one copy of the
+      claim rather than a second written into the layout table. -#}
+  <section class="panel cw-pane" id="cw-transactions">
+    <h2>Transactions</h2>
+    <div class="cw-unreadable">
+      <p class="panel-note"><span class="cw-absence-mark">[unreadable]</span>
+         <strong>This chain has no per-wallet transaction list to show here.</strong></p>
+      {%- if data.asked %}
+      <p class="panel-note">{{ live.no_transactions_pane }}.</p>
+      {%- else %}
+      <p class="panel-note">A deposit on this chain IS the balance appearing at an allocated subaccount,
+         because nothing else can pay into it, so there is no per-wallet transaction list to render. That is
+         a fact about the Internet Computer and not an effect of nobody having asked &#8212; the sentence the
+         panel prints verbatim comes from the function that owns the claim, and it needs an ask to be read
+         back. <em>/admin</em>'s deposit table is where arrivals are recorded.</p>
       {%- endif %}
-      <tr><th scope="row">Parameters sent</th><td class="mono breakable">{{ row.answer.params }}</td></tr>
-    </tbody>
-  </table>
-  <pre class="mono breakable chain-raw">{{ row.answer.result }}</pre>
-  {%- else %}
-  <p class="empty"><span class="empty-mark">{{ '(refused)' if row.answer.refused else '(did not answer)' }}</span>
-     <span class="empty-what">{{ row.answer.error }}</span>
-     {%- if row.answer.needs %}
-     <span class="empty-params">this question needs an account and none was supplied; the account is a
-     custody decision with no safe default, so nothing here invents one</span>
-     {%- endif %}</p>
-  {%- endif %}
-  {%- elif not row.refusal %}
-  <p class="empty"><span class="empty-mark">(not asked)</span>
-     <span class="empty-what">no answer was recorded for this question, which should not happen &#8212; every
-     question in <code>services/chain_panel.PANE_QUESTIONS</code> is either refused, shared or asked. If you
-     are reading this, that invariant broke.</span></p>
-  {%- endif %}
-</section>
-{%- endfor %}
+    </div>
+  </section>
 
-{%- else %}
-{% set live = data.live %}
-<section class="panel">
-  <h2>{{ data.asset }} ledger</h2>
-  <table class="kvt">
-    <tbody>
-      <tr><th scope="row">The desk's own account</th>
-          <td class="mono breakable">{% if live.own_address.address %}{{ live.own_address.address }}
-              <span class="subtle">derived locally from the configured principal &#8212; no call, so it is
-              readable with the replica down</span>
-              {%- else %}<strong>NOT DERIVED</strong> &#8212; {{ live.own_address.error }}{% endif %}</td></tr>
-      <tr><th scope="row">Calls made</th><td><span class="num">{{ live.rpc_calls }}</span></td></tr>
-    </tbody>
-  </table>
-  {%- if live.rows %}
-  <div class="scroll-x">
-    <table>
-      <thead><tr><th>what</th><th>answer</th></tr></thead>
-      <tbody>
-        {%- for row in live.rows %}
-        <tr>
-          <td class="breakable">{{ row.what }}</td>
-          <td class="breakable">{% if row.ok %}<span class="mono">{{ row.value }}</span>
-              {%- else %}<strong>could not be read</strong> &#8212; {{ row.error }}{% endif %}</td>
-        </tr>
-        {%- endfor %}
-      </tbody>
-    </table>
-  </div>
-  {%- else %}
-  <p class="empty"><span class="empty-mark">(none)</span>
-     <span class="empty-what">no ledger question was even attempted, which should not happen &#8212; the list is
-     fixed in <code>services/chain_panel.icp_live()</code>.</span></p>
   {%- endif %}
-  <div class="subbox">
-    <p class="subbox-title">Why there is no Transactions pane</p>
-    <p class="panel-note">{{ live.no_transactions_pane }}</p>
-  </div>
-  <div class="subbox">
-    <p class="subbox-title">Why there is no Peers pane</p>
-    <p class="panel-note">{{ live.no_peers_pane }}</p>
-  </div>
-</section>
-{%- endif %}
+
+  {#- ===== QT'S SEND AND RECEIVE, AND THE PANES NOTHING HERE CAN READ.
+      One generated section per rail entry that carries its own whole content --
+      see the `absence()` macro and services/chain_wallet_layout.Rail.generated.
+      On GRC that is Send, Receive, Voting, Researcher and Magnitude; on ICP it is
+      Send, Receive and Block index; on BTC and LTC it is Send and Receive. -#}
+  {%- for entry in data.qt.rail if entry.generated %}
+  <section class="panel cw-pane" id="{{ entry.anchor }}">
+    <h2>{{ entry.label }}</h2>
+    {{ absence(entry) }}
+  </section>
+  {%- endfor %}
+
+  {#- ===== THE STATUS BAR. Qt puts it across the bottom of the window; this puts
+      it at the bottom of the panes and makes it stick, which is the same thing in
+      a document. Solana's rail links its "Commitment" entry here, because the
+      commitment rung is what settlement means on that cluster and Core's
+      confirmation count is what it stands in for.
+
+      THE FIGURES ARE IN THE BAR AND THEIR SENTENCES ARE UNDER IT. Rule 14 asks
+      for what a number means to be next to the number, and five sentences will
+      not fit in a bar -- so each cell carries its sentence as a title AND the
+      list below repeats it in the document, where a paste and a screen reader
+      both get it. -#}
+  <section class="panel cw-pane" id="cw-status">
+    <h2>Status bar</h2>
+    <div class="cw-statusbar">
+      {%- for cell in data.qt.status %}
+      <div class="cw-status-cell cw-status-{{ cell.state }}" title="{{ cell.note }}">
+        <span class="cw-status-glyph" aria-hidden="true">{{ cell.glyph }}</span>
+        <span class="cw-status-label">{{ cell.label }}</span>
+        <span class="cw-status-value">{{ cell.value }}</span>
+      </div>
+      {%- endfor %}
+    </div>
+    <ul class="cw-status-notes">
+      {%- for cell in data.qt.status %}
+      <li><strong>{{ cell.glyph }} {{ cell.label }} = {{ cell.value }}</strong> &#8212; {{ cell.note }}.</li>
+      {%- endfor %}
+    </ul>
+    <p class="panel-note">Block heights, ledger indexes, slots, peer counts, confirmation counts and
+       commitment rungs are COUNTS and are never shown as durations (rule 6). The only durations on this
+       page are the request budget, how long the ask took, and a peer's ping, and all three are in
+       microfortnights.</p>
+  </section>
+
+  </div>{# /cw-panes #}
+</div>{# /cw-shell #}
 
 {#- ===================== WHAT THIS BUILD LACKS (core chains only) ===================== -#}
 {%- if data.differences %}
