@@ -22,6 +22,7 @@ real code, assert on what came out. Nothing here paraphrases the tool's logic.
 from __future__ import annotations
 
 import io
+import json
 
 import pytest
 import valid_addresses
@@ -514,3 +515,297 @@ def test_main_CATCHES_a_setup_error_and_still_reports(monkeypatch, capsys):
     assert "FAILED: RegtestSetupError" in out, "named and counted, not raised through main()"
     assert "disable-wallet" in out, "and it names the cause ensure_wallet_on() exists to name"
     assert "NO CHAIN IS READY" in out, "and the closing block still prints"
+
+
+# ---------------------------------------------------------------------------
+# THE FAUCET, 2026-10-10. Written AFTER the operator proved the endpoint live,
+# not before -- the previous commit said a client would be a proposal because the
+# API is off by default in the faucet's config and this container is denied every
+# faucet host (403 at the CONNECT). One real request settled both, so the
+# responses below are the OBSERVED ones, copied from their terminal.
+#
+# NOTHING HERE OPENS A SOCKET. urlopen is replaced per test; a test that reached
+# the real faucet would burn the operator's per-IP rate limit on every suite run.
+# ---------------------------------------------------------------------------
+
+#: The two real 200s, verbatim. Using the observed payload rather than a plausible
+#: one is the difference between a test of this client and a test of my idea of the
+#: faucet -- and the field I would have got wrong is `amount`, a STRING ("0.01000000")
+#: where a plausible mock would have used a float.
+_REAL_BTC_200 = {
+    "ok": True, "network": "btc-testnet", "currency": "tBTC", "amount": "0.01000000",
+    "txid": "ee8e14c6d38b7330a8c7ab48589ca820f91686f1312fe89181436e81adf8f9c9",
+    "source": "https://github.com/Tech1k/cypherfaucet.com",
+}
+_REAL_LTC_200 = {
+    "ok": True, "network": "ltc-testnet", "currency": "tLTC", "amount": "0.01000000",
+    "txid": "6889177cedbd764e7dcaf6e79a9d27714a608536add9155b7479de5cdeab8e38",
+    "source": "https://github.com/Tech1k/cypherfaucet.com",
+}
+
+
+class _Answer:
+    """What urlopen returns, as a context manager over one JSON body."""
+
+    def __init__(self, payload):
+        self._body = json.dumps(payload).encode()
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def _faucet(monkeypatch, outcome):
+    """Replace urlopen and record the request the client built."""
+    sent = {}
+
+    def _urlopen(request, timeout=None):
+        sent["url"] = request.full_url
+        sent["method"] = request.get_method()
+        sent["headers"] = {k.lower(): v for k, v in request.header_items()}
+        sent["body"] = json.loads(request.data.decode())
+        sent["timeout"] = timeout
+        if isinstance(outcome, Exception):
+            raise outcome
+        return _Answer(outcome)
+
+    monkeypatch.setattr(tw.urllib.request, "urlopen", _urlopen)
+    return sent
+
+
+def test_the_faucet_request_IS_THE_SHAPE_THE_FAUCET_DOCUMENTS(monkeypatch):
+    """The request, asserted field by field against the README and the real 200.
+
+    A client that sent the wrong slug would get a 400 the operator has to decode.
+    `btc-testnet` and NOT `btc-testnet4` is the half this file guessed wrong for one
+    commit, so it is pinned per chain rather than trusted to a dict literal nobody
+    reads.
+    """
+    sent = _faucet(monkeypatch, _REAL_BTC_200)
+    row = tw.claim_from_faucet(Console(1, stream=io.StringIO()), "BTC",
+                               valid_addresses.BTC_PARTICIPANT)
+    assert row["ok"] is True
+    assert sent["url"] == "https://cypherfaucet.com/api/v1/claim"
+    assert sent["method"] == "POST"
+    assert sent["headers"]["content-type"] == "application/json"
+    assert sent["body"] == {"network": "btc-testnet", "address": valid_addresses.BTC_PARTICIPANT}
+    assert sent["timeout"] == tw.FAUCET_TIMEOUT_SECONDS, (
+        "a request with no timeout blocks forever, which is rule 14's blinking cursor"
+    )
+
+
+def test_the_LTC_slug_is_its_own_and_not_the_BTC_one(monkeypatch):
+    """Two chains, two slugs. One dict, and a test that reads it per chain."""
+    sent = _faucet(monkeypatch, _REAL_LTC_200)
+    tw.claim_from_faucet(Console(1, stream=io.StringIO()), "LTC", valid_addresses.LTC_PARTICIPANT)
+    assert sent["body"]["network"] == "ltc-testnet"
+
+
+def test_a_SUCCESSFUL_claim_reports_the_amount_the_currency_and_the_TXID(monkeypatch):
+    """The txid is the receipt. A claim that printed no txid would be unverifiable."""
+    stream = io.StringIO()
+    row = tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
+    del row
+    sent = _faucet(monkeypatch, _REAL_BTC_200)
+    del sent
+    stream = io.StringIO()
+    row = tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
+    out = stream.getvalue()
+    assert row == {"ok": True, "amount": "0.01000000", "currency": "tBTC",
+                   "txid": _REAL_BTC_200["txid"]}
+    assert _REAL_BTC_200["txid"] in out and "0.01000000 tBTC" in out
+
+
+@pytest.mark.parametrize(("status", "must_say"), [
+    (400, "rejected the address"),
+    (409, "EMPTY for this chain"),
+    (429, "rate limited"),
+    (503, "node is busy"),
+    (418, "undocumented status 418"),
+])
+def test_every_DOCUMENTED_faucet_error_gets_its_own_sentence(monkeypatch, status, must_say):
+    """Four codes the faucet documents, and one it does not.
+
+    409 and 429 are the two an operator will actually hit, and they mean opposite
+    things about whose problem it is -- "the faucet is dry, not your fault" against
+    "you already claimed". A single "the faucet refused" would send them to the wrong
+    place. The 418 row is the honest handling of a code nobody has seen: report the
+    NUMBER rather than pick the nearest sentence.
+    """
+    error = tw.urllib.error.HTTPError(tw.FAUCET_CLAIM_URL, status, "refused", {}, None)
+    _faucet(monkeypatch, error)
+    stream = io.StringIO()
+    row = tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
+    assert row["ok"] is False and row["why"] == f"HTTP {status}"
+    assert must_say in stream.getvalue()
+
+
+def test_a_DENIED_HOST_says_nothing_was_sent_rather_than_looking_like_an_empty_faucet(monkeypatch):
+    """The failure this will actually hit, and it must not read as "the faucet is dry".
+
+    The container that wrote this client is denied every faucet host --
+    `CONNECT tunnel failed, response 403`, measured 2026-10-10 -- and a URLError is
+    what that surfaces as. "It did nothing" and "the faucet had nothing" lead an
+    operator to two different next actions, so the message names the first.
+    """
+    _faucet(monkeypatch, tw.urllib.error.URLError("CONNECT tunnel failed, response 403"))
+    stream = io.StringIO()
+    row = tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
+    out = stream.getvalue()
+    assert row["ok"] is False and row["why"] == "URLError"
+    assert "NOTHING WAS SENT" in out
+    assert "network policy that denies the faucet host" in out
+
+
+def test_an_ok_false_body_with_HTTP_200_is_still_a_refusal(monkeypatch):
+    """`{"ok":false,...}` is the faucet's own shape and a 200 does not override it.
+
+    Trusting the status code alone is the shape of the mirror_sql defect this repo
+    records -- four copies printing success while branching on a return value that
+    does not exist. The body is the answer.
+    """
+    _faucet(monkeypatch, {"ok": False, "error": "address_already_claimed"})
+    row = tw.claim_from_faucet(Console(1, stream=io.StringIO()), "BTC",
+                               valid_addresses.BTC_PARTICIPANT)
+    assert row["ok"] is False and row["why"] == "address_already_claimed"
+
+
+def test_the_faucet_is_OFF_unless_asked(monkeypatch):
+    """No flag, no outbound request. Asserted by making urlopen fail the test if called."""
+    def _never(*_a, **_k):
+        raise AssertionError("prepare_chain contacted the faucet without --faucet")
+
+    monkeypatch.setattr(tw.urllib.request, "urlopen", _never)
+    daemon = _Daemon(_HEALTHY_BTC)
+    monkeypatch.setattr(tw, "build_adapters", lambda rpc: {"BTC": daemon})
+    monkeypatch.setattr(tw.Config, "RPC", {"BTC": {"wallet": "desk_hot"}}, raising=False)
+    assert tw.main(["--btc"]) == 0
+
+
+def test_main_with_FAUCET_funds_THE_ADDRESS_IT_JUST_DERIVED(monkeypatch, capsys):
+    """The trap this closes, and it is one I built.
+
+    getnewaddress mints a FRESH address on every run, so the operator funded one
+    address, re-ran the tool, and saw a different one -- with nothing on screen to
+    say the money was still in the same wallet. Two steps a human carries a
+    42-character string between is one too many. Funding happens in the same
+    invocation as the derivation now, and the report leads with the txid and the
+    address it landed on rather than with a new address to paste.
+    """
+    daemon = _Daemon(_HEALTHY_BTC)
+    monkeypatch.setattr(tw, "build_adapters", lambda rpc: {"BTC": daemon})
+    monkeypatch.setattr(tw.Config, "RPC", {"BTC": {"wallet": "desk_hot"}}, raising=False)
+    sent = _faucet(monkeypatch, _REAL_BTC_200)
+
+    assert tw.main(["--btc", "--faucet"]) == 0
+    out = capsys.readouterr().out
+    assert sent["body"]["address"] == valid_addresses.BTC_PARTICIPANT, (
+        "the faucet was asked to pay the address this run derived, not some other one"
+    )
+    assert "FUNDED." in out and _REAL_BTC_200["txid"] in out
+    assert f"{valid_addresses.BTC_PARTICIPANT}" in out
+    assert "one POST to https://cypherfaucet.com/api/v1/claim" in out, (
+        "and the outbound request is announced BEFORE it happens, naming the host"
+    )
+
+
+def test_the_PAID_faucet_entry_no_longer_claims_to_be_untested():
+    """The evidence field, now that one entry has actually been measured.
+
+    The whole table was `SEARCHED_NOT_TESTED` because nothing had been tried. One
+    entry has now paid, on both chains, with txids -- so it says so, and the DEFAULT
+    is still the hedge, which is what stops a new row looking verified by omission.
+    """
+    cypher = [f for entries in tw.FAUCETS.values() for f in entries
+              if "cypherfaucet.com" in f.url]
+    assert len(cypher) == 2, "one entry per chain"
+    for faucet in cypher:
+        assert faucet.evidence == tw.PAID
+        assert "MEASURED" in faucet.evidence and "it paid" in faucet.evidence
+    others = [f for entries in tw.FAUCETS.values() for f in entries
+              if "cypherfaucet.com" not in f.url]
+    assert others, "the unverified rows are still there as fallbacks"
+    for faucet in others:
+        assert faucet.evidence == tw.SEARCHED_NOT_TESTED, (
+            f"{faucet.url} claims evidence it does not have -- the default must be the hedge"
+        )
+
+
+# ---------------------------------------------------------------------------
+# THE BALANCE LINES, 2026-10-10, after the operator asked "do we have our btc and
+# ltc wallets funded or not?" and this tool's own output could not answer.
+# ---------------------------------------------------------------------------
+
+
+class _Balances:
+    """A daemon answering getwalletinfo and getbalances, or failing getbalances."""
+
+    url = "http://127.0.0.1:18443/"
+
+    def __init__(self, buckets, *, raises=False):
+        self.buckets = buckets
+        self.raises = raises
+
+    def call(self, method, *params):
+        if method == "getbalances":
+            if self.raises:
+                raise RPCError("Method not found")
+            return {"mine": self.buckets} if self.buckets is not None else {}
+        raise AssertionError(method)
+
+
+def test_a_PENDING_payment_is_named_where_a_confirmed_balance_reads_zero():
+    """The exact case that cost the operator an answer.
+
+    getwalletinfo.balance is the CONFIRMED balance, so a faucet payment broadcast
+    seconds ago reads 0.0 -- byte for byte identical to nothing arriving. Both of
+    those were on the screen and neither was distinguishable from the other.
+    """
+    adapter = _Balances({"trusted": 0.0, "untrusted_pending": 0.01, "immature": 0.0})
+    lines = tw.balance_lines(adapter, {"balance": 0.0})
+    blob = " ".join(lines)
+    assert "0.01 in the mempool" in blob
+    assert "A PAYMENT HAS ARRIVED" in blob, (
+        "and it says so in words, because the operator reads the screen and not the source"
+    )
+    assert "could not tell you" in blob
+
+
+def test_a_TRULY_EMPTY_wallet_does_not_claim_a_payment_arrived():
+    """The negative case, without which the test above is satisfied by always shouting."""
+    adapter = _Balances({"trusted": 0.0, "untrusted_pending": 0.0, "immature": 0.0})
+    blob = " ".join(tw.balance_lines(adapter, {"balance": 0.0}))
+    assert "A PAYMENT HAS ARRIVED" not in blob
+    assert "0.0 confirmed" in blob and "0.0 in the mempool" in blob, (
+        "and all three buckets still print -- (none) is a result, and a blank is ambiguous"
+    )
+
+
+def test_a_CONFIRMED_payment_reads_as_confirmed_and_not_as_pending():
+    """Once it confirms, the money is in `trusted` and the mempool line goes to zero."""
+    adapter = _Balances({"trusted": 0.01, "untrusted_pending": 0.0, "immature": 0.0})
+    blob = " ".join(tw.balance_lines(adapter, {"balance": 0.01}))
+    assert "0.01 confirmed" in blob
+    assert "A PAYMENT HAS ARRIVED" not in blob, "it has arrived AND confirmed; that is not pending"
+
+
+@pytest.mark.parametrize("broken", [True, False])
+def test_an_UNREADABLE_getbalances_says_so_and_never_renders_a_silent_zero(broken):
+    """Fail loud, not quiet. A narrower number presented as the whole one is the defect.
+
+    Two ways it can go wrong -- the RPC raising, and a `mine` bucket that is absent --
+    and both must say that a 0-confirmation payment is NOT counted in the figure
+    printed beside them. Falling back silently to getwalletinfo.balance would
+    reproduce exactly the defect this function was written to fix.
+    """
+    adapter = _Balances(None if not broken else {}, raises=broken)
+    blob = " ".join(tw.balance_lines(adapter, {"balance": 7.5}))
+    assert "7.5 confirmed" in blob, "the figure it DOES have is still printed"
+    assert "NOT" in blob and "mempool" in blob.lower(), (
+        "and it says the pending amount is not in that figure"
+    )

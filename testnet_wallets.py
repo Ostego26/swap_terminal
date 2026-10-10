@@ -5,10 +5,13 @@ Role: file (operator entry point, at the project root per CLAUDE.md rule 10)
 Reads: Config.RPC, each chain's own conf as a fallback, and the BTC/LTC daemons
 Writes: a wallet on each daemon, via createwallet. Nothing in this repository and
         nothing in swap_terminal.db.
-Can move funds: NO, and it has no send path at all. `sendtoaddress`,
-        `sendrawtransaction`, `signrawtransactionwithwallet`, `dumpprivkey` and
-        `dumpwallet` do not appear in this file, and
-        tests/test_testnet_wallets.py asserts that by reading its source.
+Can move funds: NO. It cannot SPEND: `sendtoaddress`, `sendrawtransaction`,
+        `signrawtransactionwithwallet`, `dumpprivkey` and `dumpwallet` do not
+        appear in this file, and tests/test_testnet_wallets.py asserts that by
+        reading its source. With `--faucet` it makes one outbound POST asking a
+        third party to send TESTNET coins TO the address it just derived -- a
+        receive, on a chain whose coins are worthless by construction, and off by
+        default.
 Mainnet-safe: it refuses any daemon that does not name a network on
         chains/daemon_network.CHAIN_TEST_NETWORKS' allowlist for that chain, and
         refuses one that names no network at all. There is no flag to override it.
@@ -83,7 +86,10 @@ wallet the payout path cannot see is worse than no wallet, because it looks done
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -146,6 +152,13 @@ CHAINS = ("BTC", "LTC")
 #: which they are holding.
 SEARCHED_NOT_TESTED = "listed 2026-10-10; UNREACHABLE from this container (403 at the proxy), so untested"
 
+#: And the one status that is NOT a hedge. CypherFaucet PAID, on the operator's host,
+#: 2026-10-10, both chains, with txids -- see FAUCET_CLAIM_URL's comment for the two
+#: verbatim responses. This is the difference the evidence field exists to carry, and
+#: the first version of this table could not express it because nothing had been
+#: tested. Now one entry has been.
+PAID = "MEASURED 2026-10-10: it paid both chains, txids in claim_from_faucet()"
+
 
 @dataclass(frozen=True)
 class Faucet:
@@ -164,6 +177,11 @@ class Faucet:
     url: str
     note: str
     prefill: bool = False
+    #: How this entry is known to work. Defaults to the hedge, because that is what
+    #: most of them are; an entry that has actually PAID says so and names the
+    #: measurement. The default being the weaker claim is the point -- a new row
+    #: cannot arrive looking verified by omission.
+    evidence: str = SEARCHED_NOT_TESTED
 
     def link_for(self, address: str) -> str:
         """The URL to print, with the address in it where the faucet supports that."""
@@ -185,18 +203,126 @@ FAUCETS: dict[str, tuple[Faucet, ...]] = {
     # slug and settles it from the source in one request, which is the first thing to
     # run rather than a second URL to try.
     "BTC": (
-        Faucet("https://cypherfaucet.com/btc-testnet", "0.01 tBTC/hour, no signup, per-IP limit; "
-               "slug per its README -- /btc-testnet4 also seen, ask /api/v1/info", prefill=True),
+        Faucet("https://cypherfaucet.com/btc-testnet", "0.01 tBTC, no signup, per-IP limit",
+               prefill=True, evidence=PAID),
         Faucet("https://mempool.space/testnet4/faucet", "needs a sign-in"),
         Faucet("https://faucet.testnet4.dev", "1 Mtsat per request, 24h cooldown; may be dry"),
     ),
     "LTC": (
-        Faucet("https://cypherfaucet.com/ltc-testnet", "0.01 tLTC/hour; the ?address= form is "
-               "quoted verbatim in its README", prefill=True),
+        Faucet("https://cypherfaucet.com/ltc-testnet", "0.01 tLTC, no signup, per-IP limit",
+               prefill=True, evidence=PAID),
         Faucet("https://litecointf.salmen.website", "claims up to 1.5 tLTC, 1 request/hour"),
         Faucet("https://tltc.bitaps.com", "0.01 tLTC per 5 min -- REPORTED STUCK at block 4,887,883"),
     ),
 }
+
+
+#: The faucet's claim endpoint, and the slug per chain. BOTH MEASURED on the
+#: operator's host 2026-10-10 rather than read off a README:
+#:
+#:     POST /api/v1/claim {"network":"btc-testnet","address":"tb1qkp5gm5ph..."}
+#:       -> {"ok":true,"network":"btc-testnet","currency":"tBTC",
+#:           "amount":"0.01000000","txid":"ee8e14c6d38b7330a8c7ab48589ca820...",
+#:           "source":"https://github.com/Tech1k/cypherfaucet.com"}
+#:     POST /api/v1/claim {"network":"ltc-testnet","address":"tltc1q6rv4cpys..."}
+#:       -> {"ok":true,...,"currency":"tLTC","amount":"0.01000000",
+#:           "txid":"6889177cedbd764e7dcaf6e79a9d27714a608536add9155b7479de5cdeab8e38"}
+#:
+#: THE SLUG IS `btc-testnet` AND NOT `btc-testnet4`, which this file guessed at for
+#: one commit and refused to pick between. The README said "Slugs are the URL slugs"
+#: and listed btc-testnet; a search result had surfaced the page as /btc-testnet4.
+#: The 200 above settles it, and settles the other thing that was NOT ESTABLISHED --
+#: the API is OFF BY DEFAULT in the faucet's config, and this deployment serves it.
+#:
+#: WHY THERE IS A CLIENT NOW WHERE THE LAST COMMIT SAID THERE SHOULD NOT BE: that
+#: commit's reason was rule 16's, "a fix you cannot test is a proposal", and it named
+#: exactly what would settle it -- one real request. The operator ran it. A client
+#: written against two observed responses is a fix; the same client written against a
+#: README would have been the guess rule 17 forbids.
+FAUCET_CLAIM_URL = "https://cypherfaucet.com/api/v1/claim"
+FAUCET_SLUGS = {"BTC": "btc-testnet", "LTC": "ltc-testnet"}
+
+#: Its documented error codes, from the same README, with what each means for an
+#: operator standing in front of it. A code NOT in here is reported with its number
+#: rather than guessed at -- the four below are what the faucet says it returns, and
+#: an unlisted one means it changed and nobody has looked.
+FAUCET_ERRORS = {
+    400: "the faucet rejected the address or the network slug as invalid",
+    409: "the faucet is EMPTY for this chain -- nothing was sent and this is not your fault",
+    429: "rate limited: one claim per address and one per IP per window. Wait it out",
+    503: "the faucet's own node is busy. Nothing was sent; try again shortly",
+}
+
+#: Seconds for the one faucet request. A number rather than no timeout at all,
+#: because urllib's default is to block forever and rule 14's complaint about a
+#: blinking cursor is what that produces.
+FAUCET_TIMEOUT_SECONDS = 30.0
+
+
+def claim_from_faucet(console: Console, asset: str, address: str) -> dict:
+    """Ask the faucet to send testnet coins to `address`. Returns a row for the report.
+
+    ONE REQUEST, NO RETRY, AND THAT IS DELIBERATE. Every documented failure here is
+    one a retry makes worse or cannot help: 429 is "you already claimed", 409 is "the
+    faucet is dry", 503 is "its node is busy". Hammering a free service somebody runs
+    for developers is how the rate limits get tighter for everyone, and the faucet's
+    own README says "the limits carry the load".
+
+    THE ADDRESS IS THE ONE THIS RUN JUST DERIVED, which is the whole reason this lives
+    in the same invocation. Before `--faucet` existed the operator funded an address,
+    re-ran the tool, saw a DIFFERENT address -- getnewaddress mints a fresh one every
+    call -- and had no way to tell from the screen that the payment had gone somewhere
+    still in the same wallet. Two steps a human carries a 42-character string between
+    is one step too many; this makes it one step.
+
+    IT CANNOT REACH MAINNET. The address comes from a daemon that has already answered
+    a network on CHAIN_TEST_NETWORKS' allowlist for its chain (prepare_chain refuses
+    first), the slug names a testnet, and the host is a literal in this file with no
+    mainnet sibling -- the same construction fund_testnets.py's pinned hosts use.
+    """
+    body = json.dumps({"network": FAUCET_SLUGS[asset], "address": address}).encode()
+    # NO S310 SUPPRESSION ON EITHER urllib CALL, and that is checked rather than
+    # assumed. Adding one was the first draft -- S310 is "audit URL open for
+    # permitted schemes" and the obvious thing to claim is "the scheme is this
+    # file's own https literal". Ruff's RUF100 reported both as UNUSED: it does not
+    # raise S310 when the URL's scheme is a literal prefix it can see. Third time in
+    # this file (the E402 block above records the first two). A suppression for a
+    # finding that does not fire is rule 19's shape exactly -- a claim nobody checked.
+    request = urllib.request.Request(
+        FAUCET_CLAIM_URL, data=body, headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    console.say(f"    asking {FAUCET_CLAIM_URL} for {FAUCET_SLUGS[asset]} -> {address}")
+    try:
+        with urllib.request.urlopen(request, timeout=FAUCET_TIMEOUT_SECONDS) as answer:  # noqa: S310 -- checked: same literal https URL
+            payload = json.loads(answer.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as error:
+        detail = FAUCET_ERRORS.get(error.code, f"undocumented status {error.code}")
+        body_text = error.read().decode("utf-8", "replace")[:200] if error.fp else ""
+        console.check(f"{asset} faucet", f"HTTP {error.code}", "HTTP 200", FAIL)
+        console.say(f"    {detail}")
+        if body_text:
+            console.say(f"    the faucet said: {body_text}")
+        return {"ok": False, "why": f"HTTP {error.code}"}
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        # NAMED, NOT SWALLOWED. A denied host is the failure this will actually hit --
+        # the container that wrote this file gets `CONNECT tunnel failed, response 403`
+        # from every faucet, measured 2026-10-10 -- and "it did nothing" would be
+        # indistinguishable from "the faucet is dry".
+        console.check(f"{asset} faucet", type(error).__name__, "HTTP 200", FAIL)
+        console.say(f"    {error}")
+        console.say("    NOTHING WAS SENT. A network policy that denies the faucet host looks "
+                    "exactly like this; so does being offline.")
+        return {"ok": False, "why": type(error).__name__}
+
+    if not payload.get("ok"):
+        console.check(f"{asset} faucet", payload.get("error", payload), "ok=true", FAIL)
+        return {"ok": False, "why": str(payload.get("error", "refused"))}
+    console.check(f"{asset} faucet", f"{payload.get('amount')} {payload.get('currency')}",
+                  "a payment", OK)
+    console.say(f"    txid  {payload.get('txid')}")
+    return {"ok": True, "amount": payload.get("amount"), "currency": payload.get("currency"),
+            "txid": payload.get("txid")}
 
 
 def wallet_name_for(asset: str) -> tuple[str, str]:
@@ -303,7 +429,56 @@ def address_shape_check(console: Console, asset: str, network: str, address: str
     ) == OK
 
 
-def prepare_chain(console: Console, asset: str) -> dict:
+def balance_lines(adapter, wallet_info: dict) -> list[str]:
+    """What this wallet holds, CONFIRMED AND NOT, because the difference is the question.
+
+    THE DEFECT THIS FIXES IS MINE AND IT COST THE OPERATOR AN ANSWER. This printed
+    `balance {wallet_info["balance"]}` and nothing else. `getwalletinfo.balance` is the
+    CONFIRMED balance, so a payment broadcast seconds ago reads `0.0` -- byte for byte
+    identical to no payment at all. On 2026-10-10 the operator funded both chains from
+    a faucet that returned `ok:true` with txids, re-ran this tool, saw `balance 0.0`
+    twice, and asked whether the wallets were funded. The honest answer was that this
+    screen could not tell them, which is rule 14's whole complaint: "did nothing" must
+    not look like "did work".
+
+    `getbalances` IS WHAT ANSWERS IT, and chain_balances.py already calls it -- its own
+    docstring carries the measurement that bare `getbalance` read 11.00248643 while
+    `getbalance("*", 0)` read 2000.0 on the same wallet. Three buckets, and each one
+    means something different to somebody waiting for coins:
+
+        trusted            confirmed and spendable. The payout worker's number.
+        untrusted_pending  IN THE MEMPOOL, 0 confirmations. "It arrived, wait."
+        immature           a coinbase under 100 confirmations. Regtest-shaped; here it
+                           should always be 0, and it is printed anyway because a
+                           non-zero would mean something nobody expects.
+
+    AND IF getbalances IS ABSENT IT SAYS SO rather than falling back silently. The
+    field was added in Core 0.19; both daemons here are far newer, so an absence means
+    something has changed and a reader needs to know the number they are looking at is
+    the narrower one.
+    """
+    confirmed = wallet_info.get("balance")
+    try:
+        buckets = (adapter.call("getbalances") or {}).get("mine") or {}
+    except Exception as error:  # noqa: BLE001 -- checked: this is a REPORT, and the caller can tell -- the returned line says getbalances could not be read and names the error, so an unreadable bucket set is never rendered as a zero. The confirmed figure above is still printed.
+        return [f"balance   {confirmed} confirmed",
+                f"          (getbalances could not be read: {type(error).__name__}: {error} -- so "
+                f"a payment still in the mempool would NOT show above)"]
+    if not buckets:
+        return [f"balance   {confirmed} confirmed",
+                "          (getbalances returned no `mine` bucket, so a payment sitting in the "
+                "mempool is NOT counted above -- that field arrived in Core 0.19 and both "
+                "daemons here are newer, so its absence is itself worth looking at)"]
+    pending = buckets.get("untrusted_pending")
+    lines = [f"balance   {buckets.get('trusted')} confirmed, {pending} in the mempool "
+             f"(0-conf), {buckets.get('immature')} immature"]
+    if pending:
+        lines.append("          ^ A PAYMENT HAS ARRIVED and is waiting for a confirmation. This "
+                     "is what `balance 0.0` alone could not tell you.")
+    return lines
+
+
+def prepare_chain(console: Console, asset: str, *, faucet: bool = False) -> dict:
     """One chain, end to end. Returns a row for the closing block.
 
     THE ORDER IS THE SAFETY PROPERTY, and it is the same ordering fund_regtest_chain()
@@ -347,7 +522,8 @@ def prepare_chain(console: Console, asset: str) -> dict:
     kind = "descriptor" if info.get("descriptors") else "legacy"
     console.say(f"    wallet {name!r} is a {kind} wallet (REPORTED, not chosen -- Core 28 makes "
                 f"descriptor, Litecoin 0.21 makes legacy, and the client reads this field itself)")
-    console.say(f"    balance   {info.get('balance')}")
+    for line in balance_lines(adapter, info):
+        console.say(f"    {line}")
 
     address = adapter.call("getnewaddress")
     # THE ANSWER IS USED, and it was not. This read
@@ -383,8 +559,15 @@ def prepare_chain(console: Console, asset: str) -> dict:
         console.say("    a faucet payment to the address below is SAFE to make now -- it lands on "
                     "the chain whether or not this node has caught up -- but this daemon will not "
                     "REPORT it until the sync passes that block.")
-    return {"asset": asset, "ok": True, "wallet": name, "address": address,
-            "network": network, "kind": kind, "synced": sync["state"] == SYNC_SYNCED}
+    row = {"asset": asset, "ok": True, "wallet": name, "address": address,
+           "network": network, "kind": kind, "synced": sync["state"] == SYNC_SYNCED}
+    if faucet:
+        # IN THE SAME RUN AS THE getnewaddress ABOVE, which is the whole design. See
+        # claim_from_faucet(): funding in a separate invocation means the operator
+        # carries a 42-character string between two commands, and a re-run mints a
+        # DIFFERENT address -- so the screen stops matching where the money went.
+        row["faucet"] = claim_from_faucet(console, asset, address)
+    return row
 
 
 def _refusal(asset: str, network: str, verdict: str) -> str:
@@ -429,8 +612,29 @@ def report(console: Console, rows: list[dict]) -> None:
         for row in rows:
             console.say(f"  {row['asset']}  {row.get('why', 'unknown')}")
         return
-    console.say("PASTE THESE INTO A FAUCET. The addresses are RECEIVING addresses and are safe to")
-    console.say("publish; nothing secret is printed by this tool and it has no send path.")
+    paid = [row for row in ready if (row.get("faucet") or {}).get("ok")]
+    if paid:
+        # WHAT ARRIVED AND WHERE, FIRST, because after a successful claim that is the
+        # only thing the operator needs off this screen. The faucet list still prints
+        # below it -- a claim can be rate-limited next time and a second faucet is
+        # then the answer -- but it is no longer the headline.
+        console.say("FUNDED. The txid is the receipt; the address is where it landed.")
+        for row in paid:
+            claim = row["faucet"]
+            console.say("")
+            console.say(f"  {row['asset']}  {claim['amount']} {claim['currency']}"
+                        f"  ->  {row['address']}")
+            console.say(f"        txid  {claim['txid']}")
+            if not row["synced"]:
+                console.say("        ^ this daemon is STILL SYNCING, so it will not REPORT this "
+                            "until the sync passes the block it landed in")
+        console.say("")
+        console.say("MORE COINS, OR A DIFFERENT FAUCET: the addresses and links below. The links")
+        console.say("carry the address, so no 42-character string has to be copied by hand.")
+    else:
+        console.say("PASTE THESE INTO A FAUCET, or re-run with --faucet to have this tool ask for")
+        console.say("you. The addresses are RECEIVING addresses and are safe to publish; nothing")
+        console.say("secret is printed by this tool and it cannot spend.")
     for row in ready:
         console.say("")
         console.say(f"  {row['asset']}  ({row['network']}, wallet {row['wallet']!r}, {row['kind']})")
@@ -439,7 +643,7 @@ def report(console: Console, rows: list[dict]) -> None:
             console.say("        ^ this daemon is STILL SYNCING: pay it now, see it later")
         for faucet in FAUCETS[row["asset"]]:
             console.say(f"        {faucet.link_for(row['address'])}")
-            console.say(f"            {faucet.note}  [{SEARCHED_NOT_TESTED}]")
+            console.say(f"            {faucet.note}  [{faucet.evidence}]")
     console.say("")
     console.say("Then, to see the money arrive:  python3 chain_balances.py")
     console.say("Re-running this file is safe and idempotent: an existing wallet is loaded, not")
@@ -452,6 +656,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument(f"--{asset.lower()}", action="store_true",
                             help=f"prepare the {asset} testnet wallet")
     parser.add_argument("--all", action="store_true", help="every chain above")
+    parser.add_argument("--faucet", action="store_true",
+                        help="ASK A THIRD-PARTY FAUCET to send testnet coins to the address this "
+                             "run derives. One request per chain, no retry. Off by default.")
     args = parser.parse_args(argv)
 
     chosen = [a for a in CHAINS if args.all or getattr(args, a.lower())]
@@ -467,6 +674,13 @@ def main(argv: list[str] | None = None) -> int:
     console.say(f"testnet_wallets: preparing {len(chosen)} chain(s): {', '.join(chosen)}")
     console.say("createwallet is the only write this tool makes, and it happens only after the "
                 "daemon names a network on the allowlist.")
+    if args.faucet:
+        # ANNOUNCED BEFORE IT HAPPENS (rule 14), and naming the host, because this is
+        # the one thing in this file that leaves the machine. An operator who did not
+        # mean to contact a third party should see it before the request, not in the
+        # result.
+        console.say(f"--faucet: one POST to {FAUCET_CLAIM_URL} per chain, asking it to send "
+                    f"testnet coins to the address derived below. No retry.")
     console.say("")
 
     rows: list[dict] = []
@@ -482,7 +696,7 @@ def main(argv: list[str] | None = None) -> int:
         # actually imports.
         console.step(number, asset, "testnet wallet")
         try:
-            rows.append(prepare_chain(console, asset))
+            rows.append(prepare_chain(console, asset, faucet=args.faucet))
         except (RegtestSetupError, OSError) as error:
             # NAMED AND COUNTED, not raised: one chain that cannot be reached must
             # not stop the other from being prepared, and the operator needs the
