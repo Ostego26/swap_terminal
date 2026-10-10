@@ -28,6 +28,15 @@ from time import time as _now
 from types import ModuleType
 
 import pytest
+
+# THE PANE DECISIONS MOVED TO chains/ ON 2026-10-10 and these tests follow them by
+# NAME rather than through a re-export left behind in regtest/operator_panel.py.
+# They stay in this file because what they pin is unchanged -- the same stubs, the
+# same assertions, the same mutations -- and moving 200 lines of test to a new file
+# in the same commit as the extraction would make the diff unreadable for a reader
+# checking that nothing about the behavior moved with the text.
+from chains import daemon_wallet as wallet
+from chains import rpc_translation
 from conftest import root_entry_point
 from regtest import daemons, funding_steps, steps
 from regtest import operator_panel as decisions
@@ -757,13 +766,23 @@ def test_only_READ_ONLY_methods_are_allowed_and_the_refusal_names_the_rule():
                       "walletpassphrase", "walletlock", "encryptwallet", "stop",
                       "dumpprivkey", "dumpwallet", "importprivkey", "getnewaddress",
                       "", None, 42, ["getbalance"]):
-        refusal = decisions.refuse_unless_read_only(forbidden)
+        refusal = wallet.refuse_unless_read_only(forbidden)
         assert refusal, f"{forbidden!r} must be refused"
 
-    assert "passphrase never goes through this page" in decisions.refuse_unless_read_only("walletpassphrase")
+    # THE LITERAL READ "passphrase never goes through this page" UNTIL 2026-10-10, and the
+    # sentence it quoted said "this page" when the allowlist had acquired a second surface --
+    # /admin's chain panel -- so the refusal was naming one page while governing two. The claim
+    # under test is unchanged and is the one worth pinning: a refused passphrase method must say
+    # that a passphrase never reaches any page in this application, so an operator does not go
+    # looking for the form. Only the wording moved with the function.
+    assert "passphrase never goes through a page" in wallet.refuse_unless_read_only("walletpassphrase")
+    assert "chains/daemon_wallet.py" in wallet.refuse_unless_read_only("walletpassphrase"), (
+        "the refusal must name WHERE the allowlist lives, because the operator's next question "
+        "is 'says who' and a refusal that cannot be checked is a refusal somebody routes around"
+    )
 
     for allowed in ("getblockchaininfo", "getbalance", "listunspent", "getrawtransaction"):
-        assert decisions.refuse_unless_read_only(allowed) == "", allowed
+        assert wallet.refuse_unless_read_only(allowed) == "", allowed
 
     # AND NOTHING THAT WRITES IS ON THE LIST, asserted over the LIST rather than over a sample
     # of it -- a write method added later would otherwise slip in unremarked.
@@ -774,9 +793,9 @@ def test_only_READ_ONLY_methods_are_allowed_and_the_refusal_names_the_rule():
     # firing, and by then it has stopped meaning anything (rule 19).
     writes = ("send", "sign", "wallet", "dump", "import", "encrypt", "create", "stop", "add",
               "set", "generate", "backup", "move")
-    for name in decisions.READ_ONLY_RPCS:
+    for name in wallet.READ_ONLY_RPCS:
         assert not any(name.startswith(verb) for verb in writes), name
-    assert "getnewaddress" not in decisions.READ_ONLY_RPCS, (
+    assert "getnewaddress" not in wallet.READ_ONLY_RPCS, (
         "it looks harmless and it WRITES a key into wallet.dat, which a staking-only wallet may "
         "refuse and which changes a file the operator backs up"
     )
@@ -2024,7 +2043,7 @@ def test_A_TABS_CONSOLE_OFFERS_ONLY_WHAT_THAT_TAB_CAN_ANSWER():
         # chains/solana_rpc_map.py landed -- so it asks the protocol's OWN map instead of
         # knowing which chains exist (rule 2: pin the stronger invariant).
         if protocol:
-            module = decisions.console_map(protocol)
+            module = rpc_translation.console_map(protocol)
             assert module is not None, (
                 f"{tab.asset} claims protocol {protocol!r} and CONSOLE_MAPS has no module for it, "
                 f"so its console can only fail"
@@ -2400,8 +2419,8 @@ def test_a_node_with_NO_WALLET_LOADED_is_not_reported_as_a_zero_balance():
     """
     run = _StubRun({"listwallets": [], "listwalletdir": {"wallets": [{"name": "desk_hot"}]},
                     "getblockcount": 812})
-    state = decisions.wallet_state(run)
-    assert state["state"] == decisions.WALLET_NONE_LOADED
+    state = wallet.wallet_state(run)
+    assert state["state"] == wallet.WALLET_NONE_LOADED
     assert state["balances"] is None, "there is no wallet, so there is no balance to show"
     assert "not a balance of zero" in state["why"]
     assert state["on_disk"] == ["desk_hot"], (
@@ -2412,8 +2431,8 @@ def test_a_node_with_NO_WALLET_LOADED_is_not_reported_as_a_zero_balance():
 def test_a_daemon_nobody_could_ask_is_NOT_ESTABLISHED_rather_than_empty():
     """Third outcome. "Could not ask" must never render as "has nothing" (rule 17)."""
     run = _StubRun({})
-    state = decisions.wallet_state(run)
-    assert state["state"] == decisions.WALLET_NOT_ESTABLISHED
+    state = wallet.wallet_state(run)
+    assert state["state"] == wallet.WALLET_NOT_ESTABLISHED
     assert state["balances"] is None
     assert "NOT\nestablished" in state["why"] or "NOT established" in state["why"]
     assert "not zero" in state["why"]
@@ -2421,8 +2440,8 @@ def test_a_daemon_nobody_could_ask_is_NOT_ESTABLISHED_rather_than_empty():
 
 def test_a_loaded_wallet_carries_cores_own_three_numbers_under_cores_own_words():
     """available / pending / immature -- an operator should not learn a second vocabulary."""
-    state = decisions.wallet_state(_StubRun(_MODERN))
-    assert state["state"] == decisions.WALLET_LOADED
+    state = wallet.wallet_state(_StubRun(_MODERN))
+    assert state["state"] == wallet.WALLET_LOADED
     assert state["balances"]["available"]["value"] == 1.5
     assert state["balances"]["pending"]["value"] == 0.25
     assert state["balances"]["immature"]["value"] == 50.0
@@ -2438,7 +2457,7 @@ def test_a_pre_0_17_daemon_falls_back_to_getinfo_and_says_which_numbers_it_LACKS
     look complete while claiming a measurement nobody took.
     """
     run = _StubRun({"getinfo": {"balance": 82.65}})
-    balances, why = decisions.wallet_balances(run)
+    balances, why = wallet.wallet_balances(run)
     assert why == ""
     assert balances["available"]["value"] == 82.65
     assert balances["available"]["reported"] is True
@@ -2448,7 +2467,7 @@ def test_a_pre_0_17_daemon_falls_back_to_getinfo_and_says_which_numbers_it_LACKS
 
 
 def test_an_unreadable_balance_returns_None_and_names_BOTH_routes_it_tried():
-    balances, why = decisions.wallet_balances(_StubRun({}))
+    balances, why = wallet.wallet_balances(_StubRun({}))
     assert balances is None
     assert "getwalletinfo" in why and "getinfo" in why
 
@@ -2459,7 +2478,7 @@ def test_transactions_come_back_NEWEST_FIRST():
     An operator checking whether a send just went out reads the first row, and the
     daemon's own order puts it last.
     """
-    rows, why = decisions.recent_transactions(_StubRun(_MODERN))
+    rows, why = wallet.recent_transactions(_StubRun(_MODERN))
     assert why == ""
     assert [row["txid"] for row in rows] == ["bb", "aa"]
     assert rows[0]["category"] == "send"
@@ -2473,7 +2492,7 @@ def test_the_transaction_category_is_kept_VERBATIM_and_not_collapsed_to_a_direct
         {"txid": "cc", "category": "immature", "amount": 50.0, "confirmations": 3},
         {"txid": "dd", "category": "generate", "amount": 50.0, "confirmations": 101},
     ]})
-    rows, _ = decisions.recent_transactions(run)
+    rows, _ = wallet.recent_transactions(run)
     assert {row["category"] for row in rows} == {"immature", "generate"}
 
 
@@ -2484,14 +2503,14 @@ def test_ZERO_PEERS_is_reported_as_a_FINDING_and_not_as_an_empty_pane():
     peers is valid, confirms on that node's own chain, and is seen by nobody.
     """
     run = _StubRun({**_MODERN, "getpeerinfo": []})
-    pane = decisions.wallet_pane(run)
+    pane = wallet.wallet_pane(run)
     assert pane["peers"]["rows"] == []
     assert pane["peers"]["error"] == ""
     assert "broadcasts into nothing" in pane["peers"]["note"]
 
 
 def test_peers_that_EXIST_carry_no_scary_note():
-    pane = decisions.wallet_pane(_StubRun(_MODERN))
+    pane = wallet.wallet_pane(_StubRun(_MODERN))
     assert len(pane["peers"]["rows"]) == 1
     assert pane["peers"]["note"] == ""
     assert pane["peers"]["rows"][0]["subver"] == "/Satoshi:28.0.0/"
@@ -2500,7 +2519,7 @@ def test_peers_that_EXIST_carry_no_scary_note():
 def test_a_daemon_without_getpeerinfo_is_an_ERROR_and_not_zero_peers():
     """"No such method" and "no peers" are opposite findings and share a renderer."""
     run = _StubRun({k: v for k, v in _MODERN.items() if k != "getpeerinfo"})
-    pane = decisions.wallet_pane(run)
+    pane = wallet.wallet_pane(run)
     assert pane["peers"]["rows"] == []
     assert pane["peers"]["error"], "a missing method must be reported, not shown as 0 peers"
     assert pane["peers"]["note"] == "", "and must NOT claim the node talks to nobody"
@@ -2513,11 +2532,11 @@ def test_every_node_summary_field_says_whether_the_daemon_REPORTED_it():
     claim decides whether a spend path can work -- so it must come from the daemon
     or be marked absent.
     """
-    full = decisions.node_summary(_StubRun(_MODERN))
+    full = wallet.node_summary(_StubRun(_MODERN))
     assert full["chain"]["value"] == "test"
     assert full["pruned"]["reported"] is True
     assert full["pruned"]["value"] is False
-    bare = decisions.node_summary(_StubRun({}))
+    bare = wallet.node_summary(_StubRun({}))
     for key in ("chain", "blocks", "pruned", "version", "connections"):
         assert bare[key]["value"] is None
         assert bare[key]["reported"] is False
@@ -2526,13 +2545,13 @@ def test_every_node_summary_field_says_whether_the_daemon_REPORTED_it():
 
 def test_verification_progress_is_passed_through_unrounded():
     """0.9999 and 100% are different things to somebody deciding whether a sync finished."""
-    assert decisions.node_summary(_StubRun(_MODERN))["verificationprogress"]["value"] == 0.9999
+    assert wallet.node_summary(_StubRun(_MODERN))["verificationprogress"]["value"] == 0.9999
 
 
 def test_a_wallet_less_node_does_not_waste_calls_listing_transactions():
     """Nothing to list, and the pane says that rather than reporting an RPC error."""
     run = _StubRun({"listwallets": [], "getpeerinfo": [], "getblockchaininfo": {"chain": "test"}})
-    pane = decisions.wallet_pane(run)
+    pane = wallet.wallet_pane(run)
     assert pane["transactions"]["rows"] == []
     assert "no wallet is loaded" in pane["transactions"]["error"]
     assert "listtransactions" not in [call[0] for call in run.node().calls]
@@ -2542,15 +2561,50 @@ def test_the_pane_never_offers_a_send_a_passphrase_or_a_key():
     """The refusals, asserted rather than only commented.
 
     swap_terminal/CLAUDE.md: a passphrase must never appear in a command this repo
-    emits and the panel must never have a passphrase field; never read back a key.
-    And `getnewaddress` is a WALLET WRITE, which wallet_custody.py's header already
-    draws the line on -- a Receive pane shows addresses the wallet HAS.
+    emits and no page may have a passphrase field; never read back a key. And
+    `getnewaddress` is a WALLET WRITE, which wallet_custody.py's header already draws
+    the line on.
+
+    THE BARE WORD "passphrase" WAS ON THIS DENYLIST AND IS NOT ANY MORE, which is a
+    change to the EVIDENCE and not to the claim -- and it is the same correction this
+    repository has now made three times, each time to a gate that could not tell a
+    citation from a claim (C44's `StartupNotify=true` matched inside the comment
+    explaining why it is wrong; test_admin_is_one_surface strips Jinja comments before
+    looking for a replica URL). The pane now REPORTS whether the wallet is encrypted,
+    because that is the fact that decides whether a GRC payout can be made at all and
+    it is invisible in every balance on every other screen -- so the sentence saying
+    "this wallet has no passphrase" contains the word, and the old assertion forbade
+    reporting the lock in order to prove nothing collects it.
+
+    SO IT IS PINNED BY LOCATION AND BY CONTENT INSTEAD, which is strictly more than
+    absence was: the word may appear in exactly one field, that field must be the
+    encryption note, and the note must say the page will not ask for one. An
+    occurrence anywhere else -- a transaction label, a node field, a new pane -- still
+    fails, and a note that quietly dropped the disclaimer now fails too, which absence
+    could never have caught.
     """
-    pane = decisions.wallet_pane(_StubRun(_MODERN))
+    pane = wallet.wallet_pane(_StubRun(_MODERN))
     blob = repr(pane).lower()
-    for forbidden in ("passphrase", "dumpprivkey", "privkey", "walletpassphrase", "sendtoaddress",
-                      "getnewaddress", "wallet.dat", "mnemonic", "seed"):
+    # EVERY ONE OF THESE IS A METHOD NAME OR A FILE, never an English word: each is a
+    # thing that moves money or reads a key back out, and none has a legitimate reason
+    # to appear in a read pane's payload in any register at all.
+    for forbidden in ("dumpprivkey", "privkey", "walletpassphrase", "walletlock",
+                      "encryptwallet", "sendtoaddress", "sendrawtransaction",
+                      "getnewaddress", "backupwallet", "wallet.dat", "mnemonic", "seed"):
         assert forbidden not in blob, f"the read pane must not mention {forbidden}"
+
+    note = pane["wallet"]["encryption"]
+    assert note["state"] in wallet.LOCK_STATES, note
+    elsewhere = repr({key: value for key, value in pane.items() if key != "wallet"}).lower()
+    assert "passphrase" not in elsewhere, (
+        "the word appears outside the wallet pane's encryption note, which is the only place "
+        "it is allowed to -- a pane that has started talking about passphrases somewhere else "
+        "is a pane that may be about to offer one"
+    )
+    assert "will not ask for one" in note["why"] or "no passphrase" in note["why"], (
+        f"the encryption note must say the page does not ask for a passphrase, in every state "
+        f"that mentions one. Got: {note['why']!r}"
+    )
 
 
 def test_no_pane_rpc_is_outside_the_READ_ONLY_allowlist():
@@ -2562,11 +2616,11 @@ def test_no_pane_rpc_is_outside_the_READ_ONLY_allowlist():
     fails here, which is the single most valuable assertion in this file.
     """
     run = _StubRun(_MODERN)
-    decisions.wallet_pane(run)
+    wallet.wallet_pane(run)
     asked = {call[0] for call in run.node().calls}
     assert asked, "the panes must actually call something, or this asserts nothing"
     for method in asked:
-        assert decisions.refuse_unless_read_only(method) == "", (
+        assert wallet.refuse_unless_read_only(method) == "", (
             f"{method} is called by a pane and is NOT in READ_ONLY_RPCS"
         )
 
@@ -2574,10 +2628,73 @@ def test_no_pane_rpc_is_outside_the_READ_ONLY_allowlist():
 def test_every_wallet_state_is_in_the_published_tuple():
     """A renderer with one case per state can only be tested against a complete list."""
     reached = {
-        decisions.wallet_state(_StubRun(answers))["state"]
+        wallet.wallet_state(_StubRun(answers))["state"]
         for answers in ({}, {"listwallets": []}, _MODERN)
     }
-    assert reached == set(decisions.WALLET_STATES)
+    assert reached == set(wallet.WALLET_STATES)
+
+
+def test_every_lock_state_is_in_the_published_tuple_and_none_is_reached_by_guessing():
+    """Three states, and the third is the one a viewer has that a spender does not.
+
+    chains/wallet_lock.encryption_state() answers True when it cannot read
+    getwalletinfo, because it is about to unlock and that is the safe direction. A
+    dashboard has no such pressure and must say it does not know -- reporting "not
+    encrypted" for a daemon that never answered is a measurement nobody took
+    (rule 17), and reporting "encrypted" sends the operator looking for a passphrase
+    that may not exist.
+
+    MUTATION: default the absent-field case to LOCK_NOT_ENCRYPTED. The third
+    assertion fails, and so does the ENCRYPTED case's `unlocked_until`.
+    """
+    locked = dict(_MODERN["getwalletinfo"], unlocked_until=0)
+    assert wallet.encryption_note(locked)["state"] == wallet.LOCK_ENCRYPTED
+    assert wallet.encryption_note(locked)["unlocked_until"] == 0, (
+        "the value is reported beside the verdict, because 0 and a future timestamp are "
+        "different facts about an encrypted wallet and fund_desk.staking_verdict() is what "
+        "reads them -- this only has to hand it over without flattening it"
+    )
+    assert wallet.encryption_note(_MODERN["getwalletinfo"])["state"] == wallet.LOCK_NOT_ENCRYPTED
+    for unreadable in (None, "Method not found", [], 42):
+        note = wallet.encryption_note(unreadable)
+        assert note["state"] == wallet.LOCK_NOT_ESTABLISHED, unreadable
+        assert "NOT established" in note["why"], unreadable
+
+    reached = {wallet.encryption_note(answer)["state"]
+               for answer in (locked, _MODERN["getwalletinfo"], None)}
+    assert reached == set(wallet.LOCK_STATES)
+
+
+def test_the_pane_COUNTS_its_calls_rather_than_claiming_a_number():
+    """`rpc_calls` was two hand-written literals and both were wrong.
+
+    Counted against the recording node on 2026-10-10: the no-wallet path claimed 6
+    and made 5, the loaded path claimed 8 and made 7 once wallet_state() stopped
+    asking getwalletinfo twice. This is the figure an operator reads to account for
+    traffic in their own daemon's log (rule 14), so it is a tally now.
+
+    MUTATION: return a literal 8 again. The loaded case fails at 7, and the
+    no-wallet case fails at 5 -- a literal cannot be right for both.
+    """
+    for answers, expected in ((_MODERN, 7), ({"listwallets": []}, 5)):
+        run = _StubRun(answers)
+        pane = wallet.wallet_pane(run)
+        assert pane["rpc_calls"] == len(run.node().calls), (
+            f"claimed {pane['rpc_calls']} reads, made {len(run.node().calls)}: "
+            f"{[call[0] for call in run.node().calls]}"
+        )
+        assert pane["rpc_calls"] == expected, (
+            f"{expected} is what this path cost when it was counted; it now costs "
+            f"{pane['rpc_calls']}. If a pane gained a read deliberately, change the number "
+            f"here and say so -- the point is that it cannot change unnoticed."
+        )
+    # AND getwalletinfo IS ASKED ONCE, which is the duplicate that was removed. Asserted
+    # by name rather than only through the total, because a future pane adding one read
+    # while this one re-added a duplicate would leave the total unchanged.
+    run = _StubRun(_MODERN)
+    wallet.wallet_pane(run)
+    asked = [call[0] for call in run.node().calls]
+    assert asked.count("getwalletinfo") == 1, asked
 
 
 # ---------------------------------------------------------------------------

@@ -58,6 +58,13 @@ from pathlib import Path
 # rootlessly, which is CLAUDE.md rule 10's layout gap. E402 is ignored repo-wide for this idiom.
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
+# THE ALLOWLIST MOVED TO chains/ ON 2026-10-10 and this page names its new home
+# rather than reaching it through `decisions`. regtest/operator_panel.py deliberately
+# left no re-export (its import comment says why), so a `decisions.READ_ONLY_RPCS`
+# here would be an AttributeError at the one line that fills the method dropdown --
+# which is the kind of breakage a shim hides and a direct import cannot.
+from chains.daemon_wallet import READ_ONLY_RPCS
+from chains.rpc_translation import CONSOLE_MAPS, call_translated_read_only
 from regtest import daemons, funding_steps
 from regtest import operator_panel as decisions
 from regtest.console import Console
@@ -1241,7 +1248,7 @@ def chain_payload(asset: str, grc_run: funding_steps.Run, memory: dict | None = 
     # for every tab until 2026-09-30.
     state.setdefault("protocol", decisions.console_protocol(tab))
     if "console_methods" not in state:
-        state["console_methods"] = (list(decisions.READ_ONLY_RPCS)
+        state["console_methods"] = (list(READ_ONLY_RPCS)
                                     if state["protocol"] == "bitcoin" else [])
     state["theme"] = decisions.theme_for(asset)
     state["control"] = {a: decisions.refuse_daemon_control(tab, a) for a in ("start", "stop")}
@@ -1969,7 +1976,7 @@ def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:
     if not isinstance(body, dict):
         return {"ok": False, "error": "the request body was not an object"}, 400
     # READ ONCE, HERE, FOR BOTH PROTOCOLS. The bitcoin path calls decisions.call_read_only()
-    # and the translated path calls decisions.call_translated_read_only(), and both used to
+    # and the translated path calls chains.rpc_translation.call_translated_read_only(), and both used to
     # pull `body.get("method")` out of the body themselves -- one question asked in two places,
     # which is rule 8's shape even while both copies agree. The allowlist is still the
     # decision's: refuse_unless_read_only() for bitcoind, each map's own table for the others.
@@ -1983,7 +1990,7 @@ def answer_an_rpc(body: object, chains: dict | None) -> tuple[dict, int]:
     # funding_steps.Run objects for the bitcoind-family tabs only, so before the map existed an
     # XRP request fell into the run-is-None branch below and was refused -- correctly then, and
     # wrongly now that chains/xrp_rpc_map.py can translate the question.
-    if tab is not None and decisions.console_protocol(tab) in decisions.CONSOLE_MAPS:
+    if tab is not None and decisions.console_protocol(tab) in CONSOLE_MAPS:
         answer = answer_a_translated_rpc(body, tab, method)
         return answer, 200 if answer["ok"] else (403 if answer.get("refused") else 200)
     run = (chains or {}).get(asset) if isinstance(asset, str) else None
@@ -2072,7 +2079,7 @@ def answer_a_translated_rpc(body: dict, tab, method: str) -> dict:
     # mistake, and a Solana node reports the same way for getBlock.
     args = body.get("args")
     argument = args[0] if isinstance(args, list) and args else (None if isinstance(args, list) else args)
-    answer = decisions.call_translated_read_only(
+    answer = call_translated_read_only(
         adapter, decisions.console_protocol(tab), method, argument, account)
     if isinstance(args, list) and len(args) > 1:
         # SAID RATHER THAN IGNORED (rule 14). An operator who typed three arguments and got an

@@ -3,16 +3,25 @@
 Role: submodule (HTTP handlers; every decision is in services/admin_view.py)
 Reads: swap_terminal.db (every table, SELECT only), current_app.config,
        supervisor.py's pid files, services/pricing.py's price cache (read on
-       every render, fetched on none), and -- only on /api/admin/chains and
-       /api/admin/peg -- one read-only RPC call per probeable chain and one
-       price lookup per stablecoin
+       every render, fetched on none), and -- only on /api/admin/chains,
+       /api/admin/peg and /admin/wallets/<asset>?ask, each of which has to be
+       asked for -- read-only chain calls: one or two per probeable chain for
+       the probe, one price lookup per stablecoin for the peg, and a bounded
+       handful against ONE chain for the wallet panel
 Writes: NOTHING
-Can move funds: no. Every route this blueprint registers is a GET -- four of
-       them now. There is no POST, no PUT, no PATCH and no DELETE here, so there
-       is no HTTP method by which this surface could change anything, whatever a
-       future template were to render. tests/test_web_surfaces.py asserts that
-       over the app's real URL map rather than by reading this file, so the
-       count going up does not need this sentence edited to stay checked.
+Can move funds: no. Every route this blueprint registers is a GET. There is no
+       POST, no PUT, no PATCH and no DELETE here, so there is no HTTP method by
+       which this surface could change anything, whatever a future template were
+       to render. tests/test_web_surfaces.py asserts that over the app's real URL
+       map rather than by reading this file.
+
+       THAT SENTENCE USED TO END "-- four of them now" AND THE COUNT IS GONE
+       rather than updated to six. It was a number in prose beside a routing
+       table that grows, which is the drift CLAUDE.md rule 3 is about ("a count
+       without what it was counted out of"), and worse, it invited exactly the
+       edit it got: a reader adding a route updates the number and believes they
+       have kept the file honest. The CLAIM is "no write verb is registered", the
+       count was never evidence for it, and the url_map test is.
 Mainnet-safe: yes
 
 =============================================================================
@@ -59,8 +68,9 @@ page.
 """
 
 from db import get_db
-from flask import Blueprint, current_app, jsonify, render_template
+from flask import Blueprint, current_app, jsonify, render_template, request
 from services.admin_view import overview, probe_chains, probe_peg
+from services.chain_panel import chain_panel
 from services.helpers import utc_now_iso
 
 # ONE SPELLING OF /api/admin/chains' BODY, shared with the host-side reader in
@@ -87,6 +97,64 @@ def admin_page():
         "admin.html",
         data=overview(get_db(), current_app.config, current_app.config["ADAPTERS"]),
     )
+
+
+# THE CHAIN WALLET PANEL: ONE VIEW, TWO RULES, SIX CHAINS, AND NOTHING BUT GET.
+#
+# Operator, 2026-10-10: "basically recreate the gui wallets of btc, grc, and ltc, and
+# we also need a control panel for xrp, sol, and icp that are cromulent" ... "this
+# should be a tab under the admin and 6 sub tabs for each chain."
+#
+# THE BARE PATH IS THE FIRST CHAIN'S PANEL, which is what lets the operator tab strip
+# in templates/_admin_tabs.html carry one stable href: a Jinja macro cannot know which
+# chain comes first, because that is services/chain_panel.panel_assets()' answer and it
+# depends on Config.RPC. named_or_first() is the decision and it is in that module, not
+# here -- a route that picked a default would be the decision buried where it cannot be
+# called with seeded inputs (rule 10).
+#
+# WHY SIX URLS AND NOT ONE PAGE WITH SIX PANELS: services/chain_panel.py's header
+# carries both halves of that argument, the paste measurement from
+# templates/admin.html and the twenty-minutes-of-RPC arithmetic from
+# services/admin_view.py. Short version -- a page that hid five panels would return a
+# fourteenth of itself when the operator pastes it, and a page that asked six daemons
+# would be killed by the worker timeout before it said which one was down.
+@bp.get("/admin/wallets")
+@bp.get("/admin/wallets/<asset>")
+def chain_wallet_page(asset: str = ""):
+    """One chain's wallet panel. A GET, and asking the daemon is a GET too.
+
+    `?ask` IS THE SOCKET BOUNDARY AND IT IS STILL A READ. Without it this page contacts
+    nothing at all: it renders from Config.RPC, from the adapters that were constructed
+    at startup, and from the pure capability tables. With it, the panel makes a bounded
+    number of read-only calls to that one chain -- and it stays a GET for the same
+    reason /api/admin/chains is one: it changes nothing, so it is safe to reload and it
+    is not a "button that does something" in the sense the read-only constraint is
+    about.
+
+    THE ANSWER IS 404 FOR A CHAIN THAT HAS NO PANEL, WITH A SENTENCE IN THE BODY. The
+    URL identifies nothing, so the status has to say so -- but a 404 body is a render
+    and not an error path, and services/chain_panel.refuse_unknown_asset() names the
+    six so the operator's next action is a click rather than a question (rule 14).
+
+    IT NEVER RAISES ON A CHAIN THAT WILL NOT ANSWER. Every failure -- no adapter, a
+    refused connection, a wallet that is not loaded, a budget that ran out, dfx missing
+    from this image -- comes back inside the payload as that region's own sentence,
+    because a diagnostic page that dies is a page that cannot be used to find out what
+    is wrong.
+    """
+    data = chain_panel(
+        current_app.config,
+        current_app.config["ADAPTERS"],
+        asset,
+        # PRESENCE, NOT A VALUE. `?ask=1` and a bare `?ask` both mean the same thing on
+        # purpose: testing for "1" would make `?ask=true` and `?ask=yes` render the
+        # page that contacted nothing, with nothing on it saying the request was
+        # ignored -- which is rule 14's "did nothing must not look like did work" at
+        # the one place an operator is waiting to see whether a daemon answered. The
+        # page echoes whether it asked, either way.
+        ask="ask" in request.args,
+    )
+    return render_template("admin_chain.html", data=data), (404 if data["refusal"] else 200)
 
 
 @bp.get("/api/admin/overview")

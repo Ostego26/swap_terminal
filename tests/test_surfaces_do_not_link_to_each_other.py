@@ -47,6 +47,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
 import app as app_module  # noqa: E402 -- after the sys.path.insert, same as every test here
+from services.chain_panel import panel_assets  # noqa: E402 -- same reason
 
 #: Which blueprint belongs to which surface. The split is the app's own: every
 #: endpoint is `<blueprint>.<view>`, so this needs no second list of paths to
@@ -68,8 +69,20 @@ SEEDED_ROW = "s_seeded_row"
 #: /swap/<id> for an id that does not exist renders swap_not_found.html, which is
 #: its own customer template and its own set of links -- so the 404 path is
 #: covered rather than skipped for being inconvenient to seed.
+#: THE CHAIN PANELS ARE DERIVED rather than listed, 2026-10-10. One page per chain and
+#: the chains come from Config.RPC, so a hand-written six would stop covering the
+#: surface the day a chain is added -- and a crossing added to admin_chain.html would
+#: then be checked on five pages and missed on the sixth. Importing the authority costs
+#: one line and cannot drift.
+CHAIN_PAGES = tuple(
+    (f"/admin/wallets/{asset}", "operator")
+    for asset in panel_assets(dict(app_module.app.config))
+)
+
 PAGES = (
     ("/admin", "operator"),
+    ("/admin/wallets", "operator"),
+    *CHAIN_PAGES,
     ("/admin/controls", "operator"),
     ("/", "customer"),
     ("/swap-lookup", "customer"),

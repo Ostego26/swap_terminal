@@ -2081,6 +2081,12 @@ REPLICA_PORT = 4943
 #: `/api/admin/*` reads, kill_switch.py has CONTROLS_PATH = "/admin/controls" on
 #: both GET and POST, and rates/quotes/swaps/health have the five `/api/*` rows.
 #:
+#: RE-READ 2026-10-10 when admin.py gained the chain panel's two rules. The sentence
+#: above is kept as the record of what the decorators said that day rather than being
+#: rewritten, because it is the measurement this table was built from -- and the
+#: comparison is a TEST now (tests/test_stack_authority.py reads routes/ and diffs it
+#: against this tuple), so the prose does not have to be the thing kept in step.
+#:
 #: THE KIND COLUMN IS THE WHOLE POINT OF THE TABLE and not decoration. The
 #: operator's question was "where is the landing page", and a list that renders a
 #: JSON endpoint and a customer page in the same voice does not answer it:
@@ -2099,6 +2105,19 @@ WEB_SURFACES = (
     ("PAGE", "/swap/<id>/address-proof", "the GRC address-proof step (routes/grc_login.py)"),
     ("PAGE", "/swap-lookup", "a returning customer's way back in (routes/ui.py)"),
     ("ADMIN", "/admin", "the operator dashboard (routes/admin.py)"),
+    # BOTH RULES OF THE CHAIN PANEL ARE LISTED, added 2026-10-10. The bare path is the
+    # first chain's panel -- services/chain_panel.named_or_first() -- and the parameterized
+    # one is how the five others are reached, and test_the_map_lists_every_route_the_app
+    # _actually_declares reads the DECORATORS, so a rule present in routes/ and absent
+    # here fails rather than quietly leaving a surface nothing names. That test caught
+    # exactly this omission on its first run after the routes landed, which is the drift
+    # the whole table exists to stop: `/atm` -> `/` happened and nothing had to be updated.
+    #
+    # WHICH CHAIN the bare path shows is deliberately NOT stated: it is Config.RPC's
+    # first entry in BITCOIN_FAMILY order and naming one here would be a guess about a
+    # deployment this file cannot read (rule 17).
+    ("ADMIN", "/admin/wallets", "chain wallets, first chain's panel (routes/admin.py)"),
+    ("ADMIN", "/admin/wallets/<id>", "one chain's wallet panel -- <id> is a ticker, six of them; ?ask makes the read-only calls (routes/admin.py)"),
     ("ADMIN", "/admin/controls", "the kill switch -- the only operator route taking a POST (routes/kill_switch.py)"),
     ("JSON", "/api/rates", "the rate table (routes/rates.py)"),
     ("JSON", "/api/quotes", "POST: price one pair (routes/quotes.py)"),

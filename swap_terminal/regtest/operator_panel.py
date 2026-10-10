@@ -44,11 +44,34 @@ autofill, and the server's request log.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
-from importlib import import_module
 from typing import NamedTuple
 
 from chains.base import RPCError
+
+# THE CORE-WALLET PANES AND THE READ-ONLY ALLOWLIST LIVE IN chains/ SINCE 2026-10-10,
+# AND THEY ARE IMPORTED RATHER THAN RE-EXPORTED. Both were written in this file for
+# this panel's four read panes; /admin's chain panel then needed the identical four,
+# reached through the application's own adapters rather than through a
+# funding_steps.Run, and a second copy is rule 8's bug with a delay on it. The move
+# is recorded at length in chains/daemon_wallet.py's header, including why
+# `call_read_only()` below did NOT go with them.
+#
+# NO COMPATIBILITY SHIM WAS LEFT HERE, deliberately (rule 9, rule 19). A block of
+# `wallet_pane = daemon_wallet.wallet_pane` aliases would have kept every existing
+# `decisions.wallet_pane` reference working, and would be exactly the "quarantine
+# instead of delete" rule 2 refuses: a reader finding two paths to one function has
+# to establish which one runs before anything else can be asked. The handful of
+# callers -- `wallet_pane` here, READ_ONLY_RPCS in the root panel, the pane tests --
+# name the new module directly instead.
+from chains.daemon_wallet import refuse_unless_read_only, wallet_pane
+
+# AND THE PROTOCOL TRANSLATION WENT THE SAME WAY, IN THE SAME COMMIT, for the same
+# second caller: /admin's chain panel asks the four pane questions of XRP and SOL and
+# needs exactly the mapping the operator asked for on 2026-09-30. What stayed here is
+# console_protocol() and refuse_an_rpc_console(), which take this panel's own ChainTab
+# -- a tab is this panel's shape, not a chain fact. chains/rpc_translation.py's header
+# records the split from the other side.
+from chains.rpc_translation import CONSOLE_PROTOCOL, console_methods
 from regtest import daemons, funding_steps
 from regtest.daemons import RegtestSetupError
 
@@ -447,88 +470,6 @@ def network_the_daemon_says(run: funding_steps.Run) -> str:
     return "unknown"
 
 
-#: THE ONLY RPC METHODS THIS PANEL WILL CALL. An allowlist, not a denylist, and the difference
-#: is the whole safety argument: a denylist is a list of the ways to lose money that somebody
-#: thought of, and it is wrong the first time a daemon adds a method.
-#:
-#: EVERY ONE OF THESE READS. None creates a transaction, none signs, none touches a lock, none
-#: writes to a wallet. `getnewaddress` is NOT here even though it looks harmless -- it writes a
-#: key into wallet.dat, which a staking-only wallet may refuse and which changes a file the
-#: operator backs up.
-#:
-#: WHAT IS DELIBERATELY ABSENT AND WHY, because the omissions are the design:
-#:
-#:   sendtoaddress, sendrawtransaction, signrawtransaction
-#:       these move or authorize money. The panel already has buttons that run HARNESSES, which
-#:       spend -- but those are three named, reviewed entry points from RUNNABLE, not an
-#:       arbitrary transaction an operator can compose in a browser with no confirmation step.
-#:   walletpassphrase, walletlock, encryptwallet
-#:       walletpassphrase takes the passphrase as an ARGUMENT. Serving a form that collects it
-#:       would put it in a POST body, the browser's autofill, and this process's memory --
-#:       against swap_terminal/CLAUDE.md's "never move, copy, or read back a key", and against
-#:       the rule this session has held all day that a passphrase never appears in anything this
-#:       repository emits. Nothing on this page may be able to ask for one.
-#:   stop
-#:       the operator's Gridcoin daemon is staking their live wallet. Rule 13 and the live-safety
-#:       rules: this harness starts and stops NOTHING.
-#:   dumpprivkey, dumpwallet, importprivkey
-#:       a key read back out is a key that has left the wallet.
-#:
-#: The page offers these as a dropdown, but the allowlist is enforced HERE, on the server, and
-#: the dropdown is only a convenience: a request naming anything else is refused whatever the
-#: page sends.
-READ_ONLY_RPCS = (
-    "getblockchaininfo", "getinfo", "getmininginfo", "getnetworkinfo", "getwalletinfo",
-    "getblockcount", "getbestblockhash", "getdifficulty", "getconnectioncount", "getpeerinfo",
-    "getbalance", "listunspent", "listtransactions", "listaddressgroupings", "listlockunspent",
-    "getrawtransaction", "decoderawtransaction", "decodescript", "validateaddress",
-    "getblock", "getblockhash", "getrawmempool", "gettxoutsetinfo", "uptime", "help",
-    # ADDED 2026-10-10 FOR THE WALLET PANE, and both are reads by the definition the
-    # refusal sentence below gives: neither creates a transaction, signs, touches a
-    # wallet lock, nor writes a key. Neither carries a balance either, which is the
-    # stricter bar network_target.may_read_a_wallet() is about.
-    #
-    #   listwallets    which wallets are LOADED. The one call that can answer "this
-    #                  node has no wallet" positively, rather than by reading a
-    #                  JSON-RPC error code off getwalletinfo's failure and treating
-    #                  every other error as the same thing. See wallet_state().
-    #   listwalletdir  which wallet NAMES exist on disk. Names only -- no balance, no
-    #                  descriptor, no key -- and it is the actionable half of "no
-    #                  wallet is loaded": the operator needs to know whether one is
-    #                  sitting there to load or whether none was ever created.
-    #
-    # They were NOT here when the panes were written, and tests/test_operator_panel.py
-    # ::test_no_pane_rpc_is_outside_the_READ_ONLY_allowlist caught it on its first run
-    # -- which is the whole argument for that test: a pane that quietly widens what
-    # the panel may ask a daemon is how a viewer stops being a viewer.
-    "listwallets", "listwalletdir",
-)
-
-
-def refuse_unless_read_only(method: object) -> str:
-    """"" if this method may be called, else the reason it may not. THE decision, on its own.
-
-    A FUNCTION RATHER THAN AN `in` CHECK AT THE ROUTE, because this is the single decision that
-    decides whether a browser can make this process move money, and a decision reachable only by
-    making an HTTP request is a decision nobody tests (rule 10). This one is called with a
-    string, including hostile ones.
-
-    THE REFUSAL NAMES THE RULE rather than just saying no. An operator who is refused
-    `sendtoaddress` needs to know it is a deliberate boundary and where the capability lives
-    instead, or they will go looking for a flag that does not exist.
-    """
-    if not isinstance(method, str) or not method:
-        return f"{method!r} is not a method name"
-    if method in READ_ONLY_RPCS:
-        return ""
-    return (
-        f"{method!r} is not on this panel's read-only allowlist. Every method it will call "
-        f"READS -- nothing here creates a transaction, signs, touches a wallet lock, or writes "
-        f"a key. Spending goes through the named harnesses in the Run section, or through your "
-        f"own shell; a passphrase never goes through this page at all."
-    )
-
-
 def call_read_only(run: funding_steps.HasAChainNode, method: str, args: list) -> dict:
     """Make one allowlisted call and return {ok, result} or {ok: false, error}. NEVER raises.
 
@@ -867,32 +808,6 @@ def refuse_worker_control(name: object, action: object, known: dict | None = Non
     return ""
 
 
-#: WHICH PROTOCOL EACH TAB'S CONSOLE SPEAKS. Three values and they are not interchangeable.
-#:
-#:   "bitcoin"   {"method": ..., "params": [positional]} against a bitcoind-family daemon.
-#:               The allowlist is READ_ONLY_RPCS above.
-#:   "xrpl"      {"method": ..., "params": [{named}]} against rippled. The allowlist is
-#:               that protocol's own map tables -- see console_methods() for why the
-#:               Bitcoin one cannot serve here.
-#:   ""          no console. Said in words, with what to use instead.
-#:
-#: DERIVED FROM THE TAB'S KIND for the two bitcoin-family kinds, and named per asset only where
-#: the protocol genuinely differs. A hand-kept row for BTC, LTC and GRC would be three chances
-#: to forget one (rule 8); XRP is a row because its protocol is a fact about XRP and not about
-#: its kind, and SOL is the honest absence.
-CONSOLE_PROTOCOL = {"XRP": "xrpl", "SOL": "solana"}
-
-#: WHICH MODULE SPEAKS EACH PROTOCOL. One entry per non-bitcoin console, and the ONLY place a
-#: protocol name is turned into an implementation.
-#:
-#: Both modules present the SAME interface -- CONGRUENT, NO_EQUIVALENT, NATIVE_ONLY,
-#: equivalent_of(), refuse_without_equivalent(), call_for(), MissingArgument -- and they were
-#: made to, on 2026-09-30, at the moment the second one appeared. They did not start that way:
-#: the XRP module had XRP_ONLY and xrp_call_for, the Solana one SOL_ONLY and solana_call_for,
-#: and two modules answering the same four questions under different names means every reader
-#: of both needs a branch. The branch IS the copy (rule 8), and merging at the moment the
-#: second implementation lands is the only time it costs nothing.
-CONSOLE_MAPS = {"xrpl": "chains.xrp_rpc_map", "solana": "chains.solana_rpc_map"}
 
 
 def console_protocol(tab: ChainTab) -> str:
@@ -902,44 +817,6 @@ def console_protocol(tab: ChainTab) -> str:
     return "bitcoin" if tab.kind in ("regtest", "operator") else ""
 
 
-def console_map(protocol: str):
-    """The module that speaks this protocol, imported on demand. None if there is no console.
-
-    IMPORTED BY NAME FROM ONE TABLE rather than by an `if protocol == ...` chain, so adding a
-    chain's console is a row in CONSOLE_MAPS and nothing else. Deferred, like every other
-    chains/ import in this module, so the panel still imports on a host without that package's
-    dependencies.
-    """
-    name = CONSOLE_MAPS.get(protocol)
-    return None if name is None else import_module(name)
-
-
-def console_methods(protocol: str) -> list[str]:
-    """Every name this protocol's console offers, Bitcoin-style names first.
-
-    THE MAP IS THE ALLOWLIST ON A TRANSLATED TAB, and that is a deliberate difference from the
-    bitcoin-style tabs rather than a gap in READ_ONLY_RPCS. Two reasons, and the second decides
-    it:
-
-      READ_ONLY_RPCS is a list of BITCOIN method names. `fee` and `account_lines` on rippled,
-      `getHealth` and `getSupply` on Solana, are not bitcoin names and should not be added to
-      it -- putting them on the bitcoind allowlist would mean a GRC tab could be asked for
-      `getSupply`, a method that daemon has never heard of, and that list would then be lying
-      about what it governs.
-
-      Every entry in either map IS a read, by construction, and each map's own test file
-      asserts it against a denylist of everything that signs, submits or proposes a key. So a
-      map can only ever SHRINK what a console offers -- NO_EQUIVALENT removes names, and
-      nothing in either module can add a write.
-
-    Sorted within each half rather than interleaved, because "what does this translate to" and
-    "what can this chain tell me that Bitcoin cannot" are different questions and a single
-    alphabetical list answers neither.
-    """
-    module = console_map(protocol)
-    if module is None:
-        return []
-    return [*sorted(module.CONGRUENT), *sorted(module.NATIVE_ONLY)]
 
 
 def refuse_an_rpc_console(tab: ChainTab) -> str:
@@ -972,57 +849,6 @@ def refuse_an_rpc_console(tab: ChainTab) -> str:
             f"nobody has done, not a thing that cannot be done. That chain has its own client "
             f"in this tree, and its own read-only check is the button under Run.")
 
-
-def call_translated_read_only(adapter, protocol: str, method: str, argument: object = None,
-                             account: str = "") -> dict:
-    """One translated read on a non-bitcoin chain. {ok, result} or {ok: false, error}. NEVER raises.
-
-    ONE IMPLEMENTATION FOR EVERY TRANSLATED CONSOLE, and it was one function for XRP alone for
-    about two hours. Writing the Solana one revealed it would have been the same five steps --
-    refuse an unmapped name, build the call, catch a missing argument, send, report -- against a
-    different module, which is rule 8's shape exactly: two copies agreeing on the day they are
-    written. The protocol picks the module and nothing else differs.
-
-    THE SAME THREE-WAY DISTINCTION call_read_only() makes, because it is the same distinction
-    and collapsing it costs the same thing:
-
-      refused=True   this name has no equivalent on that chain, or is not mapped. Stop looking,
-                     or look where the message says.
-      refused=True   with `needs`, when the call translates but an argument is missing. NOT the
-                     same as the above -- ask again WITH it, and the message says which.
-      refused=False  the chain answered, and the answer is an error. Its own words, unparaphrased.
-
-    `translated` rides on every successful answer, because the operator asked for
-    `getblockcount` and the node answered about `getBlockHeight`, and a reader who cannot see
-    which method produced a figure cannot check it (rule 14: echo the parameters that decide the
-    answer).
-
-    THE PARAMS SHAPE IS THE MAP'S, NOT THIS FUNCTION'S. rippled takes one object and Solana
-    takes a positional list, so call_for() returns whichever that chain wants and the adapter is
-    handed it the way that adapter expects -- a dict as one argument, a list spread. That branch
-    is here, once, and it is about a CALLING CONVENTION rather than about a policy.
-    """
-    module = console_map(protocol)
-    if module is None:
-        return {"ok": False, "refused": True,
-                "error": f"there is no command map for protocol {protocol!r}, so nothing can be "
-                         f"translated. CONSOLE_MAPS knows {', '.join(sorted(CONSOLE_MAPS))}."}
-
-    refusal = module.refuse_without_equivalent(method)
-    if refusal:
-        return {"ok": False, "refused": True, "error": refusal}
-    try:
-        chain_method, params = module.call_for(method, argument, account)
-    except module.MissingArgument as error:
-        return {"ok": False, "refused": True, "needs": True, "error": str(error)}
-    entry = module.equivalent_of(method)
-    try:
-        result = adapter.call(chain_method, params) if isinstance(params, dict) else adapter.call(chain_method, *params)
-    except Exception as error:  # noqa: BLE001 -- checked: the failure IS the return value, named with its type, and a panel that dies on an account that does not exist is a panel that cannot be used to explore. rippled reports errors with HTTP 200 and a Solana node answers null for a skipped slot, so a chain-level error is the ordinary case here rather than the exceptional one.
-        return {"ok": False, "refused": False, "translated": chain_method,
-                "error": f"{type(error).__name__}: {error}"}
-    return {"ok": True, "result": result, "translated": chain_method,
-            "params": params, "answers": entry.answers, "note": entry.note}
 
 
 #: What one nav dot may say. NAMED, because the page has a CSS rule per value and a typo in
@@ -1293,366 +1119,3 @@ def payment_rows(run: funding_steps.ChainReadingRun, key, known_spent: dict | No
     return rows
 
 
-# =============================================================================
-# THE CORE-WALLET PANES, 2026-10-10, at the operator's instruction: "create
-# another tab that is daemon control that is bassically a literally ripoff of the
-# entire btc, ltc, or grc core gui wallet but in the whatever format would work
-# best in a web browser for the operator to control the swap terminal."
-#
-# THE TAB ALREADY EXISTED -- they asked for it on 2026-09-30 and the HTML still
-# carries the sentence ("create a tab for daemon controls and then under there put
-# subtabs for each"). What it did NOT have is a wallet: it offered a dropdown of
-# 25 RPC names and printed raw JSON, so every question a Core wallet answers at a
-# glance -- what is my balance, did that transaction arrive, am I connected to
-# anybody, is this node even synced -- was a name to pick and a blob to read.
-# These functions assemble the Core GUI's four read panes out of RPCs
-# READ_ONLY_RPCS ALREADY ALLOWS, so nothing here widens what the panel may call.
-#
-# WHY NO SEND PANE AND NO PASSPHRASE BOX. Both are refusals this file already
-# owes elsewhere and they are restated here because this is where a reader will
-# look for them:
-#
-#   send        money movement is rule 16's "live posture", the operator's call
-#               once measured, not something to add while building a viewer. The
-#               panel's existing precedent for an action is RUNNABLE -- an
-#               allowlist of entry points an operator can already run by hand --
-#               and a send button belongs in that shape or not at all.
-#   passphrase  swap_terminal/CLAUDE.md: a passphrase must never appear in a
-#               command this repo emits, and the panel must never have a
-#               passphrase field. A text box would put it in a POST body, the
-#               browser's autofill, and this server's request log.
-#   keys        no dumpprivkey, no wallet.dat, no WIF. Not in READ_ONLY_RPCS and
-#               not added here.
-#
-# `getnewaddress` IS DELIBERATELY ABSENT TOO, and it is the one that looks safe.
-# wallet_custody.py's header already draws the line: it "calls no getnewaddress --
-# which is a WALLET WRITE, not a read". A Receive pane therefore shows the
-# addresses the wallet ALREADY has, via listaddressgroupings, and does not mint
-# one.
-# =============================================================================
-
-#: The three things that can be true of a wallet, and the middle one is the whole
-#: reason this is a classifier rather than a balance lookup.
-#:
-#: MEASURED ON THE OPERATOR'S HOST 2026-10-10, and it cost a wrong answer on screen.
-#: Their regtest bitcoind answered `getblockcount` with 812 and answered BOTH
-#: `getbalance` and `getaddressinfo` with nothing at all -- because no wallet was
-#: loaded. A diagnostic block that wrapped those calls in `2>/dev/null` printed
-#:
-#:     balance       BTC   (need 0.00010123)
-#:
-#: which reads as a value and was a swallowed error. That is CLAUDE.md rule 12's
-#: BLE001 shape in a shell pipeline: the caller cannot tell the failure from a real
-#: answer. A pane that renders "0.00000000" for a node with no wallet is the same
-#: defect with better typography, and it is worse here because an operator would
-#: conclude their coins were gone.
-WALLET_LOADED = "loaded"
-WALLET_NONE_LOADED = "none_loaded"
-WALLET_NOT_ESTABLISHED = "not_established"
-
-#: Every state a wallet pane can render, so the renderer can be TESTED for covering
-#: them all rather than discovering a gap on an operator's screen -- the same guard
-#: stack_authority._PREFIX_NOTES carries, added there the same day after a renderer
-#: branched on a bare None and invented a sentence about XRP.
-WALLET_STATES = (WALLET_LOADED, WALLET_NONE_LOADED, WALLET_NOT_ESTABLISHED)
-
-
-def _read(node, method: str, *params):
-    """One read, returning (value, error_text). NEVER raises, never returns a bare None.
-
-    A TUPLE BECAUSE A PANE HAS TO TELL "the daemon said no" FROM "we did not ask"
-    (rule 17). Every caller below renders the error text when it is non-empty, so a
-    missing RPC costs one row's worth of explanation instead of a blank pane or an
-    exception out of a report.
-
-    The broad catch is the legitimate kind rule 12 describes -- a diagnostic that
-    must not die on one bad row -- and it is legitimate ONLY because the failure is
-    IN the return value: `(None, "reason")` cannot be mistaken for an answer by any
-    caller that unpacks it.
-    """
-    try:
-        return node.call(method, *params), ""
-    except Exception as error:  # noqa: BLE001 -- checked: the reason is RETURNED, not discarded, and every caller renders it. A pre-0.17 daemon simply lacks several of these methods and that is an ordinary, reportable fact rather than an outage.
-        return None, f"{type(error).__name__}: {error}"
-
-
-def wallet_state(run) -> dict:
-    """Is a wallet loaded, and what does it hold? The Overview pane's whole content.
-
-    THREE OUTCOMES AND THEY RENDER DIFFERENTLY (see WALLET_STATES above):
-
-      loaded           a wallet answered. `balances` carries Core's own three
-                       numbers -- available, pending, immature -- under the names
-                       the GUI shows them under.
-      none_loaded      the NODE answered and told us it has no wallet. A positive
-                       finding, not a failure, and the only correct rendering is to
-                       say so: a balance of zero would be a lie about a wallet that
-                       does not exist.
-      not_established  nobody answered. Says which, and never reads as either of
-                       the above.
-
-    `listwallets` IS ASKED FIRST AND IS WHY THIS CAN BE POSITIVE. Guessing from
-    getwalletinfo's failure would mean reading a JSON-RPC error code (-18) and
-    treating every other error as the same thing; asking the node for its list of
-    loaded wallets answers the question directly and distinguishes "none" from
-    "could not ask". Older daemons have no `listwallets` at all -- Gridcoin among
-    them -- so its absence falls through to the balance read rather than being
-    reported as "no wallet", which would be a confident wrong answer on the one
-    chain that is working.
-    """
-    node = run.node(wallet=False)
-    loaded, listed_error = _read(node, "listwallets")
-    on_disk, _ = _read(node, "listwalletdir")
-    names = [str(name) for name in loaded] if isinstance(loaded, list) else None
-    if names is not None and not names:
-        return {
-            "state": WALLET_NONE_LOADED,
-            "why": (
-                "the node answered and holds NO loaded wallet. This is not a balance of zero -- "
-                "there is no wallet to have a balance. Bitcoin Core since 0.21 creates none on "
-                "its own, so one has to be loaded or created before this node can hold or send "
-                "a coin."
-            ),
-            "loaded": [],
-            "on_disk": _wallet_dir_names(on_disk),
-            "balances": None,
-            "txcount": None,
-        }
-    balances, why = wallet_balances(run)
-    if balances is None:
-        return {
-            "state": WALLET_NOT_ESTABLISHED,
-            "why": (
-                f"no balance could be read, so whether this wallet holds anything is NOT "
-                f"established -- it is not zero. {why}"
-                + (f" (listwallets: {listed_error})" if listed_error else "")
-            ),
-            "loaded": names or [],
-            "on_disk": _wallet_dir_names(on_disk),
-            "balances": None,
-            "txcount": None,
-        }
-    info, _ = _read(run.node(), "getwalletinfo")
-    txcount = info.get("txcount") if isinstance(info, Mapping) else None
-    return {
-        "state": WALLET_LOADED,
-        "why": "",
-        "loaded": names if names is not None else ["(this daemon has no listwallets; one wallet)"],
-        "on_disk": _wallet_dir_names(on_disk),
-        "balances": balances,
-        "txcount": txcount,
-    }
-
-
-def _wallet_dir_names(on_disk: object) -> list[str]:
-    """Wallet names from listwalletdir, or []. Shape-checked because it is nested.
-
-    `{"wallets": [{"name": "..."}]}` is the documented shape and a daemon that
-    lacks the method returns None here, so every level is checked rather than
-    indexed -- a report that raises on an older daemon tells the operator nothing.
-    """
-    if not isinstance(on_disk, Mapping):
-        return []
-    entries = on_disk.get("wallets")
-    if not isinstance(entries, list):
-        return []
-    return [str(entry.get("name", "")) for entry in entries if isinstance(entry, Mapping)]
-
-
-#: Core's Overview pane shows three numbers under these exact words, so the panel
-#: uses the same words. An operator who knows the wallet should not have to learn a
-#: second vocabulary for the same quantities (rule 11, applied to a label).
-#:
-#: getwalletinfo's key -> what Core's GUI calls it, and why it is separate.
-_BALANCE_FIELDS = (
-    ("balance", "available", "spendable now; this is the number a send can draw on"),
-    ("unconfirmed_balance", "pending", "in the mempool or below your confirmation target"),
-    ("immature_balance", "immature", "coinbase, locked for 100 blocks after it was mined"),
-)
-
-
-def wallet_balances(run) -> tuple[dict | None, str]:
-    """Core's three Overview numbers, or (None, why). Two routes, because the chains differ.
-
-    `getwalletinfo` IS THE MODERN ROUTE AND GRIDCOIN DOES NOT HAVE IT. GRC is a
-    pre-0.17 surface -- chains/daemon_capabilities.py records the measurement and
-    getinfo is the row it is listed present on -- and `getinfo` carries a bare
-    `balance` with no pending or immature breakdown. So the fallback returns the one
-    number it HAS and says the other two are unavailable rather than rendering them
-    as zero, which would claim a measurement nobody took.
-    THAT IS THE SAME SHAPE AS chains/daemon_network.chain_network()'s two routes and
-    rule 8 asks for the pointer: that one answers "which network", this one answers
-    "what is the balance", and neither can be derived from the other. Both exist
-    because one daemon in this desk predates the other two by about a decade.
-    """
-    info, why = _read(run.node(), "getwalletinfo")
-    if isinstance(info, Mapping):
-        found = {}
-        for key, label, note in _BALANCE_FIELDS:
-            value = info.get(key)
-            found[label] = {
-                "value": None if value is None else float(value),
-                "note": note,
-                # NAMED, NOT OMITTED. A key this daemon does not carry has to read as
-                # "this build does not report it", because an absent `immature` and an
-                # immature of 0.0 are different facts and only one of them is a number.
-                "reported": value is not None,
-            }
-        return found, ""
-    legacy, legacy_why = _read(run.node(), "getinfo")
-    if isinstance(legacy, Mapping) and legacy.get("balance") is not None:
-        return {
-            "available": {
-                "value": float(legacy["balance"]),
-                "note": "spendable now; read from getinfo, which is all this daemon vintage has",
-                "reported": True,
-            },
-            "pending": {"value": None, "note": "not reported by getinfo", "reported": False},
-            "immature": {"value": None, "note": "not reported by getinfo", "reported": False},
-        }, ""
-    return None, f"getwalletinfo: {why}; getinfo: {legacy_why}"
-
-
-#: How many recent transactions the Transactions pane asks for. Bounded because the
-#: panel refreshes on a timer and `listtransactions` with no count returns 10 by
-#: default and the whole wallet with a large one -- a pane that gets slower the
-#: longer the desk runs is a pane an operator stops opening (rule 14's Ctrl-C).
-TRANSACTION_ROWS = 25
-
-
-def recent_transactions(run, count: int = TRANSACTION_ROWS) -> tuple[list[dict], str]:
-    """Core's Transactions pane: the newest `count` wallet entries, newest first.
-
-    FIELDS CHOSEN TO MATCH WHAT THE GUI's COLUMNS SHOW, so the pane answers the
-    question an operator actually opens it for -- "did the coin arrive, and is it
-    confirmed yet" -- rather than printing whatever the RPC happened to return.
-
-    `category` IS KEPT VERBATIM from the daemon (send / receive / generate /
-    immature / orphan) instead of being collapsed to a direction. `generate` and
-    `immature` are the ones that matter on a desk that mines its own regtest coins,
-    and both would read as `receive` if this normalized them.
-    """
-    rows, why = _read(run.node(), "listtransactions", "*", int(count))
-    if not isinstance(rows, list):
-        return [], why or "listtransactions did not return a list"
-    found = []
-    for row in rows:
-        if not isinstance(row, Mapping):
-            continue
-        found.append({
-            "txid": str(row.get("txid", "")),
-            "category": str(row.get("category", "")),
-            "amount": None if row.get("amount") is None else float(row["amount"]),
-            "fee": None if row.get("fee") is None else float(row["fee"]),
-            "confirmations": row.get("confirmations"),
-            "address": str(row.get("address", "")),
-            "label": str(row.get("label", "")),
-            "time": row.get("time"),
-        })
-    # NEWEST FIRST, because listtransactions returns OLDEST first and the GUI shows
-    # newest at the top. An operator checking whether a send just went out looks at
-    # the first row, and on a wallet with 25 entries the default order puts the one
-    # they want last.
-    found.reverse()
-    return found, ""
-
-
-def peer_rows(run) -> tuple[list[dict], str]:
-    """Core's Peers pane. ZERO PEERS IS THE FINDING THIS EXISTS FOR.
-
-    Measured on the operator's host 2026-10-10: both regtest daemons had
-    `getconnectioncount` of 0. On regtest that is the default and it is invisible
-    until it matters -- a transaction broadcast from a node with no peers is valid,
-    confirms on that node's own chain, and is never seen by any other wallet. The
-    operator spent the evening trying to get coins into an external wallet; this
-    pane would have said in one row that nothing was connected to send them to.
-
-    So an empty list is NOT an empty pane. The caller renders "(none) -- this node
-    talks to nobody" because rule 14 is explicit that a blank gap is ambiguous
-    between zero rows and a query that broke.
-
-    TRIMMED TO SEVEN FIELDS out of getpeerinfo's thirty-odd. The pane refreshes on a
-    timer and the rest is bytes-per-message-type histograms nobody reads in a
-    browser; `subver` is kept because it answers "is that other node the same
-    build", which is the question when two nodes will not talk.
-    """
-    peers, why = _read(run.node(wallet=False), "getpeerinfo")
-    if not isinstance(peers, list):
-        return [], why or "getpeerinfo did not return a list"
-    found = []
-    for peer in peers:
-        if not isinstance(peer, Mapping):
-            continue
-        found.append({
-            "addr": str(peer.get("addr", "")),
-            "subver": str(peer.get("subver", "")),
-            "inbound": bool(peer.get("inbound", False)),
-            "pingtime": peer.get("pingtime"),
-            "synced_blocks": peer.get("synced_blocks"),
-            "banscore": peer.get("banscore"),
-            "conntime": peer.get("conntime"),
-        })
-    return found, ""
-
-
-def node_summary(run) -> dict:
-    """Core's Information pane: chain, sync progress, disk, version, connections.
-
-    EVERY FIELD IS OPTIONAL AND SAYS SO. This has to render against three daemons a
-    decade apart in vintage, so each value carries its own presence rather than
-    defaulting -- a `pruned: false` invented for a daemon that never said is a claim
-    about disk retention, and on a chain where an HTLC needs `getrawtransaction` for
-    an arbitrary txid that claim decides whether a spend path can work at all.
-
-    `verificationprogress` IS RENDERED AS A FRACTION, not multiplied into a
-    percentage here. The pane does that; this returns what the daemon said, because
-    0.9999 and 100% are different things to an operator deciding whether a sync has
-    finished and rounding is how the second one gets printed for the first.
-    """
-    chain, chain_why = _read(run.node(wallet=False), "getblockchaininfo")
-    net, net_why = _read(run.node(wallet=False), "getnetworkinfo")
-    summary = {"errors": [why for why in (chain_why, net_why) if why]}
-    for source, keys in ((chain, ("chain", "blocks", "headers", "verificationprogress",
-                                  "pruned", "size_on_disk", "initialblockdownload")),
-                         (net, ("version", "subversion", "protocolversion", "connections"))):
-        for key in keys:
-            value = source.get(key) if isinstance(source, Mapping) else None
-            summary[key] = {"value": value, "reported": value is not None}
-    return summary
-
-
-def wallet_pane(run) -> dict:
-    """Everything the four read panes need, in one payload. The tab's wallet half.
-
-    ONE FUNCTION SO ONE REFRESH MAKES ONE PASS. Each pane's reads are independent
-    and each tolerates its own failure, so a daemon missing `getpeerinfo` still
-    renders a balance -- but they are gathered here rather than behind four routes,
-    because four fetches per tab per refresh across four tabs is sixteen round trips
-    for one screen.
-
-    COUNTED, AND THE COUNT IS PART OF THE PAYLOAD. `rpc_calls` says how many reads
-    this cost, because the panel polls and an operator watching a daemon's own log
-    scroll should be able to account for the traffic this page generates rather than
-    wondering what is hammering it.
-    """
-    wallet = wallet_state(run)
-    transactions, tx_why = ([], "no wallet is loaded, so there are no transactions to list") \
-        if wallet["state"] == WALLET_NONE_LOADED else recent_transactions(run)
-    peers, peer_why = peer_rows(run)
-    return {
-        "wallet": wallet,
-        "transactions": {"rows": transactions, "error": tx_why, "asked_for": TRANSACTION_ROWS},
-        "peers": {
-            "rows": peers,
-            "error": peer_why,
-            # SAID HERE RATHER THAN LEFT TO THE TEMPLATE, because it is a finding and
-            # not a layout choice. See peer_rows() for the 2026-10-10 measurement.
-            "note": (
-                "a node with NO peers broadcasts into nothing: the transaction is valid, it "
-                "confirms on this node's own chain, and no other wallet ever sees it"
-                if not peers and not peer_why else ""
-            ),
-        },
-        "node": node_summary(run),
-        "rpc_calls": 6 if wallet["state"] == WALLET_NONE_LOADED else 8,
-    }

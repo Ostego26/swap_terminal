@@ -219,7 +219,7 @@ NO_EQUIVALENT: dict[str, str] = {
     # ADDED 2026-10-10 WITH THE WALLET PANE. See the same two entries in
     # chains/xrp_rpc_map.py -- both were demanded by
     # test_the_allowlist_is_an_EXACT_PARTITION_of_the_panels_own after
-    # regtest/operator_panel.READ_ONLY_RPCS gained the two methods, and the test's own
+    # chains/daemon_wallet.READ_ONLY_RPCS gained the two methods, and the test's own
     # message is the reasoning: "not mapped" and "no equivalent exists" are different
     # claims and the module has to say which.
     "listwallets": (

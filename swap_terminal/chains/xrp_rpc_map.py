@@ -42,7 +42,7 @@ THE THREE DIFFERENCES THAT MAKE THIS A TABLE RATHER THAN A RENAME.
      refusal that says why.
 
 WHAT IS DELIBERATELY NOT HERE. No write, no sign, no `submit`, no `wallet_propose`,
-no key of any kind. The panel's own allowlist (regtest/operator_panel.READ_ONLY_RPCS)
+no key of any kind. The panel's own allowlist (chains/daemon_wallet.READ_ONLY_RPCS)
 is still the gate on what may be asked for; this only says what the asking TRANSLATES
 to. Both have to agree for a call to happen, and NO_EQUIVALENT can only ever shrink
 what the console offers, never widen it -- asserted by a test, because "a second
@@ -181,7 +181,7 @@ CONGRUENT: dict[str, XRPEquivalent] = {
 NO_EQUIVALENT: dict[str, str] = {
     # ADDED 2026-10-10 WITH THE WALLET PANE, and the partition test is what demanded
     # it: `listwallets` and `listwalletdir` went onto the panel's read-only allowlist
-    # for regtest/operator_panel.wallet_state(), and
+    # for chains/daemon_wallet.wallet_state(), and
     # test_the_allowlist_is_an_EXACT_PARTITION_of_the_panels_own went red with the
     # right sentence -- "'not mapped' is a different claim from 'no equivalent
     # exists' -- decide which and record it". This is that decision, recorded.

@@ -9,7 +9,7 @@ A single parameterized suite would have to be told all of that per chain anyway,
 would read as one test of two chains rather than what it is: two chains, each of which has
 to be right about itself.
 
-THE MAP IS THE ALLOWLIST ON THE SOL TAB. regtest/operator_panel.READ_ONLY_RPCS is a list of
+THE MAP IS THE ALLOWLIST ON THE SOL TAB. chains/daemon_wallet.READ_ONLY_RPCS is a list of
 BITCOIN names and cannot gate `getHealth` or `getSupply`. So the safety argument lives here:
 every Solana method this module can emit must be a read.
 
@@ -22,6 +22,8 @@ below hold the distinction rather than letting the file blur it.
 from __future__ import annotations
 
 import pytest
+from chains.daemon_wallet import READ_ONLY_RPCS
+from chains.rpc_translation import console_methods
 from chains.solana_rpc_map import (
     CONGRUENT,
     FINALIZED,
@@ -34,7 +36,6 @@ from chains.solana_rpc_map import (
     equivalent_of,
     refuse_without_equivalent,
 )
-from regtest.operator_panel import READ_ONLY_RPCS, console_methods
 
 #: Every Solana JSON-RPC method that signs, broadcasts, or changes what the node does.
 #:

@@ -609,8 +609,30 @@ def test_when_unused_is_empty_on_rows_that_have_only_one_remedy():
 
     Asserted so the field does not get filled in reflexively on every new row -- an
     empty one is the honest default and the fallback handles it.
+
+    TWO ROWS NOW, since 2026-10-10. `getwalletinfo` is on every one of the three and
+    the field says what a caller that HAS it still gets wrong: reading the balance and
+    not `unlocked_until` cannot tell a funded wallet from a funded wallet that nothing
+    can leave. That is precisely the question this field exists for, so the list grew
+    by a deliberate decision -- which is what a hardcoded list is for.
+
+    AND THE STRUCTURAL INVARIANT IS ASSERTED BESIDE IT, because the list alone only
+    makes a new row deliberate and cannot make it CORRECT. `when_unused` answers "this
+    chain has it and is not using it properly", so a row with an empty `present_on` has
+    nobody to answer it for -- and that is the shape of the 2026-10-10 defect this
+    field was added for: the rpcbind row's `instead` was printed at an LTC operator
+    whose daemon had just failed to bind, and it opened "nothing is needed". The field
+    was right and it was answering a different question than the one being asked.
     """
     filled = [c.name for c in CAPABILITIES if c.when_unused]
-    assert filled == ["rpcbind"], (
-        f"only rpcbind has a use-it-properly remedy today; {filled} claim one"
+    assert filled == ["getwalletinfo", "rpcbind"], (
+        f"these rows have a use-it-properly remedy today; {filled} claim one. Adding one is "
+        f"fine and is meant to be deliberate -- say which chain it is for and why."
     )
+    for capability in CAPABILITIES:
+        if capability.when_unused:
+            assert capability.present_on, (
+                f"{capability.name} carries a when_unused remedy and NO chain is listed as "
+                f"having it, so there is nobody for that sentence to be addressed to. "
+                f"`instead` is the field for a capability a chain lacks."
+            )

@@ -285,6 +285,62 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
     ),
     Capability(
+        name="getbalances",
+        arrived_in="Bitcoin Core 0.19",
+        present_on=("BTC", "LTC"),
+        absent_on=("GRC",),
+        evidence=MEASURED,
+        instead=(
+            "getwalletinfo, which every one of these three HAS (its own row below) and which "
+            "carries `balance`, `unconfirmed_balance` and `immature_balance` -- the same three "
+            "numbers Core's Overview pane shows, under the names the GUI shows them under. What "
+            "is lost is getbalances' `mine.trusted` / `mine.untrusted_pending` SPLIT, which is "
+            "the one that tells a payment sitting below the confirmation target from one that "
+            "is spendable; chains/daemon_wallet._BALANCE_FIELDS names the three it can get and "
+            "marks a field the daemon did not report as `reported: False` rather than as zero"
+        ),
+        recorded_at=(
+            "2026-10-10, ON THE OPERATOR'S OWN HOST: GRC answered `RPCError: Method not found "
+            "(rpc code -32601)` while BTC and LTC answered it. The two existing callers already "
+            "handle the miss and each says so at its own site -- chain_balances.py:266 and "
+            "testnet_wallets.py:499, both with a `noqa: BLE001` whose comment names Gridcoin -- "
+            "so this row exists to stop the THIRD caller writing the same discovery a third "
+            "time, which is what this file is for"
+        ),
+    ),
+    Capability(
+        name="getwalletinfo",
+        arrived_in="Bitcoin Core 0.9.2",
+        present_on=("BTC", "LTC", "GRC"),
+        absent_on=(),
+        evidence=MEASURED,
+        instead=(
+            "nothing is needed -- all three have it. The row exists because a comment in this "
+            "tree said otherwise and a reader believed it"
+        ),
+        when_unused=(
+            "IT IS THE ONLY WAY TO READ THE WALLET LOCK, and that is the fact a payout depends "
+            "on: `unlocked_until` is present ONLY on an encrypted wallet, so PRESENCE and not "
+            "value is the test (chains/wallet_lock.py owns that decision). A caller that reads "
+            "a balance and not this one cannot tell a funded wallet from a funded wallet that "
+            "nothing can leave"
+        ),
+        recorded_at=(
+            "2026-10-10. PRESENT ON GRC, which is worth a row because this tree asserted the "
+            "opposite in prose: chains/daemon_wallet.wallet_balances()' docstring read "
+            "\"getwalletinfo IS THE MODERN ROUTE AND GRIDCOIN DOES NOT HAVE IT\" and cited this "
+            "file as the authority for it -- a citation to a row that did not exist. Three "
+            "callers read `getwalletinfo.unlocked_until` against the GRC adapter and depend on "
+            "the answer (fund_desk.py:877, regtest/funding_steps.py:1076, and "
+            "chains/wallet_lock.encryption_state() through STAKING_CHAINS), and the operator's "
+            "own chain_balances.py run that day printed, for GRC, `wallet ENCRYPTED -- a payout "
+            "needs a passphrase (getwalletinfo reports unlocked_until)`. A daemon that answers "
+            "that field answers that method. 0.9.2 predates the 0.17 line Gridcoin's RPC "
+            "surface sits behind, so the \"it is pre-0.17\" reasoning never applied here -- the "
+            "method it does lack is the PLURAL getbalances, the row above"
+        ),
+    ),
+    Capability(
         name="getinfo",
         arrived_in="deprecated in Bitcoin Core 0.16, removed in 0.18",
         present_on=("GRC",),

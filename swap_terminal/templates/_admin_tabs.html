@@ -34,12 +34,36 @@
   ones, the id lives in the replica's own state, and nothing mounts it into this
   container. `swap_stack.py status` asks the replica and prints the URL. A tab
   pointing at a guessed id would link to another deployment (rule 17).
+
+  THE THIRD TAB, 2026-10-10. Operator: "this should be a tab under the admin and
+  6 sub tabs for each chain." Chain wallets is a tab HERE and its six chains are
+  sub-tabs INSIDE that page, which is the shape they asked for and also the only
+  shape that works: six chains in this strip would put two surfaces and six chain
+  panels on one row, and a strip eight items long stops being a way to find a
+  surface.
+
+  IT GOES BESIDE System state AND NOT INSIDE IT, for a different reason than the
+  controls page's and it lands in the same place. The chain panel is as read-only
+  as /admin is, so there is no guarantee to spend here; what it has is a SOCKET.
+  /admin renders from the database and contacts nothing, deliberately, and
+  folding in a page that can spend twenty seconds waiting on a daemon would make
+  the dashboard an operator leaves open as slow as the slowest chain. Separate
+  documents, so the fast page stays fast.
+
+  AND ITS TAB POINTS AT THE BARE PATH, not at a chain. Which chain comes first is
+  services/chain_panel.panel_assets()' answer and it depends on Config.RPC, which
+  a macro cannot read -- so /admin/wallets means "the first panel" and
+  named_or_first() is where that is decided. A hardcoded asset='BTC' here would
+  be this file holding a chain decision, and it would 404 on a deployment whose
+  Config.RPC did not happen to carry BTC.
 #}
 
 {% macro admin_tabs(current) -%}
 {%- set tabs = [
       ('state',    'System state', url_for('admin.admin_page'),
        'the read-only picture: workers, balances, chains, pairs, payouts'),
+      ('wallets',  'Chain wallets', url_for('admin.chain_wallet_page'),
+       'one panel per chain: balances, transactions, peers, node -- read-only, and it asks no daemon until you ask it to'),
       ('controls', 'Start / stop workers', url_for('kill_switch.controls_page'),
        'the only operator page with a button -- starting arms a payout worker that broadcasts'),
     ] -%}
@@ -53,9 +77,19 @@
     {%- endfor %}
   </ul>
   {#- Rule 14: the surface this strip cannot link to is named rather than left
-      out, because an operator who knows there are three admin surfaces and sees
-      two tabs is owed the reason. -#}
-  <p class="admin-tabs-note">The canister's own operator console is a third surface, served by
+      out, because an operator who knows there are four admin surfaces and sees
+      three tabs is owed the reason.
+
+      "a third surface" UNTIL 2026-10-10, when Chain wallets made it the fourth.
+      The ordinal is in the markup an operator reads, so it is one of the two
+      numbers in this file that could go stale -- and this is the second time a
+      count in prose beside a growing list has had to be corrected in this
+      change (routes/admin.py's header dropped its route count for the same
+      reason). It is kept as a word rather than computed because `tabs|length + 1`
+      would be arithmetic in a template about a surface the template cannot see;
+      the test that pins it is test_admin_is_one_surface.py, which counts the
+      tabs the strip renders. -#}
+  <p class="admin-tabs-note">The canister's own operator console is a fourth surface, served by
      <code>operator_admin</code> on the ICP replica rather than by this server &mdash; so this page
      cannot know its address. <code>swap_stack.py status</code> asks the replica and prints it.</p>
 </nav>

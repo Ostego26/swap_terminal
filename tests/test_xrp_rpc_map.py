@@ -3,7 +3,7 @@
 WHAT MATTERS HERE, in order.
 
 THE MAP IS THE ALLOWLIST ON THE XRP TAB. The bitcoin-style tabs are gated by
-regtest/operator_panel.READ_ONLY_RPCS; the XRP console cannot be, because `fee`,
+chains/daemon_wallet.READ_ONLY_RPCS; the XRP console cannot be, because `fee`,
 `server_state` and the account_* reads are not bitcoin method names and do not belong
 on a bitcoind allowlist. So the safety argument moves here: EVERY rippled method this
 module can emit must be a read. That is one test, and it is the important one.
@@ -21,6 +21,8 @@ directions, and collapsing them is the failure this repo keeps paying for.
 from __future__ import annotations
 
 import pytest
+from chains.daemon_wallet import READ_ONLY_RPCS
+from chains.rpc_translation import console_methods
 from chains.xrp_rpc_map import (
     CONGRUENT,
     DROPS_PER_XRP,
@@ -31,7 +33,6 @@ from chains.xrp_rpc_map import (
     equivalent_of,
     refuse_without_equivalent,
 )
-from regtest.operator_panel import READ_ONLY_RPCS, console_methods
 
 #: EVERY rippled method that signs, submits, proposes a key or changes server state.
 #:

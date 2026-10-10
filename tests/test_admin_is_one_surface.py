@@ -59,8 +59,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = REPO_ROOT / "swap_terminal" / "templates"
 STATIC = REPO_ROOT / "swap_terminal" / "static"
 
-#: The two pages the strip joins, and the tab each should mark as current.
-ADMIN_PAGES = (("/admin", "System state"), ("/admin/controls", "Start / stop workers"))
+#: The pages the strip joins, and the tab each should mark as current.
+#:
+#: THREE SINCE 2026-10-10, when the chain wallet panel arrived. It is listed here as
+#: the BARE path on purpose: /admin/wallets means "the first chain's panel" and which
+#: chain that is depends on Config.RPC, so a test naming /admin/wallets/BTC would pass
+#: on this checkout and fail on a deployment configured differently --
+#: services/chain_panel.named_or_first() is where that is decided and
+#: tests/test_chain_panel.py is where it is pinned.
+ADMIN_PAGES = (
+    ("/admin", "System state"),
+    ("/admin/wallets", "Chain wallets"),
+    ("/admin/controls", "Start / stop workers"),
+)
 
 
 def _app():
@@ -217,18 +228,39 @@ def test_the_strip_links_are_built_from_the_routes_and_not_typed():
 def test_the_surface_the_strip_cannot_link_to_is_named():
     """Rule 14: the canister console's absence must be a result, not a gap.
 
-    There are three operator surfaces and the strip can only link two. The
-    third is served by the operator_admin canister, whose id this process cannot
+    There are four operator surfaces and the strip can only link three. The
+    fourth is served by the operator_admin canister, whose id this process cannot
     know -- every fresh replica issues different ones and nothing mounts the
-    replica's state into this container. An operator who knows about three
-    surfaces and sees two tabs is owed the reason, and a tab pointing at a
+    replica's state into this container. An operator who knows about four
+    surfaces and sees three tabs is owed the reason, and a tab pointing at a
     guessed id would link to another deployment (rule 17).
+
+    "three ... two ... third" UNTIL 2026-10-10, when Chain wallets made it four.
+    The ORDINAL IS IN THE MARKUP an operator reads, so the sentence below asserts
+    the rendered word rather than only this docstring: a count in prose beside a
+    growing list is the drift rule 3 is about, and this change had to correct it
+    in three files (routes/admin.py dropped its route count entirely for the same
+    reason, which is the other available answer).
     """
     partial = (TEMPLATES / "_admin_tabs.html").read_text()
     assert "operator_admin" in partial, "the canister console is not named"
     assert "swap_stack.py status" in partial, (
         "the thing that CAN resolve the console's address is not named, so the note says "
         "'you cannot get there from here' and stops"
+    )
+
+    # THE ORDINAL AGREES WITH THE NUMBER OF TABS RENDERED, counted off the real page
+    # rather than read out of the macro. ADMIN_PAGES has three entries and the console
+    # is one more, so the note must say "fourth"; adding a tab without correcting the
+    # word fails here instead of on an operator's screen.
+    with _app().test_client() as test_client:
+        html = test_client.get("/admin").data.decode()
+    rendered_tabs = len(re.findall(r'class="admin-tab(?: |")', html.split("admin-tabs-note")[0]))
+    ordinals = {2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth"}
+    expected = ordinals[rendered_tabs + 1]
+    assert f"a {expected} surface" in partial, (
+        f"the strip renders {rendered_tabs} tabs, so the console is the {expected} surface -- "
+        f"and the note does not say so. The word is in markup an operator reads."
     )
 
     # JINJA COMMENTS STRIPPED FIRST, and the first version of this assertion did

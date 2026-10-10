@@ -2269,3 +2269,60 @@ h2:target {
  * rather than being its own document. kill_switch.css still sets its width and
  * padding; this only stops those fighting the shell's own gutter. */
 .killsw-main { max-width: none; padding: 0; }
+
+/* ========================================================================
+ * THE CHAIN SUB-TABS, 2026-10-10. Operator: "this should be a tab under the
+ * admin and 6 sub tabs for each chain."
+ *
+ * A THIRD LEVEL, AND IT HAS TO LOOK LIKE ONE. The page already carries two
+ * strips -- .admin-tabs picks the operator PAGE, and this picks the CHAIN within
+ * one of those pages -- and two identical rows stacked would leave an operator
+ * unable to tell which one they just clicked. So the links are the same
+ * .admin-tab component (one mechanism for one concept) and the STRIP is
+ * distinguished: no rule under it, flush against the panel below, and inset.
+ *
+ * NOT STICKY, deliberately, where .tabstrip is. .tabstrip is same-document
+ * anchors on a fourteen-panel page, where staying on screen is the whole point.
+ * These are six LINKS TO SIX URLS -- clicking one loads a page and the strip
+ * comes back at the top of it -- so pinning them would spend 56px of a phone
+ * screen on navigation that is already where the reader is.
+ * ======================================================================== */
+
+.chain-subtabs { display: grid; gap: var(--s2); margin: 0 0 var(--s4); }
+
+/* The row keeps .admin-tabs-list's flex wrap and gap; what it drops is that
+ * rule's bottom border, because the tab below a second rule reads as a third
+ * level of heading rather than as a chooser. */
+.chain-subtabs .admin-tabs-list { border-bottom: none; }
+
+/* A CHAIN WITH NO ADAPTER. Dimmed, AND glyphed, AND it says so in its title and
+ * in a visually-hidden span -- never color alone, which is this stylesheet's
+ * standing requirement (see its header). In a grayscale paste the circled slash
+ * is what survives. */
+.chain-off { opacity: 0.6; border-style: dashed; }
+.chain-off-mark { margin-left: var(--s1); font-weight: 700; }
+
+/* A CHAIN'S OWN ACCENT ON ITS TAB, which .coin-* already supplies to the drawn
+ * mark inside it (see the per-coin token block on :root). The tab itself takes
+ * none of it: six colored tabs with one of them also marked `here` would mean
+ * the current-tab accent competing with six chain accents, and the only state
+ * a reader must not lose is which page they are on. */
+.chain-subtabs .admin-tab { display: inline-flex; align-items: center; gap: var(--s1); }
+
+/* RAW JSON FROM A CHAIN THAT IS NOT BITCOIN. The translated panels print the
+ * answer verbatim rather than reshaping it, because a figure read out of a
+ * ledger is checkable and a figure this page rearranged is not. It wraps and
+ * scrolls rather than overflowing: an unwrapped rippled response is wider than
+ * any screen, and a <pre> that overflows its panel takes the page's own
+ * horizontal scroll with it. */
+.chain-raw {
+  margin: 0;
+  padding: var(--s3);
+  max-height: 22rem;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  font-size: var(--t-xs);
+  white-space: pre-wrap;
+}
