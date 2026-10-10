@@ -75,6 +75,7 @@ from modules.address_network import (  # noqa: E402  the path shim above must ru
     decode_segwit_address,
     decodes_as_address,
 )
+from source_tree import NOT_SOURCE  # noqa: E402  same path shim
 from valid_addresses import (  # noqa: E402  conftest puts tests/ on sys.path
     ALL_VALID,
     DELIBERATELY_MAINNET,
@@ -129,7 +130,13 @@ BASE58_LITERAL = re.compile(
     r"""["']([rRSmn123][""" + re.escape(_B58 + _XRP) + r"""]{25,40})["'](?P<after>.?)"""
 )
 
-SKIP_DIRECTORIES = {".git", "__pycache__", "node_modules", ".venv", "grc-sol-swap"}
+#: WAS SPELLED HERE AND IS NOW IMPORTED, 2026-10-10. This set was one of twenty-three
+#: inline copies across the suite (rule 8), and the day a git worktree appeared at
+#: `.claude/worktrees/agent-<id>/` -- a COMPLETE second copy of the tree, inside the tree
+#: -- this sweep counted every address literal in the repository twice and the ceiling
+#: below failed. tests/source_tree.py carries the measurement and is the one place to
+#: change it.
+SKIP_DIRECTORIES = set(NOT_SOURCE)
 
 # THE ONE FILE ALLOWED TO HOLD ADDRESS LITERALS, AND IT IS A CATEGORY RATHER THAN AN EXEMPTION.
 #

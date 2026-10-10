@@ -49,6 +49,7 @@ from modules.htlc_contract_api import (
     UnknownContractChain,
     create_contract_kwargs,
 )
+from source_tree import is_source
 
 # THE THIRD COPY OF THIS DICT, UNTIL 2026-10-03. It was
 # `{"BTC": BTCClient, "LTC": LTCClient, "GRC": GRCClient}` here, the same dict in a
@@ -201,8 +202,14 @@ def test_the_amount_keyword_table_has_exactly_ONE_definition_in_the_tree():
     """
     root = pathlib.Path(__file__).resolve().parent.parent
     spellings = []
+    # `is_source` RATHER THAN THE TWO NAMES THIS LINE USED TO TEST, 2026-10-10. A git
+    # worktree at `.claude/worktrees/agent-<id>/` is a complete second copy of the tree,
+    # so this sweep reported the one definition below as TWO and said so in those words:
+    # "the amount-keyword table is spelled in ['.claude/worktrees/.../htlc_contract_api.py:64',
+    # 'swap_terminal/modules/htlc_contract_api.py:64']". A uniqueness assertion over a tree
+    # that contains a copy of itself cannot hold. tests/source_tree.py has the measurement.
     for path in sorted(root.rglob("*.py")):
-        if "__pycache__" in path.parts or ".venv" in path.parts or path.parent.name == "tests":
+        if not is_source(path) or path.parent.name == "tests":
             continue
         for number, line in enumerate(path.read_text().splitlines(), 1):
             if '"amount_btc"' in line and not line.lstrip().startswith("#"):

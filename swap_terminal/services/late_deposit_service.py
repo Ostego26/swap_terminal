@@ -487,6 +487,25 @@ def record(db, rows, *, now: str) -> int:
     would race into an IntegrityError on the UNIQUE constraint. ON CONFLICT makes
     the collision the normal path instead of an exception.
 
+    THE CONFLICT TARGET IS db.PAYMENT_UNIQUE_KEY AND IT MUST STAY EQUAL TO IT, all four
+    columns. `address` joined that key on 2026-10-10 -- db.py's SCHEMA carries the
+    measurement at deposit_events' own UNIQUE clause -- and this clause did not follow in
+    the same edit. SQLite does not treat that as a near-miss: an ON CONFLICT target that
+    does not name an actual unique index raises
+
+        OperationalError: ON CONFLICT clause does not match any PRIMARY KEY or
+                          UNIQUE constraint
+
+    on EVERY insert, so recording a late deposit stopped working outright rather than
+    degrading. Caught by tests/test_late_deposits.py, 17 cases, in the suite diff
+    immediately after the widening -- which is the argument for diffing the suite line by
+    line against a recorded baseline rather than comparing failure counts: this arrived in
+    the same run as 30 added tests, and a net of +13 would have read as progress.
+
+    A loud failure, at least, and that is not luck: it is SQLite refusing an upsert whose
+    target it cannot resolve, rather than silently inserting a duplicate row. The widening
+    could not have made this path quietly wrong.
+
     swap_id AND swap_status ARE NOT RE-POINTED BY THE UPDATE, which is the same
     refusal deposit_service.upsert_deposit_event() makes about swap_id and for a
     stronger reason here: `swap_status` is deliberately the status AT FIRST
@@ -521,7 +540,7 @@ def record(db, rows, *, now: str) -> int:
                 (swap_id, swap_status, asset, txid, vout, address, amount,
                  confirmations, first_seen_at, last_seen_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(asset, txid, vout) DO UPDATE SET
+            ON CONFLICT(asset, txid, vout, address) DO UPDATE SET
                 last_seen_at = excluded.last_seen_at,
                 confirmations = excluded.confirmations,
                 amount = excluded.amount

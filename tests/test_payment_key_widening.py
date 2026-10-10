@@ -53,6 +53,7 @@ import sqlite3
 
 import db as db_module
 import pytest
+import valid_addresses
 from db import (
     PAYMENT_KEYED_TABLES,
     PAYMENT_UNIQUE_KEY,
@@ -70,6 +71,7 @@ from db import (
     widen_payment_unique_key,
     widening_verdict,
 )
+from source_tree import REPOSITORY_ROOT, source_files
 
 NEW_CLAUSE = f"UNIQUE({', '.join(PAYMENT_UNIQUE_KEY)})"
 OLD_CLAUSE = f"UNIQUE({', '.join(PAYMENT_UNIQUE_KEY_BEFORE)})"
@@ -78,6 +80,16 @@ OLD_CLAUSE = f"UNIQUE({', '.join(PAYMENT_UNIQUE_KEY_BEFORE)})"
 #: not a chain address any validator in this tree would be asked to parse.
 DEAD_LEDGER_SUBACCOUNT = "a" * 64
 LIVE_SUBACCOUNT = "b" * 64
+
+#: THE PAYOUT ADDRESS COMES FROM THE SHARED FIXTURE, NOT FROM A PASTE.
+#: tests/test_address_literals_are_valid.py holds a ceiling on how many address-shaped
+#: literals exist in this tree, and pasting this one three times across two new files took
+#: it from 60 to 65 -- which is the gate doing its job rather than being in the way.
+#: valid_addresses.GRC_PAYOUT is DERIVED (base58_testnet of a named phrase), so it carries
+#: a real checksum and is excluded from the count by construction. Raising the ceiling
+#: instead would be rule 19's forbidden move: the baseline goes up, the check goes green,
+#: and the next paste is free.
+GRC_PAYOUT = valid_addresses.GRC_PAYOUT
 
 
 def old_schema() -> str:
@@ -105,10 +117,10 @@ def legacy(tmp_path):
         "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, payout_address,"
         " expected_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
         " output_amount_estimate, status, min_confirmations, expires_at, created_at, updated_at)"
-        " VALUES ('s_f5cf62e0b7a9342a','q','ICP','GRC',?,'mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap',"
+        " VALUES ('s_f5cf62e0b7a9342a','q','ICP','GRC',?,?,"
         "0.05,327.21,150,0.001,16.0,'completed',1,'2999-01-01T00:00:00+00:00',"
         "'2026-10-07T22:14:34+00:00','2026-10-07T22:14:34+00:00')",
-        (DEAD_LEDGER_SUBACCOUNT,),
+        (DEAD_LEDGER_SUBACCOUNT, GRC_PAYOUT),
     )
     conn.execute(
         "INSERT INTO deposit_events (swap_id, asset, txid, vout, address, amount, confirmations,"
@@ -133,10 +145,10 @@ def seed_live_swap(conn):
         "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, payout_address,"
         " expected_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
         " output_amount_estimate, status, min_confirmations, expires_at, created_at, updated_at)"
-        " VALUES ('s_968a69b37c3da5c9','q','ICP','GRC',?,'mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap',"
+        " VALUES ('s_968a69b37c3da5c9','q','ICP','GRC',?,?,"
         "2.44081155,327.21,150,0.001,786.0,'awaiting_deposit',1,'2999-01-01T00:00:00+00:00',"
         "'2026-10-10T18:46:41+00:00','2026-10-10T18:46:41+00:00')",
-        (LIVE_SUBACCOUNT,),
+        (LIVE_SUBACCOUNT, GRC_PAYOUT),
     )
 
 
@@ -409,3 +421,70 @@ def test_the_verdict_is_pure_and_total(keys, expected):
     """
     assert widening_verdict(keys) == expected
     assert widening_verdict(keys) in WIDEN_VERDICTS
+
+
+# --- the gate that would have caught the clause this change forgot --------------
+
+def test_every_ON_CONFLICT_target_in_the_tree_names_a_real_unique_index(tmp_path):
+    """THE GATE, and it exists because the widening broke an upsert it did not edit.
+
+    `late_deposits` was keyed UNIQUE(asset, txid, vout) and
+    services/late_deposit_service.record() upserts with `ON CONFLICT(asset, txid, vout)`.
+    Widening the key in db.py's SCHEMA did not touch that clause, and SQLite does not
+    treat the mismatch as a near miss -- a conflict target that resolves to no unique
+    index raises
+
+        OperationalError: ON CONFLICT clause does not match any PRIMARY KEY or
+                          UNIQUE constraint
+
+    on EVERY insert. So recording a late deposit stopped working outright rather than
+    degrading. 17 cases in tests/test_late_deposits.py caught it, in the same suite run
+    that ADDED 30 new ones -- a net of +13, which is exactly the arithmetic CLAUDE.md's
+    closing instruction is about: diff the suite line by line against a recorded baseline,
+    because counting failures hides a new break that lands the same day an old one is
+    fixed. A failure count alone read as progress.
+
+    WHY A GATE AND NOT JUST THE FIX. The clause is a SECOND SPELLING of a unique key
+    (rule 8): two copies that agreed on the day they were written and drifted the moment
+    one moved. They cannot be merged -- SQLite needs the columns written out in the SQL --
+    so this asserts the agreement mechanically instead of relying on somebody remembering
+    that the other site exists.
+
+    IT PARSES THE REAL SQL AND BUILDS THE REAL DATABASE, so it cannot pass against a
+    schema it only read about: each target is checked against the unique keys SQLite
+    itself reports for that table.
+
+    MUTATION: revert late_deposit_service.py's clause to (asset, txid, vout) and this
+    fails naming the file, the table, the target it found and the keys that actually
+    exist.
+    """
+    conn = connect_db(str(tmp_path / "gate.db"))
+    conn.executescript(SCHEMA)
+    conn.commit()
+
+    # `INSERT INTO <table> ... ON CONFLICT(<cols>)`, which is the only shape this tree
+    # writes. DOTALL and a non-greedy gap because the statement spans several lines.
+    pattern = re.compile(
+        r"INSERT\s+INTO\s+(\w+)\b.*?ON\s+CONFLICT\s*\(([^)]*)\)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    checked = []
+    for path in source_files("*.py", REPOSITORY_ROOT / "swap_terminal"):
+        for table, columns in pattern.findall(path.read_text()):
+            target = tuple(part.strip() for part in columns.split(","))
+            keys = [tuple(key) for key in unique_keys(conn, table)]
+            where = f"{path.relative_to(REPOSITORY_ROOT)} -> {table} ON CONFLICT{target}"
+            assert any(sorted(target) == sorted(key) for key in keys), (
+                f"{where} names no unique key on that table. Its keys are {keys}. Every insert "
+                f"through this statement raises OperationalError, so the path is dead rather "
+                f"than merely wrong -- which is how the 2026-10-10 widening took "
+                f"late_deposit_service.record() with it."
+            )
+            checked.append(where)
+
+    assert len(checked) >= 2, (
+        f"this gate found {len(checked)} ON CONFLICT statement(s) and the tree had 2 when it was "
+        f"written (late_deposit_service.record and unattributable_deposit_service.record). A gate "
+        f"that matches nothing passes while checking nothing -- if those upserts were rewritten, "
+        f"fix the pattern rather than lowering this number."
+    )

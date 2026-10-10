@@ -582,14 +582,32 @@ def test_apply_migrations_is_idempotent(db_path):
     do. It returns True only for a database created before the column existed --
     pinned separately in test_deposit_tag_migration_adds_the_column_to_an_old_db.
     Asserting the whole dict rather than individual keys is deliberate: it is what
-    caught the added key when deposit_tag landed on 2026-09-26.
+    caught the added key when deposit_tag landed on 2026-09-26, and it caught
+    `payment_keys_widened` the same way on 2026-10-10. Both times the test failed because
+    the dict genuinely grew a member, which is the outcome this shape exists to force
+    somebody to acknowledge -- an operator or a tool reading the return value of a
+    migration needs to know the set of things it reports on, and a per-key assertion would
+    have let a new one arrive unmentioned.
+
+    `payment_keys_widened` IS EMPTY HERE FOR THE SAME REASON `deposit_tag_added` IS FALSE:
+    this fixture builds the database from the current SCHEMA, which already declares
+    UNIQUE(asset, txid, vout, address) on both payment tables, so there is nothing to
+    rebuild. The populated case -- a database carrying the previous key -- is pinned
+    separately in tests/test_payment_key_widening.py, against a schema reconstructed from
+    today's rather than pasted.
     """
     conn = connect_db(db_path)
     first = apply_migrations(conn)
     second = apply_migrations(conn)
     conn.close()
-    assert first == {"index_created": True, "duplicates": [], "deposit_tag_added": False}
-    assert second == {"index_created": True, "duplicates": [], "deposit_tag_added": False}
+    expected = {
+        "index_created": True,
+        "duplicates": [],
+        "deposit_tag_added": False,
+        "payment_keys_widened": [],
+    }
+    assert first == expected
+    assert second == expected
 
 
 def test_deposit_tag_migration_adds_the_column_to_an_old_db(tmp_path):

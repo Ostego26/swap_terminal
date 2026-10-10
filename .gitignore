@@ -137,3 +137,8 @@ runtime/launcher.lock
 runtime/launcher.pid
 runtime/launcher.log
 runtime/browser-profile/
+
+# Claude Code scratch, including git worktrees it creates. A worktree here is a
+# COMPLETE second copy of this tree, which is why tests/source_tree.py also excludes
+# it: a nested checkout makes every sweep that counts something count it twice.
+.claude/

@@ -77,6 +77,7 @@ from __future__ import annotations
 import json
 
 import pytest
+import valid_addresses
 from chains.icp import ICPAdapter
 from chains.icp_account import account_identifier, subaccount_from_index
 from db import SCHEMA, apply_migrations, connect_db
@@ -98,6 +99,11 @@ LIVE_SUBACCOUNT = account_identifier(OWNER, subaccount_from_index(9))
 SENT = 2.44081155
 SENT_E8S = 244081155
 LIVE_BLOCK = 2
+
+#: DERIVED, NOT PASTED, for the reason tests/test_payment_key_widening.py states at its
+#: own copy of this line: test_address_literals_are_valid.py holds a ceiling on
+#: address-shaped literals in this tree and pasting this one took it from 60 to 65.
+GRC_PAYOUT = valid_addresses.GRC_PAYOUT
 
 CONFIG = {"AMOUNT_TOLERANCE_PCT": 0.01, "ICP_MIN_CONFIRMATIONS": 1}
 
@@ -123,10 +129,10 @@ def seed_swap(db, swap_id, address, *, status="awaiting_deposit", expected=SENT)
         "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address,"
         " payout_address, expected_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
         " output_amount_estimate, status, min_confirmations, expires_at, created_at, updated_at)"
-        " VALUES (?,'q','ICP','GRC',?,'mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap',?,327.21,150,0.001,"
+        " VALUES (?,'q','ICP','GRC',?,?,?,327.21,150,0.001,"
         "786.0,?,1,'2999-01-01T00:00:00+00:00','2026-10-10T18:46:41+00:00',"
         "'2026-10-10T18:46:41+00:00')",
-        (swap_id, address, expected, status),
+        (swap_id, address, GRC_PAYOUT, expected, status),
     )
     db.commit()
 
@@ -297,10 +303,10 @@ def test_a_deposit_still_below_its_threshold_is_never_skipped_at_either_address(
         "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address,"
         " payout_address, expected_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
         " output_amount_estimate, status, min_confirmations, expires_at, created_at, updated_at)"
-        " VALUES ('s_x','q','ICP','GRC',?,'mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap',?,327.21,150,"
+        " VALUES ('s_x','q','ICP','GRC',?,?,?,327.21,150,"
         "0.001,786.0,'confirming',2,'2999-01-01T00:00:00+00:00','2026-10-10T18:46:41+00:00',"
         "'2026-10-10T18:46:41+00:00')",
-        (LIVE_SUBACCOUNT, SENT),
+        (LIVE_SUBACCOUNT, GRC_PAYOUT, SENT),
     )
     seed_settled_event(db, "s_x", "2", LIVE_SUBACCOUNT, SENT)  # confirmations=1, threshold=2
     db.commit()
@@ -319,7 +325,9 @@ def test_on_a_shared_account_the_scoped_set_EQUALS_the_old_asset_wide_one(db):
     write the SCANNED address into the event, so on a shared-account chain every row
     on the asset carries the same address and the two sets coincide.
     """
-    shared = "CUBnQ5QBfYkL71TCqSdecAQ9xjfGmAdu6Hs3fjQeLorp"
+    # The shared Solana deposit account, from the fixture module rather than pasted --
+    # see GRC_PAYOUT above for the ceiling that makes this the only acceptable form.
+    shared = valid_addresses.SOL_DEPOSIT_ACCOUNT
     db.execute(
         "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps,"
         " network_fee_reserve, output_amount_estimate, expires_at, created_at)"
@@ -331,10 +339,10 @@ def test_on_a_shared_account_the_scoped_set_EQUALS_the_old_asset_wide_one(db):
             "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, deposit_tag,"
             " payout_address, expected_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
             " output_amount_estimate, status, min_confirmations, expires_at, created_at, updated_at)"
-            " VALUES (?,'qs','SOL','GRC',?,?,'mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap',0.01,8700.0,150,"
+            " VALUES (?,'qs','SOL','GRC',?,?,?,0.01,8700.0,150,"
             "0.01,86.0,'completed',1,'2999-01-01T00:00:00+00:00','2026-10-01T00:00:00+00:00',"
             "'2026-10-01T00:00:00+00:00')",
-            (swap_id, shared, index),
+            (swap_id, shared, index, GRC_PAYOUT),
         )
         db.execute(
             "INSERT INTO deposit_events (swap_id, asset, txid, vout, address, amount,"
