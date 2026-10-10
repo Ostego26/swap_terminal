@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+# rlib ALONGSIDE cdylib, added in increment 1b for the same reason
+# operator_admin/Cargo.toml already carries it: `cargo test` cannot link a test
+# binary against a cdylib-only crate, and refuse_wrong_shape() is a pure decision
+# whose whole point is being assertable without a replica (CLAUDE.md rule 10).
+# dfx builds the cdylib and ignores the rlib.
 
 [dependencies]
 ic-cdk = "0.17"

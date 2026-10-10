@@ -11,8 +11,7 @@ path here that produces a signature", and that claim is worth exactly as much as
 whatever enforces it. A comment enforces nothing: increment 2 adds signing, and
 the comment above it still says it cannot sign until somebody notices.
 
-MEASURED ON THE BUILT ARTIFACT TOO, 2026-10-05, which is the check this file
-cannot run because it would need the wasm32 target and a network fetch:
+MEASURED ON THE BUILT ARTIFACT TOO, 2026-10-05:
 
     cargo build --release --target wasm32-unknown-unknown
     -> 376425 bytes
@@ -21,12 +20,36 @@ cannot run because it would need the wasm32 target and a network fetch:
        PRESENT  ecdsa_public_key
        absent   sign_with_ecdsa
 
-So the binary agrees with the source. This file pins the source, which is the
-half that can be checked on every run.
+RE-MEASURED 2026-10-10 after increment 1b added ed25519 and BIP-340, and the
+drift is left visible rather than overwritten (rule 1):
+
+    -> 473941 bytes          <- 376425 before; +97516 for the second
+                                management-canister module and the Curve enum
+       EXPORT   canister_init
+       EXPORT   canister_post_upgrade
+       EXPORT   canister_query config
+       EXPORT   canister_update public_key     <- still FOUR, still one update
+       PRESENT  ecdsa_public_key
+       PRESENT  schnorr_public_key             <- new in 1b
+       absent   sign_with_ecdsa
+       absent   sign_with_schnorr              <- the one that matters in 1b
+       absent   http_request
+
+THE 2026-10-05 NOTE SAID THIS CHECK COULD NOT BE RUN HERE, "because it would
+need the wasm32 target and a network fetch". Both are available after
+`rustup target add wasm32-unknown-unknown`, so it is now a test rather than a
+paragraph -- see `test_the_built_wasm_exports_no_signing_call` at the bottom,
+which is SKIPPED BY DEFAULT because a release build costs about 34s and this
+suite has over 4,500 tests. Set ST_CHECK_WASM=1 to run it.
+
+So the binary agrees with the source. The rest of this file pins the source,
+which is the half that can be checked on every run without a toolchain.
 """
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -121,3 +144,66 @@ def test_the_canister_declares_the_dependencies_it_imports(required):
     assert f"\n{required} " in manifest or f"\n{required}=" in manifest, (
         f"{required} is imported but not declared in Cargo.toml"
     )
+
+
+# ---------------------------------------------------------------------------
+# THE ARTIFACT CHECK. Opt-in, because a release build is ~34s against a suite of
+# over 4,500 tests -- but real, which the prose version in this file's docstring
+# was not. Rule 17: "run the thing that would show it false."
+
+
+@pytest.mark.skipif(
+    os.environ.get("ST_CHECK_WASM", "") not in {"1", "true", "yes"},
+    reason="set ST_CHECK_WASM=1 to build the canister and inspect the wasm (~34s)",
+)
+def test_the_built_wasm_exports_no_signing_call():
+    """The BINARY, not the source. Measured 2026-10-10; figures in the docstring.
+
+    WHY THE BINARY IS A DIFFERENT CHECK FROM THE SOURCE. Every other assertion
+    here reads lib.rs, so all of them share one blind spot: a signing call
+    reaching the artifact some way the source does not spell -- a macro, a
+    dependency's re-export, a build script. This looks at what would actually be
+    installed.
+
+    REFUSES RATHER THAN SKIPS IF THE BUILD FAILS. A skip on a failed build is a
+    green suite reporting on a canister that does not compile.
+    """
+    icp = Path(__file__).resolve().parent.parent / "icp"
+    # Fixed argv, no shell, and no caller input reaches it.
+    build = subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--release",
+            "--target",
+            "wasm32-unknown-unknown",
+            "-p",
+            "threshold_custody",
+        ],
+        cwd=icp,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert build.returncode == 0, f"the canister did not build:\n{build.stderr[-2000:]}"
+
+    wasm = icp / "target" / "wasm32-unknown-unknown" / "release" / "threshold_custody.wasm"
+    assert wasm.is_file(), f"{wasm} was not produced"
+    blob = wasm.read_bytes()
+
+    # The two calls increment 1b is ALLOWED to make, both returning public keys.
+    for allowed in (b"ecdsa_public_key", b"schnorr_public_key"):
+        assert allowed in blob, f"{allowed.decode()} is missing; the keyring cannot answer"
+
+    # `sign_with_schnorr` is the one this increment newly risks: the schnorr module
+    # it now imports from is the module that contains it.
+    for call in SIGNING_CALLS:
+        assert call.encode() not in blob, (
+            f"{call} reached the built wasm. The source check passed, so it arrived "
+            f"through a macro, a re-export or a dependency -- which is exactly the "
+            f"blind spot this test exists for."
+        )
+
+    # ONE update and ONE query in the artifact, matching the source assertion above.
+    assert blob.count(b"canister_update ") == 1, "more than one update method was exported"
+    assert blob.count(b"canister_query ") == 1, "more than one query method was exported"
