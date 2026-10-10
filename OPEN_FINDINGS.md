@@ -15,7 +15,7 @@ this session cannot reach — rule 16) or `claude` (everything else).
 
 ## Open — operator
 
-### 1. BTC and LTC daemons are bound loopback-only
+### 1. BTC and LTC daemons are bound loopback-only — CLOSED 2026-10-10
 **Measured** on the host 2026-10-08:
 
 ```
@@ -58,6 +58,37 @@ from GRC: `Connection refused` means the socket is not accepting at all (bound
 loopback-only -> `rpcbind`), where GRC's `403` means it accepted and declined the
 caller by IP (-> `rpcallowip` alone). Different remedies, and the report was
 truncating off the word that distinguished them until C27 below.
+
+**CLOSED 2026-10-10. All four probeable chains answer and `swapterm chains` exits
+0 for the first time.** The remedy above was applied verbatim, appended at EOF of
+each conf because `[regtest]` was already the last section header in both (line 4),
+so end-of-file is inside it — no new header, and the section question that the
+remedy flags was checked before writing rather than assumed:
+
+```
+LISTEN  172.17.0.1:18443   bitcoind   pid 2465490
+LISTEN  172.17.0.1:19443   litecoind  pid 2465635
+LISTEN   127.0.0.1:18443   bitcoind              <- kept, so the host CLI still works
+LISTEN   127.0.0.1:19443   litecoind
+```
+
+```
+REACHABLE   all 4 probeable chain(s) answered: BTC, GRC, LTC, XRP
+  BTC   regtest   pays bcrt1... addresses, and only those
+  GRC   testnet   no bech32 on this chain -- its addresses are base58
+  LTC   regtest   pays rltc1... addresses, and only those
+  XRP   testnet (network_id 1)
+```
+
+**The remaining LTC blocker is not reachability and never was.** That `pays
+rltc1...` line is the one added on 2026-10-09 when the probe's `network` field was
+found to have zero readers, and it states the wall directly: the operator's
+external wallet is `tltc1q37khgpktccdwpxq6vmkt6gtrnra3x39tvcyx62` on **testnet**
+(confirmed — their `litecoin-qt` holds `127.0.0.1:19332`, the LTC testnet RPC
+port), while the desk's litecoind is `-regtest` on 19443. A regtest node issues
+and accepts `rltc1...` and its coins exist only on that node, so no choice of
+deposit asset changes the outcome. That is a network decision for the operator,
+not a configuration defect.
 
 ### 2. GRC rejects the container's RPC with 403
 **Measured**: `did not answer: 403 Client Error: Forbidden for url:
@@ -140,6 +171,20 @@ out a different one and the rule goes **silently** stale — straight back to
 dropped packets and 30s hangs, with no new symptom to explain it.
 **Remedy**: pin the subnet in `docker-compose.yml`. Not done: it recreates the
 network and both containers. Say the word.
+
+**THE SOURCE ADDRESS IS SETTLED, 2026-10-10, AND I HAD IT RIGHT THEN TALKED
+MYSELF OUT OF IT.** The container sends from **172.18.0.3** — its own address, as
+the first `docker inspect` said. Deduced from two measurements rather than observed
+directly, and the premises matter because the direct observation is not available:
+ufw rule 20 is `18443,19443,25779/tcp ALLOW IN 172.18.0.0/16`, so a packet arriving
+from 172.17.0.1 would be dropped and never reach a daemon — and GRC answers 200.
+Corroborated by a throwaway listener on :25999, which **timed out** from the same
+container on the same bridge, because 25999 is not in rule 20.
+
+So `host.docker.internal` -> 172.17.0.1 is the DESTINATION, which is why `rpcbind`
+has to name it; the source is never rewritten for host-destined bridge traffic. The
+`rpcallowip=172.17.*` line added to the GRC conf while chasing this does nothing.
+Harmless, and removing it costs a restart.
 
 **Sharper after finding 2, 2026-10-09.** `host.docker.internal` resolves inside
 the container to `172.17.0.1` — the gateway of the DEFAULT `bridge` network, which
