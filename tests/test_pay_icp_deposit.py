@@ -25,6 +25,7 @@ that costs money when it is missing.
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 from db import SCHEMA, dict_factory
@@ -302,3 +303,86 @@ def test_an_unset_ledger_id_refuses_with_code_2_and_says_how_to_read_it():
         subject.preflight(Args(), {**ICP_SETTINGS, "ledger_canister_id": ""})
     assert caught.value.code == 2
     assert any("canister_ids.json" in line for line in caught.value.lines)
+
+
+# ---------------------------------------------------------------------------
+# THE COMMANDS THIS TOOL PRINTS MUST ACTUALLY RUN
+
+
+def test_the_confirm_command_matches_show_swaps_real_interface():
+    """MUTATION: drop the `--swap` and print the id positionally.
+
+    MEASURED 2026-10-10, ON THE OPERATOR'S HOST, ONE LINE AFTER A SUCCESSFUL
+    SEND: this tool printed `python3 show_swap.py s_968a69b37c3da5c9` and the
+    operator got back
+
+        usage: show_swap.py [-h] [--swap ID] [--db DB]
+        show_swap.py: error: unrecognized arguments: s_968a69b37c3da5c9
+
+    show_swap.py takes `--swap ID`. The positional form never worked.
+
+    WHY THIS IS WORSE THAN AN ORDINARY WRONG COMMENT. It is the line an operator
+    copies at the one moment they most want confirmation -- funds have just left,
+    and the next thing they do is ask where the swap went. A command that errors
+    there reads as the SWAP having gone wrong rather than the instruction, which
+    is the opposite of what rule 14 asks output to do.
+
+    Asserted against show_swap.py's own argparse source rather than a literal, so
+    renaming the flag there fails HERE rather than on somebody's terminal.
+    """
+    root = Path(__file__).resolve().parent.parent
+    show_swap = (root / "show_swap.py").read_text()
+    assert '"--swap"' in show_swap, (
+        "show_swap.py no longer declares --swap, so this tool's printed confirm command "
+        "needs updating to whatever replaced it"
+    )
+
+    printed = [
+        line
+        for line in (root / "pay_icp_deposit.py").read_text().splitlines()
+        if "show_swap.py" in line and not line.strip().startswith("#")
+    ]
+    assert printed, "the confirm line vanished; an operator now has nothing to run after a send"
+    for line in printed:
+        assert "show_swap.py --swap" in line, (
+            f"this tool prints a show_swap.py command without --swap, which show_swap.py "
+            f"rejects as an unrecognized argument: {line.strip()}"
+        )
+
+
+def test_every_script_this_tool_tells_an_operator_to_run_exists():
+    """A printed command pointing at a missing file reads as the operator's error.
+
+    Same class as the confirm-flag defect: the tool names fund_desk.py in its
+    top-up hint and show_swap.py in its confirm line, and a rename of either
+    would otherwise be discovered by somebody pasting it.
+
+    SCOPED TO `print(` LINES, AND THE FIRST VERSION WAS NOT. It scanned every
+    word in the file ending `.py`, which swept up `db.py` out of an import and
+    failed looking for it at the repository root -- where it correctly is not,
+    since it lives in swap_terminal/. A detector that reads the whole file to
+    answer a question about printed output is the prose-reading mistake this tree
+    has made five times (HANDOFF.md section 6), and I made it a sixth time here
+    before the test ran. What this tool PRINTS is what a `print(` line contains.
+    """
+    root = Path(__file__).resolve().parent.parent
+    printed = [
+        line
+        for line in (root / "pay_icp_deposit.py").read_text().splitlines()
+        if "print(" in line and ".py" in line
+    ]
+    assert printed, "the tool prints no script names at all, so this gate measures nothing"
+
+    named = set()
+    for line in printed:
+        named.update(
+            word.strip("'\"`,()")
+            for word in line.split()
+            if word.strip("'\"`,()").endswith(".py")
+        )
+    assert named, f"no .py name parsed out of {len(printed)} printed line(s)"
+    for script in sorted(named):
+        assert (root / script).is_file(), (
+            f"pay_icp_deposit.py PRINTS {script} for an operator to run, but it is not at "
+            f"the repository root"
+        )

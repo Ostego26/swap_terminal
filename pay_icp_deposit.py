@@ -530,7 +530,13 @@ def main() -> int:
         print(line, file=None if moved else sys.stderr)
     if not moved:
         return 1
-    print(f"  confirm       python3 show_swap.py {swap['id']}")
+    # `--swap`, NOT a positional. show_swap.py declares `[--swap ID] [--db DB]`,
+    # so the positional form this line printed until 2026-10-10 came back
+    # `error: unrecognized arguments` -- a tool printing a command that does not
+    # run, in the one line an operator copies immediately after a send has
+    # succeeded. Rule 16: a wrong comment is a bug, and printed output is the
+    # comment an operator is most likely to act on.
+    print(f"  confirm       python3 show_swap.py --swap {swap['id']}")
     print("                the deposit watcher records the deposit_event; this tool does not")
     return 0
 
