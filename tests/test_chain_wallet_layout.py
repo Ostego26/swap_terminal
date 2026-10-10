@@ -189,6 +189,34 @@ class Accounted(TranslatedAdapter):
         #: test fail for a reason that was not a call.
         self.validated: list[str] = []
 
+    def call(self, method, *params) -> object:
+        """Like TranslatedAdapter's, except that an Exception VALUE is RAISED.
+
+        A STUB THAT CANNOT EXPRESS "THE CHAIN REFUSED" MAKES THE REFUSAL TEST PASS ON
+        THE WRONG PATH, and mine did. TranslatedAdapter returns `self.answers[method]`
+        whatever it is, so seeding `{"server_info": RuntimeError("rippled: noNetwork")}`
+        handed the panel the exception OBJECT as a successful result. dig() then walked
+        into it, found no `info` key, and the page reported "the server_info call
+        ANSWERED and its reply does not carry 'info.peers'" -- a response-shape finding
+        about a call that in reality had failed.
+
+        AND THE FIRST VERSION OF THE TEST PASSED ANYWAY, which is the part worth
+        keeping. It asserted `"noNetwork" in body`, and the string WAS there: the pane
+        renders the raw result, and `str(RuntimeError("rippled: noNetwork"))` contains
+        it. A substring check over a whole page cannot tell which region put it there,
+        and the assertion it replaced now reads the status cells' own notes.
+
+        tests/test_chain_panel.py's `Answering` already raises an Exception value for
+        the same reason -- its docstring: "AN UNLISTED METHOD RAISES, because that is
+        what a daemon does for a method it does not have ... a stub that returned None
+        would let this panel pass while being broken against the real older daemon."
+        This is that rule applied to a LISTED method whose listed answer is a failure.
+        """
+        if isinstance(self.answers.get(method), Exception):
+            self.calls.append((method, params))
+            raise self.answers[method]
+        return super().call(method, *params)
+
     def validate_address(self, address: str) -> bool:
         self.validated.append(address)
         return True
@@ -843,11 +871,27 @@ def test_not_asked_and_nothing_to_ask_and_a_refusal_are_THREE_different_bars():
     status, body = render("/admin/wallets/XRP?ask", {"XRP": Accounted(refusing)})
     assert status == 200
     assert "noNetwork" in body, "the chain's own refusal does not reach the screen"
-    assert "(not asked)" not in squash(body).replace("(not asked) ", "", 0) or True
-    assert "Not asked" not in [cell.label for cell in panel.chain_panel(
-        _app().config, {"XRP": Accounted(refusing)}, "XRP", ask=True)["qt"]["status"]], (
-        "a chain that was asked and refused reports as 'not asked', which is the one reading that "
-        "tells the operator to go and click something"
+    # A LINE HERE READ `assert ... or True` AND THEREFORE ASSERTED NOTHING. It was my
+    # own, left behind while narrowing a check I could not get to express what I meant,
+    # and it is the one defect a test file can carry that no run will ever report: the
+    # suite stays green and one of its claims is decoration. Deleted rather than
+    # repaired, because the claim it was reaching for -- that a refused render does not
+    # read as an unasked one -- is exactly what the two assertions below it make, on the
+    # status bar's own labels rather than on a substring of the page.
+    bar = panel.chain_panel(
+        _app().config, {"XRP": Accounted(refusing)}, "XRP", ask=True)["qt"]["status"]
+    labels = [cell.label for cell in bar]
+    assert "Not asked" not in labels and "Nothing to ask" not in labels, (
+        f"a chain that was asked and REFUSED reports as not-asked ({labels}), which is the one "
+        f"reading that tells the operator to go and click something. The three states have to "
+        f"stay distinguishable"
+    )
+    # AND THE CELL THAT COULD NOT BE READ SAYS SO WITH THE CHAIN'S OWN WORDS IN IT,
+    # rather than with a sentence this repository wrote about a chain it could not reach.
+    unread = [cell for cell in bar if cell.state == layout.CELL_UNKNOWN]
+    assert unread, f"every cell reads as established on a render where server_info raised: {bar}"
+    assert any("noNetwork" in cell.note for cell in unread), (
+        f"no status cell carries the chain's own refusal: {[cell.note for cell in unread]}"
     )
 
 
