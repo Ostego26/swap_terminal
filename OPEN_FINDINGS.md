@@ -392,7 +392,48 @@ literal `docker compose down` is now easy to reach and nobody can say what it co
 the replica's key. Moving custody to canister-derived addresses on a local replica
 stays unsafe regardless — `HANDOFF.md` §2 already says so.
 
-### 20. May a `-f` overlay override a service that arrived through `include:`? — NOT MEASURED
+### 20. May a `-f` overlay override a service that arrived through `include:`? — MEASURED, YES
+
+**SETTLED 2026-10-10 BY THE OPERATOR.** The read-only check below was run against
+the armed-GRC overlay, the one whose failure mode is a payout worker that cannot
+sign:
+
+```
+$ docker compose -f docker-compose.yml -f docker-compose.web.armed-grc.yml config --services
+icp-replica
+web
+```
+
+A service list, with no error about a conflict with an imported resource. So
+compose PERMITS a later `-f` file to override a service an earlier file
+imported: `web` arrives through `docker-compose.yml`'s `include:` and the
+overlay's `web` merges onto it. `icp-replica` appearing alongside confirms the
+`include:` of `docker-compose.icp.yml` is still in effect under the `-f` chain
+rather than being replaced by it.
+
+A SECOND FACT CAME FREE: `docker compose config` evaluates the overlay's
+`${GRIDCOIN_WALLET_PASSPHRASE:?...}` guard, so the command could not have
+succeeded with that variable unset. Its presence in the operator's environment
+is therefore established by the check passing, without the value ever being
+printed.
+
+**THIS ALSO MAKES `COMPOSE_FILE` SAFE**, which is what the operator actually
+needs: `export COMPOSE_FILE=docker-compose.yml:docker-compose.web.armed-grc.yml`
+makes a bare `docker compose up` armed, keeping arming a deliberate act (the
+export) while giving the single command the unified lifecycle was for. Without
+it the operator must remember two `-f` flags on every `up`, and measured
+2026-10-10 they came up unarmed three times in a row -- which is a defect in the
+ergonomics rather than in their memory.
+
+**WHAT IS STILL NOT MEASURED HERE**: whether `docker compose up` with that
+`COMPOSE_FILE` set produces a RUNNING container that holds the variable. `config`
+proves the merge; it does not prove the runtime. The presence check that does,
+without printing the secret, is
+`docker compose exec -T web printenv | grep -c GRIDCOIN_WALLET_PASSPHRASE`.
+Plain `docker compose config` must NOT be used for this -- it interpolates and
+would print the passphrase.
+
+### 20b. The original, as written before the measurement — NOT MEASURED
 **The armed path depends on the answer and this session could not take it.**
 `docker-compose.web.armed-grc.yml`, `-sol.yml`, `-xrp.yml` and
 `docker-compose.web.hostnet.yml` override `web`, which since 2026-10-10 reaches
