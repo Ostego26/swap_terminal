@@ -270,7 +270,32 @@ def root_entry_point(relative_path: str, module_name: str | None = None):
     if spec.loader is None:
         raise ImportError(f"the import spec for {source} carries no loader, so it cannot be executed")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # REGISTERED IN sys.modules BEFORE exec_module, AND THIS IS A BUG FIX RATHER THAN
+    # BOILERPLATE, found 2026-10-09 by the first caller whose entry point declares a
+    # @dataclass. dataclasses._process_class() checks for KW_ONLY via _is_type(), which
+    # does `sys.modules.get(cls.__module__).__dict__` -- so a module executed without
+    # being registered gives:
+    #
+    #     AttributeError: 'NoneType' object has no attribute '__dict__'
+    #
+    # from inside dataclasses.py, naming neither the entry point nor the real cause. It
+    # is the same shape as the unchecked `spec.loader` this helper was created to fix:
+    # a latent hole that every one of the five copies carried and that nothing hit until
+    # a caller used the one feature that trips it. The same applies to any entry point
+    # using typing.get_type_hints(), pickle, or a dataclass field type resolved lazily.
+    #
+    # Registered under `spec.name`, which is `module_name or source.stem`, so the two
+    # callers that deliberately load ONE file under TWO names still get independent
+    # module objects -- they land at different sys.modules keys.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        # NOT LEFT BEHIND ON FAILURE. A half-executed module in sys.modules is worse
+        # than none: the next importer gets it without the exception and reads partial
+        # definitions as the real thing.
+        sys.modules.pop(spec.name, None)
+        raise
     return module
 
 

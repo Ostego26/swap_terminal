@@ -72,7 +72,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -123,7 +123,7 @@ class SuiteDiff:
     still_broken: tuple[str, ...] = ()
     baseline_total: int = 0
     current_total: int = 0
-    notes: tuple[str, ...] = field(default=())
+    notes: tuple[str, ...] = ()
 
     @property
     def is_regression(self) -> bool:
@@ -140,12 +140,33 @@ class SuiteDiff:
         return bool(self.regressed or self.newly_failing or self.disappeared or self.newly_skipped)
 
 
-def compare(baseline: dict[str, str], current: dict[str, str]) -> SuiteDiff:
+def _module_of(node: str) -> str:
+    """The file part of a node id. `tests.test_a::test_x[p]` -> `tests.test_a`."""
+    return node.partition("::")[0]
+
+
+def compare(baseline: dict[str, str], current: dict[str, str], *, limited: bool = False) -> SuiteDiff:
     """Diff two node-id -> outcome mappings. Pure; no pytest, no filesystem.
 
     THE WHOLE POINT IS THAT NOTHING IS NETTED. A run that fixes one test and
     breaks another reports one `fixed` and one `regressed`, where a total reports
     no change -- which is the sentence in CLAUDE.md this file exists to honor.
+
+    `limited` SAYS THE CURRENT RUN COVERED ONLY PART OF THE SUITE, and it exists
+    because the first version of this file was unusable for the case it is most
+    needed in. Its own --help said a narrowed run was fine "only with `check`",
+    which was wrong in the same breath: a `check tests/test_one.py` compared 30
+    collected tests against 4270 recorded ones and called the other 4240
+    `disappeared`, so every mid-work check was one enormous false regression.
+    Nobody runs a tool that cries wolf 4240 times, and a tool nobody runs is the
+    patch rule 19 describes rather than the fix.
+
+    When `limited` is set, a baseline entry counts as `disappeared` only if its
+    MODULE appeared in this run -- so a deleted test inside a file you ran is
+    still caught, and the files you did not run are simply out of scope. The
+    trade is named in the returned notes rather than left for the reader to
+    infer: a whole FILE being deleted or renamed cannot be seen from a narrowed
+    run, because its absence is indistinguishable from not having asked for it.
     """
     regressed = []
     newly_failing = []
@@ -170,10 +191,22 @@ def compare(baseline: dict[str, str], current: dict[str, str]) -> SuiteDiff:
             "the baseline is EMPTY, so every test here reads as `added` and nothing can be "
             "a regression. That is not an all-clear: run `record` first."
         )
+    missing = set(baseline) - set(current)
+    if limited:
+        ran = {_module_of(node) for node in current}
+        scoped_out = {node for node in missing if _module_of(node) not in ran}
+        missing -= scoped_out
+        notes.append(
+            f"NARROWED RUN: {len(scoped_out)} recorded test(s) are in files this run did not "
+            f"collect and are OUT OF SCOPE, not missing. A test deleted from a file you DID "
+            f"run is still caught; a whole file deleted or renamed cannot be seen from here, "
+            f"because its absence looks the same as not having asked for it. Run with no "
+            f"pytest arguments to check that."
+        )
     return SuiteDiff(
         regressed=tuple(sorted(regressed)),
         newly_failing=tuple(sorted(newly_failing)),
-        disappeared=tuple(sorted(set(baseline) - set(current))),
+        disappeared=tuple(sorted(missing)),
         newly_skipped=tuple(sorted(newly_skipped)),
         added=tuple(sorted(set(current) - set(baseline))),
         fixed=tuple(sorted(fixed)),
@@ -287,10 +320,20 @@ def say_diff(diff: SuiteDiff) -> None:
     print()
     print(f"  baseline          {diff.baseline_total} tests recorded in {BASELINE_PATH.name}")
     print(f"  this run          {diff.current_total} tests collected")
-    print(
-        f"  net              {diff.current_total - diff.baseline_total:+d}  <- a NET of zero can "
-        f"still hide a break; the groups below are why"
-    )
+    # NOT PRINTED AS A NET ON A NARROWED RUN, because it is not one. The first
+    # version printed `net -4239` for a one-file check, which reads as 4239 tests
+    # having gone missing -- the exact false alarm the `limited` scoping exists to
+    # stop, reintroduced one line lower in the same function.
+    if diff.notes and any("NARROWED RUN" in note for note in diff.notes):
+        print(
+            f"  scope             {diff.current_total} of {diff.baseline_total} recorded "
+            f"<- a NARROWED run; see the note below for what is out of scope"
+        )
+    else:
+        print(
+            f"  net              {diff.current_total - diff.baseline_total:+d}  <- a NET of zero "
+            f"can still hide a break; the groups below are why"
+        )
     for note in diff.notes:
         print(f"  NOTE              {note}")
     print()
@@ -307,8 +350,24 @@ def say_diff(diff: SuiteDiff) -> None:
 
 
 def cmd_record(pytest_args: tuple[str, ...]) -> int:
-    """Run the suite and write what it did. Refuses to record a broken run silently."""
+    """Run the FULL suite and write what it did. Refuses a narrowed run outright.
+
+    REFUSES RATHER THAN WARNS, because the damage is silent and total: `record
+    tests/test_one.py` would replace a 4270-line baseline with a 30-line one, and
+    the next `check` would then report 4240 tests as `added` and exit 0. A
+    truncated baseline does not look broken -- it looks clean.
+    """
     print("suite_baseline: RECORD")
+    if pytest_args:
+        print(f"  REFUSED           pytest arguments were given: {' '.join(pytest_args)}")
+        print("  why               a narrowed run would replace the whole baseline with the")
+        print("                    part that ran. The next `check` would then read the other")
+        print("                    thousands as `added` and exit 0 -- a truncated baseline")
+        print("                    looks clean rather than broken.")
+        print("  instead           `record` with no arguments, or `check <path>` to compare")
+        print("                    part of the suite without touching the record.")
+        print("  nothing written   the existing baseline is untouched.")
+        return 2
     print(f"  writing           {BASELINE_PATH}")
     print("  note              this REPLACES the file from a real run; it is not appended to")
     with tempfile.TemporaryDirectory() as tmp:
@@ -344,7 +403,7 @@ def cmd_check(pytest_args: tuple[str, ...]) -> int:
             print("                    suite -- it says the run did not happen. Not an all-clear.")
             return code or 1
         current = outcomes_from_junit(report.read_text())
-    diff = compare(baseline, current)
+    diff = compare(baseline, current, limited=bool(pytest_args))
     say_diff(diff)
     print()
     if diff.is_regression:
@@ -367,8 +426,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "pytest_args",
         nargs="*",
-        help="passed through to pytest (e.g. a path to limit the run). Limiting the run makes "
-        "`record` write a PARTIAL baseline, so do it only with `check`.",
+        help="passed through to pytest, e.g. a path to limit the run. `check` handles a "
+        "narrowed run and says what it put out of scope. `record` does NOT -- it would write "
+        "a partial baseline over a full one, so it refuses.",
     )
     namespace = parser.parse_args(argv)
     extra = tuple(namespace.pytest_args)

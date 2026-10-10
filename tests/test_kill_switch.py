@@ -676,6 +676,26 @@ def test_a_start_refuses_when_an_orphan_of_that_worker_is_already_polling(tmp_pa
     monkeypatch.setattr(supervisor, "worker_commands", lambda python_executable=sys.executable: table)
     child = subprocess.Popen(table["sleeper"])  # sys.executable plus this file's own literal source
     try:
+        # WAIT FOR THE PRECONDITION THIS TEST DEPENDS ON, which it did not until
+        # 2026-10-10. It called Popen and then start_everything() on the next line,
+        # and start_everything()'s scan reads /proc/<pid>/cmdline UNSETTLED -- so a
+        # child that had not finished exec was correctly skipped, no orphan was
+        # found, and the verdict came back as a normal start.
+        #
+        # MEASURED 2026-10-10, 400 trials on an IDLE machine: the child was not yet
+        # visible in /proc 18 times, 4.5%. Under a full-suite run it is worse, which
+        # is why this passed every time it was run alone and failed in the full suite.
+        #
+        # _wait_until_scanned() has existed for exactly this since 2026-10-07 and its
+        # docstring records the same failure on the same shape -- it just had ONE
+        # caller (line 557) and this site was never converted. Rule 8: the knowledge
+        # existed and a second site did not use it. "Flake" is not a root cause; the
+        # fork/exec window is, and waiting on the condition is the fix rather than a
+        # retry around the assertion.
+        assert child.pid in _wait_until_scanned(child.pid, "sleeper", tmp_path), (
+            "the orphan never became visible to the /proc scan, so this test cannot say "
+            "anything about what start_everything() does when one IS visible"
+        )
         result = kill_switch.start_everything(names=["sleeper"], run_dir=tmp_path, commands=table)
         assert result["verdict"] == kill_switch.VERDICT_ORPHAN_BLOCKED
         assert result["orphan_count"] == 1

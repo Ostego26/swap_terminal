@@ -76,19 +76,62 @@ conf for several rounds, which is why applying it changed nothing:
 `rpcport=15715`, `rpcallowip=127.0.0.1`). The desk daemon has its own datadir, so
 the file to edit is **`~/.GridcoinResearch-desk/gridcoinresearch.conf`**.
 
-**Remedy**: `rpcallowip=172.18.0.0/16` in
-`~/.GridcoinResearch-desk/gridcoinresearch.conf`, keeping the existing
-`rpcallowip=127.0.0.1`, then restart THAT daemon only. Measured: the container is
-172.18.0.3 on gateway 172.18.0.1, and `rpcallowip=127.0.0.1` alone is the 403
-exactly. If a `/16` still 403s afterward, that build does not honor CIDR (one of
-the three unverified rows in `chains/daemon_capabilities.py`) and the pre-0.10
-form `rpcallowip=172.18.*.*` is what it understands -- GRC's conf ONLY, since
-modern Core refuses to start on a wildcard.
+**CLOSED 2026-10-09. The container gets HTTP 200.** The remedy below is kept as
+written, struck through, because it is wrong twice over and the way it was wrong
+is the finding.
 
-**Lesson, because it cost several rounds:** "which conf" is as much a part of a
-config remedy as the line itself, and I never asked which daemon owned the port
-until the operator said there were three. Rule 17 -- a remedy aimed at an
-unverified path is a hypothesis in the register of an instruction.
+> ~~`rpcallowip=172.18.0.0/16` in `~/.GridcoinResearch-desk/gridcoinresearch.conf`,
+> keeping the existing `rpcallowip=127.0.0.1`, then restart THAT daemon only. If a
+> `/16` still 403s afterward, that build does not honor CIDR and the pre-0.10 form
+> `rpcallowip=172.18.*.*` is what it understands.~~
+
+**Wrong about the FILE, and that was the active blocker.** A TestNet Gridcoin
+reads `<datadir>/testnet/gridcoinresearch.conf`, not `<datadir>/gridcoinresearch.conf`
+— `src/util/system.cpp:811-815` passes `net_specific=true` with the comment
+*"Unlike in Bitcoin, the net specific flag is TRUE, because we still use split
+config files."* The two timestamps are the whole story:
+
+    <datadir>/gridcoinresearch.conf          modified 2026-10-09 16:21   edited all day
+    <datadir>/testnet/gridcoinresearch.conf  modified 2026-10-04 14:22   actually READ
+
+The testnet file held `rpcallowip=127.0.0.1` and nothing else, five days stale.
+Adding the subnet there turned the 403 into a 200 on the first attempt.
+
+**Wrong about CIDR too, independently.** Gridcoin 5.5.1.0 passes the raw
+`rpcallowip` string to `WildcardMatch` against the peer's address TEXT
+(`src/rpc/server.cpp:531`, `util.cpp:143`), where `/` is a literal — so
+`172.18.0.0/16` matches nothing, ever. The wildcard `172.18.*` is what it reads,
+and it is exactly equivalent. CIDR arrived in commit `924f36eb` (2026-08-23), on
+`development` and tag `5.5.1.7-testnet` only. Both facts and their citations are
+now rows in `chains/daemon_capabilities.py`, and `swapterm chains` prints them
+under a 403 rather than leaving them in a file nothing reads.
+
+**Why every piece of evidence pointed the wrong way**, which is the part worth
+keeping:
+
+- loopback kept working, so the conf was "obviously" being read. It does not
+  follow: `127.0.0.0/8` is hardcoded allowed at `src/rpc/server.cpp:521-526`
+  BEFORE the allow list is consulted. That line granted nothing and would have
+  behaved identically beside `rpcallowip=garbage`.
+- `LISTEN *:25779` proved *some* `rpcallowip` reached `gArgs`, which read as "the
+  conf is honored". It was — the **stale** file's own loopback line is what
+  widens the bind at `src/rpc/server.cpp:661`.
+- the release line logs nothing whatsoever about `rpcallowip`, so a wrong file and
+  an unparseable value are indistinguishable from outside.
+- `Using data directory <datadir>/testnet` was printed at 23:14:31 and read past
+  four more times.
+
+**Lesson, and it is one level deeper than the one this entry used to carry.** It
+said "which conf is as much a part of a config remedy as the line itself" after
+naming the wrong *datadir* — and then the same entry named the wrong *file inside
+the right datadir* for five more rounds. Writing the lesson down did not stop the
+repeat, because what was missing was never the principle: it was asking the daemon
+which file it opened. It prints that every run.
+
+**Still unestablished:** which subnet is doing the work. `172.17.*` and `172.18.*`
+went in together — `host.docker.internal` resolves to `172.17.0.1` (the DEFAULT
+bridge's gateway, which the container is not attached to) while the container is
+`172.18.0.3`. Narrowing it costs one restart and bears directly on finding 3.
 
 ### 3. The ufw rule names a subnet docker can reassign
 `172.18.0.0/16` was read from `docker network inspect` on 2026-10-09. Docker
@@ -97,6 +140,17 @@ out a different one and the rule goes **silently** stale — straight back to
 dropped packets and 30s hangs, with no new symptom to explain it.
 **Remedy**: pin the subnet in `docker-compose.yml`. Not done: it recreates the
 network and both containers. Say the word.
+
+**Sharper after finding 2, 2026-10-09.** `host.docker.internal` resolves inside
+the container to `172.17.0.1` — the gateway of the DEFAULT `bridge` network, which
+the web container is NOT attached to (it is `172.18.0.3` on
+`swap_terminal_default`). Docker's `host-gateway` always maps to the default
+bridge, never the per-network gateway. So the allow list has to cover whichever
+address actually arrives, and that is a second moving part on top of the subnet
+reassignment this entry already names. Pinning the subnet fixes one half; pointing
+`*_RPC_HOST` at the container's own gateway instead of `host.docker.internal`
+would fix the other and make the allow list a single tight entry. Both are
+operator calls — one recreates containers, the other edits `.env`.
 
 ### 4. That rule gives every container on the bridge wallet RPC
 `docker-compose.yml` also defines `abstergo` and `harness`, and `up`'s own banner
@@ -119,6 +173,62 @@ a second gunicorn on its own loopback port; a loopback-only `before_request` on
 ---
 
 ## Open — claude
+
+### 6b. Three commit messages stated a test count nobody counted — MECHANISM ADDED
+
+**Measured 2026-10-09.** Three consecutive commits on this branch put a test count
+in their message that no command had produced:
+
+    95e5775   "16 tests"        real: 14 functions / 24 cases
+    018bc26   "19 new cases"    real: 11 cases (6 + 5)
+    b8a9eaf   "+19 (12 -> 31)"  real: 14 -> 31, +17
+
+The third is the worst of the three: its message also claims the number was
+"counted with `--collect-only` this time rather than from memory", and it was not.
+None of the three changed a line of code, which is the only reason this is a
+footnote rather than an incident.
+
+**The cause was a missing mechanism, not carelessness.** CLAUDE.md has asked for
+this from the beginning — *"diff the full suite line-by-line against a recorded
+baseline rather than comparing failure counts. Counting failures hides a new break
+that lands the same day an old one is fixed."* Measured the same day: **no baseline
+file anywhere in the tree, and no tool reading a junit report or `--collect-only`.**
+Every "the suite is green at N" in this branch's history was a number read off a
+terminal and retyped.
+
+**Done**: `suite_baseline.py` at the root, with `tests/suite_baseline.tsv` recorded
+from a real run. `record` rewrites the file from a full run and REFUSES a narrowed
+one (a partial baseline looks clean rather than broken); `check` diffs and reports
+`regressed`, `newly failing`, `disappeared`, `newly skipped`, `added`, `fixed` and
+`still broken` as separate groups, so a fix can never cancel a break in a total.
+A narrowed `check` scopes out files it did not collect and says what it cannot see.
+
+**Not a ratchet** (rule 19), and the file's own header says so: nothing is excused
+by appearing in it, and a regression cannot be silenced by adding a line — recording
+rewrites the whole file from a real run, so a regression recorded as the new baseline
+shows up in that file's diff in the same commit.
+
+**What remains mine**: using it. The tool existing is not the habit.
+
+**It paid for itself on the first real run.** The initial `record` came back
+`broken at record 1` and named
+`tests.test_kill_switch::test_a_start_refuses_when_an_orphan_of_that_worker_is_already_polling`.
+That test passes alone and had passed in every full-suite run this branch recorded
+by eye — because those runs were read as "4249 passed, 0 failed" and this one
+printed the node id. It is a genuine flake by construction: it calls
+`subprocess.Popen` and then `start_everything()` on the next line, whose /proc scan
+reads `cmdline` unsettled, so a child that has not finished exec is correctly
+skipped and no orphan is found.
+
+**Measured 2026-10-10, 400 trials on an idle machine: the child was not yet visible
+18 times, 4.5%.** Worse under full-suite load.
+
+`_wait_until_scanned()` has existed in that same file since 2026-10-07 for exactly
+this, and its docstring records the identical failure on the identical shape — it
+had ONE caller and this site was never converted. Rule 8 again: the knowledge
+existed and a second site did not use it. Fixed by waiting on the precondition and
+asserting it, not by retrying the assertion; 40 consecutive runs, 0 failures.
+
 
 ### 7. `create_swap()` makes 2–3 unbounded chain RPCs
 `swap_service.py:745` (payout address), `:386` (deposit account) or `:332` plus
