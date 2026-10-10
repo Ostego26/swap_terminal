@@ -1,7 +1,56 @@
+// The keyring canister's interface. Increment 1b: three curves, still no signing.
+//
+// HAND-WRITTEN AND KEPT IN STEP BY A TEST, the same arrangement
+// operator_admin/operator_admin.did explains: dfx reads this file to build the
+// Candid UI and to type-check calls, and generating it needs candid-extractor
+// plus a wasm build -- a toolchain the hygiene tests deliberately do not require.
+// So the file is explicit, and tests/test_icp_canister_cannot_sign.py pins the
+// method surface against the Rust source.
+//
+// WHAT THIS CANISTER CANNOT DO, because the interface is where a reader looks
+// first: there is no signing method. `public_key` returns a PUBLIC key and
+// `config` returns a key NAME. Nothing here produces a signature, moves a
+// balance, or names an address.
+
 type KeyConfig = record { key_name : text };
 
+// The three curves, spelled exactly as swap_terminal/modules/keyring_paths.py
+// names them. tests/test_keyring_curve_vocabulary.py reads both files and
+// asserts the sets are equal, because a caller asking for a curve this variant
+// does not list gets a candid decode failure rather than a wrong key -- the safe
+// direction, and the test is what keeps it from being found at the call site.
+//
+// secp256k1_ecdsa and bip340secp256k1 ARE THE SAME CURVE under different
+// signature schemes, reached through different management-canister calls, and
+// they yield DIFFERENT public keys and therefore different addresses. They are
+// two variants rather than one for exactly that reason.
+type Curve = variant {
+  secp256k1_ecdsa;   // ecdsa_public_key    -- BTC, LTC, GRC
+  ed25519;           // schnorr_public_key  -- SOL, XRP
+  bip340secp256k1;   // schnorr_public_key  -- Bitcoin taproot; no asset uses it yet
+};
+
+// A record rather than two positional arguments, so adding a field later does
+// not reorder anything a caller already sends.
+type PublicKeyRequest = record {
+  curve : Curve;
+  // Built by swap_terminal/modules/keyring_paths.derivation_path(). The canister
+  // forwards it unexamined and deliberately: validating it here would mean
+  // holding a second copy of the scheme (CLAUDE.md rule 8).
+  derivation_path : vec blob;
+};
+
+// Everything a verifier needs and nothing more. curve, derivation_path and
+// key_name are all ECHOED rather than assumed by the caller: each one changes
+// which key comes back, and therefore which address it implies.
 type PublicKeyReply = record {
+  // Lowercase hex. 33 bytes for secp256k1_ecdsa (compressed SEC1, leading 0x02
+  // or 0x03); 32 bytes for ed25519 and bip340secp256k1, which carry no format
+  // prefix. The chain code both management calls return is DISCARDED -- this
+  // scheme derives by asking for another derivation_path, not by BIP32 child
+  // derivation, so a chain code would be a value no caller may act on.
   public_key_hex : text;
+  curve : Curve;
   derivation_path : vec blob;
   key_name : text;
 };
@@ -11,5 +60,5 @@ type ConfigResult = variant { Ok : KeyConfig; Err : text };
 
 service : (KeyConfig) -> {
   config : () -> (ConfigResult) query;
-  public_key : (vec blob) -> (PublicKeyResult);
+  public_key : (PublicKeyRequest) -> (PublicKeyResult);
 }

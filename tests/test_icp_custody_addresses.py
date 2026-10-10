@@ -24,7 +24,9 @@ is the formatting:
 
 from __future__ import annotations
 
+import ast
 import inspect
+import textwrap
 
 import base58
 import pytest
@@ -53,6 +55,46 @@ REAL_OUTPUT = """(
 REAL_KEY_HEX = "031c72cccf80f29f74f8fa19e3e4a00e317575683fcb114558241707392703c1f0"
 
 
+def _source_without_docstring(source: str) -> str:
+    """`source` with its leading docstring's own lines removed, by AST.
+
+    WHY NOT `source.replace(func.__doc__, "")`: on Python 3.13 and later the
+    compiler strips common leading whitespace from docstrings, so `__doc__` is not
+    a substring of the source any more and the replace removes nothing, SILENTLY.
+    The measurement and the dates are at the one call site below.
+
+    Line numbers rather than `ast.unparse`, deliberately. Unparsing would return
+    normalized code -- comments gone, strings requoted -- and the caller is
+    scanning for literals that appear in comments as well as in code. Excising the
+    docstring's line range leaves every other byte exactly as written.
+
+    Returns `source` unchanged when there is no docstring, which is the honest
+    answer rather than an error: a function without one has nothing to strip. The
+    call site asserts the length SHRANK, so a silent no-op cannot pass as a strip.
+    """
+    # Dedent because inspect.getsource() of a nested or method-level definition is
+    # indented, and ast.parse refuses a leading indent. A module-level function is
+    # already flush and dedent is then a no-op.
+    tree = ast.parse(textwrap.dedent(source))
+    definition = tree.body[0]
+    if not isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return source
+    if not definition.body:
+        return source
+    first = definition.body[0]
+    if not (
+        isinstance(first, ast.Expr)
+        and isinstance(first.value, ast.Constant)
+        and isinstance(first.value.value, str)
+    ):
+        return source
+
+    lines = source.splitlines(keepends=True)
+    # ast line numbers are 1-based and end_lineno is inclusive.
+    del lines[first.lineno - 1 : first.end_lineno]
+    return "".join(lines)
+
+
 def test_the_real_dfx_output_yields_the_key_the_operator_saw():
     """Pinned against text dfx actually emitted, not against text shaped like it."""
     got = subject.canister_public_key("be2us-64aaa-aaaaa-qaabq-cai", "icp-replica", 60.0,
@@ -63,10 +105,28 @@ def test_the_real_dfx_output_yields_the_key_the_operator_saw():
 
 
 def test_the_argument_sent_is_the_root_derivation_path():
-    """An empty vec. A different path is a different key and therefore different addresses."""
+    """An empty vec on secp256k1. A different path or curve is a different key.
+
+    THE SHAPE CHANGED IN INCREMENT 1b AND THE DEFAULT DID NOT. The canister's
+    argument became `record { curve; derivation_path }` when it grew ed25519 and
+    BIP-340, so the text is longer -- but it still asks for the SAME key it asked
+    for before: the root path on secp256k1 ECDSA. That is what keeps this file's
+    default output byte-for-byte what the operator has been reading.
+
+    Pinned as literal text rather than built with
+    `candid_public_key_argument(...)`, which would make this assertion agree with
+    the encoder by construction and therefore test nothing. The encoder has its
+    own assertions in tests/test_keyring_paths.py.
+    """
     seen = []
     subject.canister_public_key("c", "s", 1.0, call=lambda canister, method, arg: (seen.append((canister, method, arg)), REAL_OUTPUT)[1])
-    assert seen == [("c", "public_key", "(vec {})")]
+    assert seen == [
+        (
+            "c",
+            "public_key",
+            "(record { curve = variant { secp256k1_ecdsa }; derivation_path = vec {} })",
+        )
+    ]
 
 
 @pytest.mark.parametrize("junk", ["", "(variant { Err = \"no key\" })", "public_key_hex = ''", "nonsense"])
@@ -218,34 +278,67 @@ def test_the_hrp_table_is_not_reimplemented_here():
     # asking modules/address_network. The first version of this assertion scanned the
     # whole source and failed on its own subject's docstring.
     #
-    # STRIPPED BY SOURCE SPAN AND NO LONGER BY `source.replace(__doc__, "")`, AND THE
-    # OLD FORM WAS A NO-OP ON PYTHON 3.13. Measured 2026-10-10 on CPython 3.13.16:
+    # STRIPPED BY AST RATHER THAN BY `source.replace(__doc__, "")`, WHICH WAS
+    # SILENTLY A NO-OP ON PYTHON 3.13 AND LATER.
+    #
+    # BOTH BRANCHES THAT MERGED HERE FOUND THIS INDEPENDENTLY, in separate
+    # worktrees, with the same mechanism and the same remedy. That is why the
+    # evidence below is from two separate runs rather than one.
+    #
+    # Measured 2026-10-10:
+    #
+    #     Python 3.12.x   __doc__ keeps the source's leading indentation
+    #                     -> `__doc__ in source` is True, replace() strips it, PASS
+    #     Python 3.13.16  the COMPILER strips common leading whitespace from every
+    #                     docstring (CPython gh-81283), so __doc__'s continuation
+    #                     lines have no indentation and the source's do
+    #                     -> `__doc__ in source` is False, replace() removes NOTHING,
+    #                        len(body) == len(source) == 2401, and the check then
+    #                        matched the docstring's own `bcrt1q...` example, FAIL
+    #
+    # The divergence, measured directly on CPython 3.13.16:
     #
     #     __doc__ in inspect.getsource(comparability)   ->  False
     #     __doc__ line 2                                ->  'WHY THIS IS NOT ...'
     #     source  line 4                                ->  '    WHY THIS IS NOT ...'
     #
-    # 3.13 strips the common leading indentation from a docstring at COMPILE time, so
-    # `__doc__` is the dedented text while the source still carries its four spaces.
-    # The two no longer match, `str.replace` removes nothing, and the assertion went
-    # back to scanning the docstring -- failing on `bcrt1qpee23n6...` inside the
-    # quoted live run, which is EXACTLY the false failure the paragraph above says
-    # the first version of this test had. It did not weaken into a false pass, which
-    # is the right direction to break in, and it was still a test reporting a defect
-    # that is not there (rule 14: a check nobody can trust is one they learn to
-    # ignore).
+    # docker/web.Dockerfile pins python:3.12-slim-bookworm, which is why this passed
+    # everywhere it had been run and failed the first time the suite met a 3.13
+    # interpreter. A test whose verdict depends on the interpreter's docstring
+    # handling is not testing what it claims to. It did not weaken into a false
+    # pass, which is the right direction to break in, but it was still a test
+    # reporting a defect that is not there (rule 14: a check nobody can trust is
+    # one they learn to ignore).
     #
-    # The span is taken rather than the value, so nothing depends on how any Python
-    # version chooses to store the text: the first `\"\"\"` opens the docstring of a
-    # function whose source begins at its own `def`, and the next one closes it.
-    opening = source.index('"""')
-    closing = source.index('"""', opening + 3) + 3
-    body = source[:opening] + source[closing:]
-    assert subject.comparability.__doc__, "the subject must still have a docstring to strip"
-    assert "WHY THIS IS NOT" not in body, (
-        "the docstring was not actually removed from the source before the HRP scan, so "
-        "this test is about to fail on addresses quoted in prose rather than on an HRP in "
-        "code -- which is the defect, not the finding"
+    # This is the FIFTH prose-reading detector in this tree (HANDOFF.md section 6
+    # counts the first four), and the remedy there is the remedy here: ask the AST
+    # where the docstring is instead of pattern-matching text. An AST excision is
+    # exact and carries no interpreter dependency, because it reads the same source
+    # text the check runs against.
+    #
+    # AST RATHER THAN THE FIRST-`"""`-TO-NEXT-`"""` SPAN, which was the other
+    # branch's form and is the one thing the two implementations disagreed on. A
+    # span scan cannot see a `'''` docstring, raises ValueError on a function
+    # with no docstring at all, and would cut at a `"""` appearing in a default
+    # argument before the docstring ever started. The parser knows which node is
+    # the docstring; a quote search only knows where quotes are.
+    body = _source_without_docstring(source)
+
+    # TWO ASSERTIONS, STRUCTURAL AND THEN CONTENT, because each catches a failure
+    # the other misses. The length check catches a strip that removed nothing (the
+    # 3.13 regression itself, arriving a second way). The content check catches a
+    # strip that removed the WRONG span -- which would shrink the source and still
+    # leave the docstring's addresses in `body`.
+    assert len(body) < len(source), (
+        "the docstring was not removed, so the HRP check below would scan it. This "
+        "is the 3.13 regression the comment above describes, arriving a second way."
+    )
+    docstring = subject.comparability.__doc__ or ""
+    assert docstring, "the subject must still have a docstring for this to be stripping one"
+    first_line = docstring.strip().splitlines()[0]
+    assert first_line not in body, (
+        f"a span was removed but the docstring survived it: {first_line!r} is still in "
+        f"the body, so the HRP scan below is about to read prose rather than code"
     )
     for hrp in ("bcrt", "rltc", "tltc", "tb1"):
         assert hrp not in body, (
