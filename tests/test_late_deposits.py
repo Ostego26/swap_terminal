@@ -94,7 +94,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT))
 sys.path.insert(0, str(REPOSITORY_ROOT / "swap_terminal"))
 
-from db import SCHEMA, apply_migrations, connect_db  # noqa: E402
+from db import PAYMENT_UNIQUE_KEY, SCHEMA, apply_migrations, connect_db  # noqa: E402
 from valid_addresses import BTC_REGTEST_DEPOSIT, BTC_REGTEST_SOMEBODY_ELSE, GRC_PAYOUT  # noqa: E402
 
 from swap_terminal.services import late_deposit_service  # noqa: E402
@@ -170,7 +170,7 @@ LATE_EVENT = event(LATE_TXID, 0)
 
 @pytest.fixture
 def db(tmp_path):
-    conn = connect_db(str(tmp_path / "late.db"))
+    conn = connect_db(str(tmp_path / "late.db"), create=True)
     conn.executescript(SCHEMA)
     apply_migrations(conn)
     conn.execute(
@@ -968,3 +968,147 @@ def test_the_cycle_line_distinguishes_nothing_to_check_from_nothing_found(db):
     assert "no finished swap inside the" in line
     assert "(none) to check" in line
     assert "IDLE" in line
+
+
+# =============================================================================
+# THE ACCOUNTED SET MUST BE KEYED THE WAY deposit_events IS, OR IT SILENCES A REAL
+# LATE DEPOSIT BELONGING TO A DIFFERENT SWAP
+# =============================================================================
+#
+# accounted_keys() asked for (txid, vout) asset-wide and justified it in its own
+# docstring: "deposit_events is UNIQUE(asset, txid, vout), so an output credited to a
+# DIFFERENT swap cannot also be this swap's." That was true when it was written and
+# stopped being true in 4e71b37 on 2026-10-10, when the constraint was widened to
+# (asset, txid, vout, address) -- because on ICP the txid IS the ledger block index
+# and every swap gets its own subaccount, so two swaps legitimately share a
+# (txid, vout) and are told apart only by the address.
+#
+# The widening touched the two places that WRITE (deposit_events, late_deposits) and
+# left this one, which READS deposit_events to decide. Rule 8's exact damage model:
+# two copies of one rule, agreeing on the day they were written.
+#
+# THE ADDRESS CHECK ALREADY IN late_rows() DOES NOT COVER THIS, and that is the part
+# worth being precise about. It compares the event against THIS swap's address; the
+# accounted set is asset-wide and holds OTHER swaps' addresses. So an event that IS
+# for this swap's address was being dropped because a different swap happened to have
+# a row at the same block index.
+
+#: A second subaccount on the same asset, which is the shape ICP produces and which
+#: the Bitcoin-family fixtures above never generate -- a BTC txid is a hash, so two
+#: swaps sharing one is not a case that arises.
+OTHER_SWAP_ADDRESS = "subaccount_of_a_different_swap"
+
+
+def test_a_late_payment_is_not_silenced_by_another_swaps_row_at_the_same_txid(db):
+    """THE REGRESSION TEST. MUTATION: drop `address` from accounted_key()'s tuple.
+
+    Seeds the operator's own ICP case in Bitcoin-family clothing, because the defect
+    is in asset-independent code: an ALREADY-CREDITED row at (txid, vout) for swap A's
+    address, and a real, confirmed payment at the SAME (txid, vout) into swap B's
+    address. The second is a different payment -- the schema says so, since 4e71b37 --
+    and it must be recorded.
+
+    THE MEASUREMENT THIS REPRODUCES used 2.44081155 ICP at ledger block index 2, which
+    is the operator's own figure from 2026-10-10: an old settled row from the ledger a
+    `docker compose down` destroyed made ('2', 0) accounted for the whole asset, and a
+    real payment at block index 2 of the REBUILT ledger into a different subaccount was
+    filtered out with a bare `continue` -- no late_deposits row, nothing in the pass's
+    count, nothing in show_late_deposits.py. This pass is, by its own header, the only
+    thing that records money arriving for a swap that has already finished.
+    """
+    seed_finished_swap(db)
+    db.execute(
+        "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address,"
+        " payout_address, expected_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
+        " output_amount_estimate, status, min_confirmations, expires_at, created_at,"
+        " updated_at) VALUES ('s_other','q','BTC','GRC',?,?,?,9868961.0,150,0.01,"
+        "986.89613973,'completed',2,'2999-01-01T00:00:00+00:00',"
+        "'2026-10-04T16:12:00+00:00',?)",
+        (OTHER_SWAP_ADDRESS, GRC_PAYOUT, AMOUNT, utc_now_iso()),
+    )
+    db.commit()
+
+    # The SAME txid and vout the seeded swap's credited row carries, paid into the
+    # OTHER swap's address. Before the fix, accounted_keys() held ('<txid>', <vout>)
+    # and this was dropped.
+    collision = event(CREDITED_TXID, CREDITED_VOUT, confirmations=20, address=OTHER_SWAP_ADDRESS)
+    other = dict(db.execute("SELECT * FROM swaps WHERE id = 's_other'").fetchone())
+
+    recorded = late_deposit_service.late_rows(
+        [collision], other, late_deposit_service.accounted_keys(db, "BTC")
+    )
+
+    assert recorded, (
+        "the live payment into a DIFFERENT swap's address was dropped because another "
+        "swap had a deposit_events row at the same (txid, vout)"
+    )
+    assert [(row.txid, row.vout, row.address) for row in recorded] == [
+        (CREDITED_TXID, CREDITED_VOUT, OTHER_SWAP_ADDRESS)
+    ]
+
+
+def test_the_swaps_own_credited_payment_is_still_suppressed(db):
+    """The idempotency half, which the widening must not break.
+
+    Widening a key loosens it, so the risk runs the other way too: a payment ALREADY
+    in deposit_events for THIS address must still not be recorded as late. Without
+    this, the fix above would trade a dropped deposit for a double-counted one -- the
+    opposite failure and equally quiet, since nothing downstream distinguishes a late
+    row from a second late row.
+    """
+    seed_finished_swap(db)
+    swap = dict(db.execute("SELECT * FROM swaps WHERE id = ?", (SWAP_ID,)).fetchone())
+
+    recorded = late_deposit_service.late_rows(
+        [CREDITED_EVENT], swap, late_deposit_service.accounted_keys(db, "BTC")
+    )
+    assert recorded == [], "the swap's own credited deposit was recorded as a late one"
+
+
+def test_the_accounted_key_is_derived_from_the_schemas_own_unique_key(db):
+    """MUTATION: change db.PAYMENT_UNIQUE_KEY and this test, not production, is what breaks.
+
+    The defect was not that the key was wrong. It was that the key was SPELLED TWICE --
+    once in db.py's constraint and once in a SELECT here -- so widening one left the
+    other behind for a commit. accounted_keys() now derives its columns from
+    db.PAYMENT_UNIQUE_KEY, which is why there is nothing left to forget.
+
+    ASSERTED ON THE TUPLE'S SHAPE, not on the SQL text, so the test does not pin the
+    implementation it is protecting.
+    """
+    seed_finished_swap(db)
+    keys = late_deposit_service.accounted_keys(db, "BTC")
+
+    assert len(keys) == 1
+    key = next(iter(keys))
+    # asset is the WHERE clause rather than part of the tuple, so the arity is the
+    # key's length minus one.
+    assert len(key) == len(PAYMENT_UNIQUE_KEY) - 1, (
+        f"the accounted key has {len(key)} elements and db.PAYMENT_UNIQUE_KEY has "
+        f"{len(PAYMENT_UNIQUE_KEY)}; one of them was widened without the other"
+    )
+    assert key == (CREDITED_TXID, CREDITED_VOUT, ADDRESS)
+
+
+def test_both_sides_of_the_membership_test_are_built_by_one_function(db):
+    """A string vout from a chain scan must match an integer vout from the database.
+
+    THE OTHER WAY THIS KEY FAILS, and it is quieter than the drop: a tuple that
+    differs only by type is a tuple that is never found, so the payment is recorded
+    AGAIN rather than suppressed. accounted_key() normalizes both sides with the same
+    code, which is the only reason that cannot happen.
+    """
+    seed_finished_swap(db)
+    accounted = late_deposit_service.accounted_keys(db, "BTC")
+    swap = dict(db.execute("SELECT * FROM swaps WHERE id = ?", (SWAP_ID,)).fetchone())
+
+    # vout as a STRING, address with whitespace -- what a loosely-typed RPC response
+    # or a hand-built dict supplies.
+    sloppy = {"txid": CREDITED_TXID, "vout": str(CREDITED_VOUT),
+              "address": f"  {ADDRESS}  ", "amount": AMOUNT, "confirmations": 20}
+    # late_rows() strips the address before comparing it to the swap's, so the
+    # whitespace case is exercised through accounted_key() directly as well.
+    assert late_deposit_service.accounted_key(sloppy) in accounted, (
+        "a string vout or a padded address produced a key the database's own row did not match"
+    )
+    assert late_deposit_service.late_rows([sloppy], swap, accounted) == []

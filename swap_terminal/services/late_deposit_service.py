@@ -128,6 +128,13 @@ from typing import NamedTuple
 # second copy of `{"BTC": 600, "LTC": 150, "GRC": 90}` here would be rule 8's bug with
 # a delay on it, and the delay would be measured in a window that silently stopped
 # covering a chain whose interval somebody corrected.
+# PAYMENT_UNIQUE_KEY AND NOT A SECOND COPY OF ITS COLUMN NAMES. This module both
+# READS deposit_events (accounted_keys) and WRITES late_deposits (its ON CONFLICT
+# target), and on 2026-10-10 those two were keyed differently from each other for one
+# commit -- the widening to (asset, txid, vout, address) touched the writer and not
+# the reader. Importing the tuple is what makes a third drift impossible rather than
+# merely unlikely.
+from db import PAYMENT_UNIQUE_KEY
 from microfortnights import format_duration
 from modules.htlc_timelock import SECONDS_PER_BLOCK
 
@@ -225,6 +232,38 @@ LATE_DEPOSIT_WINDOW_SECONDS = 86_400
 #: nothing. They agree on the value today and they answer different questions, so
 #: tying them together would make a change to either one move the other.
 MIN_RECORDED_CONFIRMATIONS = 1
+
+
+def accounted_key(row) -> tuple:
+    """The identity of one payment, as db.PAYMENT_UNIQUE_KEY defines it, minus `asset`.
+
+    ONE FUNCTION FOR BOTH SIDES OF A SET MEMBERSHIP TEST, which is the whole point.
+    accounted_keys() builds the set from database rows and late_rows() builds the
+    probe from a scanned chain event; before 2026-10-10 each spelled `(txid, vout)`
+    separately and they were wrong TOGETHER, which is precisely why nothing failed.
+    Two spellings of one key cannot disagree if there is only one spelling.
+
+    `asset` IS EXCLUDED because it is the WHERE clause, not part of the tuple:
+    accounted_keys() selects a single asset, so carrying it in every member would be
+    a constant compared against itself.
+
+    NORMALIZATION IS THE OTHER HALF OF THE BUG. A database row's vout is an INTEGER
+    and a scanned event's may be a string; an address may carry whitespace on one side
+    and not the other. A tuple that differs only by type is a tuple that is never
+    found, and the symptom is a late deposit silently recorded twice rather than
+    dropped -- the opposite failure, equally quiet. str()/int()/strip() here means
+    both sides are normalized by the same code.
+
+    A MISSING ADDRESS BECOMES "" RATHER THAN None, because the column is nullable on
+    rows written before addresses were recorded, and None != "" would make an old row
+    account for nothing.
+    """
+    vout = row.get("vout") if hasattr(row, "get") else row["vout"]
+    return (
+        str(row["txid"]),
+        int(vout or 0),
+        ((row.get("address") if hasattr(row, "get") else row["address"]) or "").strip(),
+    )
 
 
 class LateDeposit(NamedTuple):
@@ -398,24 +437,64 @@ def accounted_keys(db, asset: str) -> frozenset[tuple[str, int]]:
     and the swap's own credited deposit is the obvious member of this set -- on
     the operator's measured case, txid 7ea61ac9c7038f58... at vout=1.
 
-    EVERY ROW ON THE ASSET AND NOT ONLY THIS SWAP'S, which is wider than the
-    narrowest correct answer and deliberately so. deposit_events is UNIQUE(asset,
-    txid, vout), so an output credited to a DIFFERENT swap cannot also be this
-    swap's -- and if an address somehow served two swaps, the output is already
-    accounted for by one of them. Recording it as late as well would be a second
-    row claiming the same coins, which is the shape db.py's comment on
-    unattributable_deposits refuses: two tables asserting different things about
-    one payment.
+    THE KEY IS db.PAYMENT_UNIQUE_KEY AND IS DERIVED FROM IT, NOT SPELLED HERE.
 
-    A JOIN rather than two queries, because the question is "outputs recorded on
-    this asset" and `asset` lives on deposit_events while nothing else is needed
-    -- so it is one SELECT with no join at all, which is the smaller answer to
-    the same rule 20 test.
+    =========================================================================
+    IT USED TO BE (txid, vout) ASSET-WIDE, AND THAT DROPPED A REAL LATE DEPOSIT
+    =========================================================================
+
+    This docstring used to justify the narrower key like this, and the sentence was
+    true when it was written:
+
+        "deposit_events is UNIQUE(asset, txid, vout), so an output credited to a
+        DIFFERENT swap cannot also be this swap's."
+
+    It stopped being true in 4e71b37, EARLIER THE SAME DAY, when the constraint was
+    widened to (asset, txid, vout, address) -- because on ICP the txid IS the ledger
+    block index and every swap gets its own subaccount, so two different swaps
+    legitimately share a (txid, vout) and are told apart only by the address. That
+    widening touched the two places that WRITE (deposit_events and late_deposits) and
+    left this one, which READS deposit_events to decide, keyed on the old constraint.
+
+    MEASURED, against a throwaway database with the real SCHEMA: an old settled ICP
+    row at txid '2' vout 0 for subaccount A made ('2', 0) accounted for the whole
+    asset, and a real late payment at block index 2 of the REBUILT ledger into a
+    DIFFERENT swap's subaccount B was filtered out by late_rows() with a bare
+    `continue`. No late_deposits row, nothing in the pass's count, nothing in
+    show_late_deposits.py -- and this pass is, by its own header, the only thing that
+    records money arriving for a swap that has already finished. The amount in the
+    measurement is 2.44081155 ICP, which is the operator's own figure from today.
+
+    That is rule 8's exact damage model: two copies of one rule, agreeing on the day
+    they were written. The third copy is why the key is now DERIVED from
+    db.PAYMENT_UNIQUE_KEY rather than typed out again -- the next widening cannot
+    leave this reader behind, because there is nothing here left to forget.
+
+    EVERY ROW ON THE ASSET AND NOT ONLY THIS SWAP'S, still, and the reason survives
+    the widening: a payment already in deposit_events has been seen by the crediting
+    path and belongs to whichever swap's address it was paid to. Recording it as late
+    as well would be a second row claiming the same coins, which is the shape db.py's
+    comment on unattributable_deposits refuses. What changed is only that "the same
+    coins" now includes the address, which is what makes two subaccounts two payments
+    instead of one.
+
+    ONE SELECT AND NO JOIN, unchanged: `asset` lives on deposit_events and nothing
+    else is needed, which is the smaller answer to rule 20's test.
+
+    THE COLUMN LIST IS INTERPOLATED AND THE `noqa: S608` IS EARNED. The names come
+    from db.PAYMENT_UNIQUE_KEY, a module-level tuple of literals in this repository's
+    own source -- they are IDENTIFIERS, not input, and no caller can reach them. The
+    only value in the statement, `asset`, is a parameter.
     """
+    # asset is the first element of the key and is the WHERE clause, not part of the
+    # tuple this returns, so the selected columns are the rest of it. Derived rather
+    # than sliced by index: a key reordered in db.py must not silently reorder here.
+    columns = [name for name in PAYMENT_UNIQUE_KEY if name != "asset"]
     rows = db.execute(
-        "SELECT txid, vout FROM deposit_events WHERE asset = ?", (asset,)
+        f"SELECT {', '.join(columns)} FROM deposit_events WHERE asset = ?",  # noqa: S608 -- see docstring
+        (asset,),
     ).fetchall()
-    return frozenset((str(row["txid"]), int(row["vout"])) for row in rows)
+    return frozenset(accounted_key(row) for row in rows)
 
 
 def late_rows(events, swap, accounted) -> list[LateDeposit]:
@@ -449,7 +528,17 @@ def late_rows(events, swap, accounted) -> list[LateDeposit]:
         if not txid or event.get("vout") is None:
             continue
         vout = int(event["vout"])
-        if (txid, vout) in accounted:
+        # THE SAME TUPLE accounted_keys() RETURNS, built by the same function, because
+        # a set membership test is only as good as the two sides agreeing. Before
+        # 2026-10-10 this compared (txid, vout) against a set keyed the same way and
+        # both were wrong together, which is why nothing failed: on ICP the txid is a
+        # ledger block index and two swaps' subaccounts share it.
+        #
+        # THE ADDRESS CHECK BELOW DOES NOT COVER THIS. It compares the event to THIS
+        # swap's address; the set is asset-wide and holds OTHER swaps' addresses. An
+        # event for this swap's address was being dropped because a different swap had
+        # a row at the same block index.
+        if accounted_key({"txid": txid, "vout": vout, "address": event.get("address")}) in accounted:
             continue
         if (event.get("address") or "").strip() != address:
             continue
