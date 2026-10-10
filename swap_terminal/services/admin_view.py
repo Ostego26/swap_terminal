@@ -65,7 +65,7 @@ from collections.abc import Callable
 from time import monotonic, time
 
 from chains.base import RPCAdapter
-from chains.daemon_network import chain_network, is_named
+from chains.daemon_network import chain_network, is_named, sync_verdict
 from chains.registry import why_cannot_pay_out, why_unconfigured
 from microfortnights import format_duration
 from modules.htlc_assets import settlement_verdict
@@ -1435,7 +1435,7 @@ def probe_chain(asset: str, adapter) -> dict:
             "detail": _NO_PROBE_REASON,
         }
     try:
-        network = _ask_network(adapter)
+        network, chain_info = _ask_network(adapter)
     except Exception as exc:  # noqa: BLE001 -- checked: a probe must report every failure kind the same way, because the point of the probe is the reachable=False answer. Transport errors, auth failures, a daemon answering an error object and an adapter that refuses the call are all "this chain did not answer", they are all named in `detail`, and NOTHING downstream reads a decision from this -- it renders one table row. Narrowing would mean listing requests' exception tree plus RPCError plus XRPRPCError and still falling through on the next transport library.
         return {
             "asset": asset,
@@ -1454,6 +1454,12 @@ def probe_chain(asset: str, adapter) -> dict:
         "probed": True,
         "reachable": True,
         "network": network if named else None,
+        # ONLY WHERE THE QUESTION EXISTS. A bitcoin-family daemon reports its own
+        # initial-block-download state; the XRP adapter answers through network() and
+        # has no getblockchaininfo at all, so `chain_info` is None there and this is
+        # None rather than a row of "not established" that nobody can act on. XRP
+        # testnet is a hosted ledger -- there is no local chain to be behind on.
+        "sync": sync_verdict(chain_info) if chain_info is not None else None,
         "detail": (
             f"answered; it reports its network as {network}"
             if named
@@ -1479,7 +1485,7 @@ def probe_kind(adapter) -> str:
     return "none"
 
 
-def _ask_network(adapter) -> str:
+def _ask_network(adapter) -> tuple[str, object]:
     """Name this daemon's network. RAISES when it cannot be reached at all.
 
     THIS USED TO BE A SECOND IMPLEMENTATION OF chains/daemon_network.chain_network()
@@ -1504,10 +1510,22 @@ def _ask_network(adapter) -> str:
     a daemon is down.
     """
     if probe_kind(adapter) == "network_method":
-        return str(adapter.network())
+        return str(adapter.network()), None
     # Reachability, and it is this call raising that reports a chain as down.
-    adapter.call(_PROBE_METHOD)
-    return chain_network(adapter)
+    #
+    # THE ANSWER IS NOW KEPT. It was called and DISCARDED -- the call was made purely
+    # for its raising -- and `getblockchaininfo` is where initialblockdownload,
+    # verificationprogress, blocks and headers live. Surveyed 2026-10-10: nothing in
+    # this tree read any of them on any Bitcoin-family chain, so every surface reported
+    # REACHABLE the instant a daemon answered, however far behind it was. That is the
+    # third field-with-zero-readers found in two days on this one probe, after
+    # `network` and the envelope's own counts, and the pattern is the same each time:
+    # the value was fetched, the question was never asked.
+    #
+    # NO EXTRA CALL. chain_network() below asks again on its own -- which the docstring
+    # above explains and defends -- so returning this one costs nothing new.
+    info = adapter.call(_PROBE_METHOD)
+    return chain_network(adapter), info
 
 
 #: The total time ONE /api/admin/chains request may spend probing, in seconds.

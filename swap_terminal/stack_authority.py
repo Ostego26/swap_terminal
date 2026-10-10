@@ -67,8 +67,16 @@ from pathlib import Path
 # THE ONE AUTHORITY ON WHAT A DAEMON'S NETWORK NAME MEANS (rule 8). Imported
 # rather than re-spelled here: chains/daemon_network.py owns both the network
 # names and which address prefix each one pays, and this file only renders them.
-# SAFE FOR THIS FILE'S STDLIB-ONLY CONTRACT -- daemon_network.py imports nothing
-# but __future__, so swap_stack.py on the host still needs no dependency.
+# SAFE FOR THIS FILE'S STDLIB-ONLY CONTRACT -- daemon_network.py imports only the
+# standard library, so swap_stack.py on the host still needs no dependency. THAT
+# SENTENCE SAID "nothing but __future__" AND WENT STALE THE SAME DAY, when
+# sync_verdict() was added there and needed collections.abc.Mapping. Still stdlib,
+# so the contract held and only the claim was wrong -- which is exactly the shape
+# rule 16 means by "a wrong comment is a bug": a reader checking whether they may
+# add an import here would have read a rule that no longer described the file.
+# daemon_network.py's own header now states the contract as a contract rather than
+# as a count of its imports, so the next addition is measured against the thing
+# that matters.
 # THE REMEDY FOR A REFUSAL COMES FROM THE CAPABILITY MAP, not from a sentence here
 # (rule 8). chains/daemon_capabilities.py owns what each chain can do and what to do
 # instead, and its rows carry the measurement; this file only renders them. Both
@@ -80,6 +88,8 @@ from chains.daemon_network import (
     NETWORK_NOT_IN_TABLE,
     NO_BECH32_ON_THIS_CHAIN,
     PREFIX_KNOWN,
+    SYNC_BEHIND,
+    SYNC_NOT_ESTABLISHED,
     bech32_prefix_status,
 )
 
@@ -1358,7 +1368,14 @@ def probe_failure_detail(detail: object, end: int = _DETAIL_END) -> str:
 #: same line is still worth printing on its own.
 _PREFIX_NOTES = {
     PREFIX_KNOWN: "pays {prefix}... addresses, and only those",
-    NO_BECH32_ON_THIS_CHAIN: "no bech32 on this chain -- its addresses are base58, which cannot name a network",
+    # SHORTENED 2026-10-10 TO FIT THE REPORT. The first version read "no bech32 on
+    # this chain -- its addresses are base58, which cannot name a network", which with
+    # the asset and network columns and the caller's 20-space indent came to 117
+    # against a 96-wide report. The clause that was cut said why base58 cannot name a
+    # network, and that reasoning now lives where a reader can act on it: the
+    # `payable_bech32_prefix()` docstring, which lists the six networks sharing version
+    # byte 0x6f. A report line is not the place for the derivation.
+    NO_BECH32_ON_THIS_CHAIN: "no bech32 -- base58 only, which names no network",
     CHAIN_NOT_IN_TABLE: "",
     NETWORK_NOT_IN_TABLE: (
         "which addresses this network pays is NOT ESTABLISHED -- no chainparams was read for "
@@ -1510,6 +1527,67 @@ def _wrap(text: str, width: int) -> list[str]:
     return lines
 
 
+#: How wide the network column may grow in chain_network_lines(). Derived from the
+#: report rather than chosen: swap_stack.py indents these lines by 20 and wraps its own
+#: at _REPORT_WIDTH = 96, and the longest note is 48 characters, which leaves 12 for the
+#: network once the two-space gutters and the five-wide asset column are taken. A value
+#: longer than this is printed in FULL and pushes only its own note -- never truncated,
+#: because a network name is a measurement and half of one is worse than a wide line.
+_NETWORK_COLUMN_MAX = 12
+
+
+def _sync_lines(asset: str, sync: object) -> list[str]:
+    """Whether this daemon is caught up, under its network row. Empty when not asked.
+
+    SILENT FOR A SYNCED DAEMON, because a line saying "synced" under every healthy
+    chain is four lines of noise that train an operator to skim the block the one
+    useful line will appear in. Loud for BEHIND, and honest for NOT ESTABLISHED.
+
+    THE COST OF NOT HAVING THIS, measured in this tree rather than imagined:
+    fund_testnets.py records that a node will not see a deposit "until it has synced,
+    and that was MEASURED at 33-54 hours on this hardware". For that whole window the
+    balance reads 0, wallet inventory records 0, pairs go unavailable for capacity
+    reasons, and a customer's deposit is invisible -- with nothing on any screen naming
+    sync. This is the line that names it.
+    """
+    if not isinstance(sync, Mapping):
+        return []
+    state = sync.get("state")
+    if state == SYNC_BEHIND:
+        blocks, headers, behind = sync.get("blocks"), sync.get("headers"), sync.get("behind")
+        progress = sync.get("progress")
+        where = (
+            f"block {blocks} of {headers}, {behind} behind"
+            if isinstance(behind, int)
+            else f"block {blocks}"
+        )
+        if isinstance(progress, (int, float)):
+            # THE DAEMON'S OWN FRACTION, FORMATTED AND NOT ROUNDED UP. 0.9999 is not
+            # 100%, and a node at 99.99% of Bitcoin's chain is still tens of thousands
+            # of blocks from the tip. Four decimal places so the difference shows.
+            where += f", {float(progress) * 100:.4f}% verified"
+        # THE NUMBERS GET THEIR OWN LINE rather than being interpolated into the
+        # sentence. The first draft read "*** STILL SYNCING -- block 812 of 4500000,
+        # 4499188 behind, 0.0180% verified. A deposit to this chain is INVISIBLE" --
+        # 120 columns against a 96-wide report, and it grows with the block height, so
+        # it would have been worst on the chain furthest behind. The sentence is fixed
+        # width; the measurement varies.
+        return [
+            f"  {'':<5} *** STILL SYNCING. A deposit to this chain is INVISIBLE until it",
+            f"  {'':<5}     finishes: the balance reads 0, inventory records 0, and nothing",
+            f"  {'':<5}     else on any screen names sync as the reason. ***",
+            f"  {'':<5}     {where}",
+        ]
+    if state == SYNC_NOT_ESTABLISHED:
+        blocks = sync.get("blocks")
+        at = f" It reports block {blocks}." if blocks is not None else ""
+        return [
+            f"  {'':<5} sync NOT ESTABLISHED: no initialblockdownload field.",
+            f"  {'':<5}   Not a claim that it is caught up.{at}",
+        ]
+    return []
+
+
 def chain_network_lines(rows: object) -> list[str]:
     """Name the network each answered daemon reports, and the addresses it can pay.
 
@@ -1549,6 +1627,7 @@ def chain_network_lines(rows: object) -> list[str]:
     named = []
     unnamed = []
     mainnet_seen = []
+    by_asset = {}
     for row in rows:
         if not isinstance(row, Mapping) or row.get("reachable") is not True:
             continue
@@ -1563,21 +1642,34 @@ def chain_network_lines(rows: object) -> list[str]:
             unnamed.append(f"  {'':<5} about which chain it is on, reachable or not")
             continue
         named.append((asset, str(network)))
+        # THE SYNC VERDICT TRAVELS WITH THE ROW, keyed by asset so the loop below can
+        # reach it without a second pass over `rows`. probe_chain() puts None here for
+        # an adapter with no local chain (XRP), which _sync_lines() renders as nothing.
+        by_asset[asset] = row.get("sync")
         if str(network) == "main":
             mainnet_seen.append(asset)
-    # COLUMN WIDTH FROM THE ROWS IN HAND, not a constant. It was `:<9` when first
-    # written and the operator's first run put `testnet (network_id 1)` in it --
-    # the XRP adapter's own network string, 22 characters -- which pushed every
-    # note on that line out of alignment. A hardcoded width is a guess about data
-    # this function is handed, and rule 14 is about output somebody has to read.
-    width = max((len(network) for _asset, network in named), default=0)
+    # COLUMN WIDTH FROM THE ROWS IN HAND, BUT CAPPED, and the cap is the second
+    # correction to this one line in one day.
+    #
+    # It was `:<9` when first written, and the operator's first run put
+    # `testnet (network_id 1)` in it -- the XRP adapter's own network string, 22
+    # characters -- which pushed that row's note out of alignment. So it became
+    # `max(len(network))`, on the reasoning that a hardcoded width is a guess about
+    # data this function is handed.
+    #
+    # THAT FIX OVERFLOWED THE REPORT. One 22-character outlier padded EVERY row to
+    # 22, and the GRC line came to 100 columns against a 96-wide report -- so the
+    # unbounded version traded one row's alignment for every row's width. Capped, a
+    # long name pushes only its OWN note right, which costs nothing when that note
+    # is short or empty, and every row that fits stays aligned with the others.
+    width = min(max((len(network) for _asset, network in named), default=0), _NETWORK_COLUMN_MAX)
     # rstrip BECAUSE A NOTE MAY BE EMPTY. CHAIN_NOT_IN_TABLE renders as "" on
     # purpose, and without this the XRP row ends in the padding of a column whose
     # content is absent -- trailing whitespace in a block the operator pastes back.
-    lines = [
-        f"  {asset:<5} {network:<{width}}  {_prefix_note(asset, network)}".rstrip()
-        for asset, network in named
-    ]
+    lines = []
+    for asset, network in named:
+        lines.append(f"  {asset:<5} {network:<{width}}  {_prefix_note(asset, network)}".rstrip())
+        lines.extend(_sync_lines(asset, by_asset.get(asset)))
     lines.extend(unnamed)
     if not lines:
         return []

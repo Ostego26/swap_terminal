@@ -6,6 +6,11 @@ Reads: one RPC handle, passed in. It opens no socket of its own and knows no
         host, port or credential.
 Writes: nothing
 Can move funds: no. It calls two read methods and returns a string.
+Dependencies: the standard library only -- __future__ and collections.abc. That is a
+        CONTRACT and not an accident: stack_authority.py imports this module so
+        swap_stack.py can report a daemon's network while running on the host with
+        plain python3 and no installed dependency. Anything added here that is not
+        stdlib breaks a tool that runs outside the container.
 Mainnet-safe: yes, and this module is what MAKES other things mainnet-safe: it
         fails closed, returning "unknown" rather than guessing, so a caller that
         compares against the allowlist below refuses an unreadable daemon.
@@ -25,6 +30,13 @@ constant, so every one of the four described something it did not sit beside.
 """
 
 from __future__ import annotations
+
+# THE ONLY IMPORT IN THIS FILE BESIDES __future__, and the module header's claim
+# that it "imports nothing but __future__" is now one word out of date -- which
+# matters because stack_authority.py imports this module specifically on that
+# promise, to stay stdlib-only for swap_stack.py running on the host. collections.abc
+# is stdlib, so the promise that MATTERS is kept; the sentence is corrected below.
+from collections.abc import Mapping
 
 #: What each script chain CALLS a network that is safe to lose coins on. Per chain and
 #: not one shared set, because the strings differ and a shared set is how a mainnet
@@ -258,3 +270,106 @@ def bech32_prefix_status(asset: str, network: str) -> tuple[str, str | None]:
     if not prefix:
         return NETWORK_NOT_IN_TABLE, None
     return PREFIX_KNOWN, prefix
+
+
+#: WHETHER A DAEMON IS CAUGHT UP, AND THE THIRD STATE IS WHY THIS IS A CLASSIFIER.
+#:
+#: THE GAP THIS CLOSES, surveyed 2026-10-10 across the whole tree: NOTHING reads
+#: `initialblockdownload`, `verificationprogress`, or `headers` against `blocks` on
+#: any Bitcoin-family chain. services/admin_view.probe_chain() reads the chain NAME
+#: and returns `reachable: True` the moment the daemon answers, so every surface --
+#: /admin, `swapterm chains`, the operator panel -- says REACHABLE and names the
+#: right network while the node is hours from usable.
+#:
+#: That is not hypothetical and the cost is already written down in this tree.
+#: fund_testnets.py carries a measurement whose own chain was lost: a node will not
+#: "see a deposit until it has synced, and that was MEASURED at 33-54 hours on this
+#: hardware." For that entire window, with the current reporting: the balance reads
+#: 0, payout_service.refresh_wallet_inventory() records 0 inventory, pairs go
+#: unavailable for capacity reasons with no sentence naming sync, and a customer
+#: deposit is simply invisible to deposit_watcher. Nothing anywhere says "syncing".
+#:
+#: SO THIS IS THE SAME DEFECT CLASS AS THE OTHER TWO FOUND THE SAME DAY, and that is
+#: the argument for the shape rather than for the feature:
+#:
+#:   reachable but on the WRONG NETWORK   the `network` field had zero readers, so
+#:                                        `LTC regtest` never reached the screen
+#:                                        while the operator aimed at a tltc1 address
+#:   reachable but with NO WALLET         getbalance failed and a swallowed error
+#:                                        printed as a value
+#:   reachable but NOT SYNCED             this one
+#:
+#: Each is a daemon answering "yes" to the only question anybody asked it.
+SYNC_SYNCED = "synced"
+SYNC_BEHIND = "behind"
+SYNC_NOT_ESTABLISHED = "not_established"
+
+#: Every state sync_verdict() can return, so a caller rendering one line per state can
+#: be tested for covering them all rather than discovering a gap on a screen.
+SYNC_STATES = (SYNC_SYNCED, SYNC_BEHIND, SYNC_NOT_ESTABLISHED)
+
+
+def sync_verdict(info: object) -> dict:
+    """Is this daemon caught up? PURE -- takes a getblockchaininfo answer, opens nothing.
+
+    Returns `{"state", "why", "blocks", "headers", "behind", "progress"}` where state
+    is one of SYNC_STATES and every number is None when the daemon did not report it.
+
+    THE DAEMON'S OWN STATEMENT FIRST. `initialblockdownload` is a boolean the node
+    computes about itself, and when it is present it is the answer -- better than any
+    arithmetic this function could do on heights, because the node knows things about
+    its own peers' claimed tips that `headers` does not carry.
+
+    ABSENT IS NOT SYNCED, AND THAT IS THE WHOLE REASON FOR THE THIRD STATE. Gridcoin
+    is a pre-0.17 surface -- chains/daemon_capabilities.py records that its
+    getblockchaininfo has no `chain` key at all, which is why chain_network() above
+    needs a getinfo fallback -- so it will not carry `initialblockdownload` either.
+    Defaulting a missing field to False would report the one chain that IS synced and
+    working as "synced" for the right reason by accident, and would report a freshly
+    built Bitcoin Core node the same way for the wrong one. So a daemon that does not
+    say reads as NOT ESTABLISHED, with whatever heights it did give, and the caller
+    says so rather than guessing (rule 17).
+
+    `headers` VS `blocks` IS USED ONLY AS A COUNT, NEVER AS A VERDICT. headers ==
+    blocks does not prove a node is caught up: a node 4 million blocks behind that has
+    not yet fetched any headers reports 0 and 0, which is equal and is the worst
+    possible moment to report "synced". So the heights are reported for the reader and
+    the verdict comes from `initialblockdownload` or from nothing.
+    """
+    if not isinstance(info, Mapping):
+        return {
+            "state": SYNC_NOT_ESTABLISHED,
+            "why": "no getblockchaininfo answer to read, so sync state was not established",
+            "blocks": None, "headers": None, "behind": None, "progress": None,
+        }
+    blocks = info.get("blocks")
+    headers = info.get("headers")
+    progress = info.get("verificationprogress")
+    behind = (
+        headers - blocks
+        if isinstance(blocks, int) and isinstance(headers, int) and headers >= blocks
+        else None
+    )
+    downloading = info.get("initialblockdownload")
+    numbers = {"blocks": blocks, "headers": headers, "behind": behind, "progress": progress}
+    if downloading is True:
+        return {
+            "state": SYNC_BEHIND,
+            "why": (
+                "the daemon says it is still in initial block download. Until it finishes, a "
+                "deposit to this chain is INVISIBLE -- the balance reads 0, wallet inventory "
+                "records 0, and nothing else on any screen will name sync as the reason"
+            ),
+            **numbers,
+        }
+    if downloading is False:
+        return {"state": SYNC_SYNCED, "why": "", **numbers}
+    return {
+        "state": SYNC_NOT_ESTABLISHED,
+        "why": (
+            "this daemon does not report `initialblockdownload`, so whether it is caught up is "
+            "NOT established -- it is not a claim that it is. A pre-0.17 build (Gridcoin) has no "
+            "such field; the heights beside this line are what it did say"
+        ),
+        **numbers,
+    }

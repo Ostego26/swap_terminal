@@ -34,7 +34,13 @@ import pytest
 
 # BECH32_PREFIX_STATUSES is imported FROM ITS OWNER, not re-exported through
 # stack_authority, which does not use the tuple itself -- only the four members.
-from chains.daemon_network import BECH32_PREFIX_STATUSES
+from chains.daemon_network import (
+    BECH32_PREFIX_STATUSES,
+    SYNC_NOT_ESTABLISHED,
+    SYNC_STATES,
+    SYNC_SYNCED,
+    sync_verdict,
+)
 
 import swap_stack
 from swap_terminal import stack_authority
@@ -2904,18 +2910,42 @@ def test_no_line_carries_trailing_whitespace():
         assert line == line.rstrip(), repr(line)
 
 
-def test_the_network_column_widens_for_the_longest_network_in_hand():
-    """It was a hardcoded `:<9` and the XRP adapter answers a 22-character string.
+def test_the_network_column_is_aligned_AND_bounded():
+    """Both halves, because fixing one broke the other on 2026-10-10.
 
-    A constant width is a guess about data this function is HANDED. Asserted by
-    checking the notes all begin at the same column, which is what alignment means.
+    It was a hardcoded `:<9`, and the XRP adapter's 22-character
+    `testnet (network_id 1)` pushed that row's note out of alignment. So it became
+    `max(len(network))` -- and THAT overflowed the report: one outlier padded every
+    row to 22 and the GRC line reached 100 columns against a 96-wide report.
+
+    THIS TEST REPLACED THE ONE THAT PINNED THE UNBOUNDED VERSION (rule 2: a test
+    changes to pin the stronger invariant rather than being deleted). The stronger
+    invariant is both: rows that fit are aligned with each other, and no row exceeds
+    the width the caller prints at.
     """
-    rows = [_answered("BTC", "regtest"), _answered("XRP", "testnet (network_id 1)")]
-    lines = [line for line in chain_network_lines(rows) if line.startswith("  BTC")]
-    assert len(lines) == 1
-    assert "pays bcrt1" in lines[0]
-    # the BTC note must sit past where XRP's long network name ends
-    assert lines[0].index("pays bcrt1") > len("  XRP   testnet (network_id 1)")
+    rows = [_answered("BTC", "regtest"), _answered("LTC", "test"),
+            _answered("XRP", "testnet (network_id 1)")]
+    lines = chain_network_lines(rows)
+    btc = next(line for line in lines if line.startswith("  BTC"))
+    ltc = next(line for line in lines if line.startswith("  LTC"))
+    assert btc.index("pays bcrt1") == ltc.index("pays tltc1"), (
+        "rows whose network names fit the column must have their notes at one column"
+    )
+    # 20 is the indent swap_stack.py prints these at; 96 is its _REPORT_WIDTH.
+    assert all(len(line) + 20 <= 96 for line in lines), (
+        "a line wider than the report is the defect the unbounded version introduced: "
+        + repr(max(lines, key=len))
+    )
+
+
+def test_a_network_name_longer_than_the_column_is_printed_IN_FULL():
+    """Never truncated. A network name is a measurement and half of one is worse.
+
+    The whole point of this block is that an operator reads the daemon's own word for
+    its network; `testnet (network_i` would be a new kind of wrong answer.
+    """
+    lines = chain_network_lines([_answered("XRP", "testnet (network_id 1)")])
+    assert any("testnet (network_id 1)" in line for line in lines)
 
 
 # ---------------------------------------------------------------------------
@@ -3020,3 +3050,113 @@ def test_the_census_key_names_match_what_the_producer_writes():
     produced = chain_probe_envelope([], probed_at="t", adapters_configured=3)
     for key in (CHAIN_PROBED_AT_KEY, CHAIN_ADAPTERS_KEY, CHAIN_ATTEMPTED_KEY):
         assert key in produced, f"{key!r} is read by the report and not written by the producer"
+
+
+# ---------------------------------------------------------------------------
+# IS THE DAEMON CAUGHT UP. Surveyed 2026-10-10: NOTHING in this tree read
+# initialblockdownload, verificationprogress, or headers-against-blocks on any
+# Bitcoin-family chain, so every surface said REACHABLE the instant a daemon
+# answered. fund_testnets.py already records the cost -- a node does not see a
+# deposit "until it has synced, and that was MEASURED at 33-54 hours on this
+# hardware". For that window the balance reads 0, inventory records 0, pairs go
+# unavailable for capacity reasons, and nothing names sync.
+#
+# Third field-with-zero-readers found on this one probe in two days, after
+# `network` and the envelope's own counts.
+# ---------------------------------------------------------------------------
+
+
+def _syncing(asset, **info):
+    row = _answered(asset, info.pop("network", "test"))
+    row["sync"] = sync_verdict(info)
+    return row
+
+
+def test_a_daemon_STILL_IN_INITIAL_BLOCK_DOWNLOAD_is_shouted_about():
+    """The line that would have named the 33-54 hours.
+
+    MUTATION CHECKED: dropping the SYNC_BEHIND branch from _sync_lines() fails here
+    and nowhere else, and the report goes back to saying only REACHABLE.
+    """
+    rows = [_syncing("BTC", blocks=812, headers=4500000,
+                     initialblockdownload=True, verificationprogress=0.00018)]
+    blob = "\n".join(chain_network_lines(rows))
+    assert "STILL SYNCING" in blob
+    assert "INVISIBLE" in blob, "the consequence, not just the state"
+    assert "block 812 of 4500000" in blob
+    assert "4499188 behind" in blob
+
+
+def test_a_SYNCED_daemon_says_nothing_about_sync():
+    """Silence for the healthy case, on purpose.
+
+    A "synced" line under every healthy chain is four lines of noise that train an
+    operator to skim the block the one useful line appears in.
+    """
+    rows = [_syncing("LTC", blocks=2900000, headers=2900000, initialblockdownload=False)]
+    blob = "\n".join(chain_network_lines(rows))
+    assert "SYNCING" not in blob
+    assert "NOT ESTABLISHED" not in blob
+    assert "pays tltc1" in blob, "the rest of the row still renders"
+
+
+def test_a_daemon_WITHOUT_the_field_is_NOT_ESTABLISHED_rather_than_synced():
+    """Gridcoin is pre-0.17 and has no initialblockdownload.
+
+    Defaulting a missing field to False would report the one chain that IS working
+    as synced for the right reason by accident, and a freshly built Core node the
+    same way for the wrong one.
+    """
+    rows = [_syncing("GRC", network="testnet", blocks=3306162)]
+    blob = "\n".join(chain_network_lines(rows))
+    assert "sync NOT ESTABLISHED" in blob
+    assert "Not a claim that it is caught up" in blob
+    assert "3306162" in blob, "whatever height it DID report is still worth printing"
+    assert "SYNCING" not in blob
+
+
+def test_headers_equal_to_blocks_is_NOT_read_as_synced():
+    """THE TRAP. A node 4 million behind that has fetched no headers reports 0 and 0.
+
+    Equal heights are the worst possible moment to conclude "caught up", so the
+    verdict comes from initialblockdownload or from nothing -- never from arithmetic
+    on the heights.
+    """
+    verdict = sync_verdict({"blocks": 0, "headers": 0})
+    assert verdict["state"] == SYNC_NOT_ESTABLISHED
+    assert verdict["state"] != SYNC_SYNCED
+
+
+def test_a_chain_with_no_local_chain_at_all_gets_no_sync_line():
+    """XRP answers through network() and has no getblockchaininfo.
+
+    probe_chain() puts None there, and a row of "not established" for a hosted
+    ledger would be a question nobody asked rendered as an open issue.
+    """
+    row = _answered("XRP", "testnet (network_id 1)")
+    row["sync"] = None
+    blob = "\n".join(chain_network_lines([row]))
+    assert "NOT ESTABLISHED" not in blob
+    assert "SYNCING" not in blob
+    assert "testnet (network_id 1)" in blob
+
+
+def test_verification_progress_is_not_rounded_up_to_100_percent():
+    """0.9999 is not 100%, and a node at 99.99% of Bitcoin's chain is tens of
+    thousands of blocks from the tip."""
+    rows = [_syncing("BTC", blocks=4400000, headers=4500000,
+                     initialblockdownload=True, verificationprogress=0.99994)]
+    blob = "\n".join(chain_network_lines(rows))
+    assert "99.9940%" in blob
+    assert "100.0000%" not in blob
+
+
+def test_every_sync_state_has_a_rendering_decision():
+    """All three reached, so a fourth added and unhandled shows up here."""
+    reached = {
+        sync_verdict(info)["state"]
+        for info in (
+            {"initialblockdownload": True}, {"initialblockdownload": False}, {}, None,
+        )
+    }
+    assert reached == set(SYNC_STATES)

@@ -216,6 +216,24 @@ CONGRUENT: dict[str, SolanaEquivalent] = {
 #: Every entry is a question Solana has no answer to -- not one nobody has got round to. Where
 #: a DIFFERENT question is the one the operator probably meant, the reason names it (rule 14).
 NO_EQUIVALENT: dict[str, str] = {
+    # ADDED 2026-10-10 WITH THE WALLET PANE. See the same two entries in
+    # chains/xrp_rpc_map.py -- both were demanded by
+    # test_the_allowlist_is_an_EXACT_PARTITION_of_the_panels_own after
+    # regtest/operator_panel.READ_ONLY_RPCS gained the two methods, and the test's own
+    # message is the reasoning: "not mapped" and "no equivalent exists" are different
+    # claims and the module has to say which.
+    "listwallets": (
+        "a Solana RPC node HOLDS NO WALLET. Keys live in the client -- this repository's own is "
+        "a keypair file the operator holds and that nothing here reads back -- and the node "
+        "signs nothing. There is no server-side wallet to load, unload or list, so there is no "
+        "question to translate rather than an empty answer to return."
+    ),
+    "listwalletdir": (
+        "same reason as listwallets: no wallet file exists on the node, so there is no directory "
+        "to enumerate. `getProgramAccounts` enumerates ACCOUNTS, which is a different thing -- "
+        "it is the chain's state, not this node's custody, and offering it here would invite "
+        "reading one as the other."
+    ),
     "getmininginfo": (
         "Solana is proof of stake. There is no mining, no hashrate and no block subsidy: slots "
         "are assigned to leaders by a stake-weighted schedule, which is `getLeaderSchedule`, and "

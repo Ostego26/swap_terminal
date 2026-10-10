@@ -179,6 +179,27 @@ CONGRUENT: dict[str, XRPEquivalent] = {
 #: tell a meaningless answer from a meaningful one (rule 14). Where a DIFFERENT
 #: question is the one the operator probably meant, the reason names it.
 NO_EQUIVALENT: dict[str, str] = {
+    # ADDED 2026-10-10 WITH THE WALLET PANE, and the partition test is what demanded
+    # it: `listwallets` and `listwalletdir` went onto the panel's read-only allowlist
+    # for regtest/operator_panel.wallet_state(), and
+    # test_the_allowlist_is_an_EXACT_PARTITION_of_the_panels_own went red with the
+    # right sentence -- "'not mapped' is a different claim from 'no equivalent
+    # exists' -- decide which and record it". This is that decision, recorded.
+    "listwallets": (
+        "rippled HOLDS NO WALLET. There is no server-side wallet to load, unload or list: an "
+        "XRPL account is an entry in the ledger, its secret lives wherever the submitter keeps "
+        "it, and this repository's own XRP secret is read only inside "
+        "chains/xrp_payout_seed.derived_payout_account(), which hands back a public classic "
+        "address and never the value. So there is nothing this could translate to -- not an "
+        "empty list, which would be an answer, but no such question."
+    ),
+    "listwalletdir": (
+        "same reason as listwallets, one layer further out: there is no wallet FILE either. "
+        "rippled stores no per-account key material, so there is no directory to enumerate. A "
+        "console that returned an empty list here would be stating that this node has no "
+        "wallets on disk, which is true of every rippled that ever ran and says nothing about "
+        "this one."
+    ),
     "getmininginfo": (
         "the XRP Ledger has no mining. Ledgers close by validator consensus roughly every 4 "
         "seconds, there is no hashrate and no block subsidy, and the transaction fee is BURNED "
