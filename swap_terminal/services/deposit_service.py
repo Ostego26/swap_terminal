@@ -79,9 +79,47 @@ ACTIVE_STATUSES = ("awaiting_deposit", "deposit_seen", "confirming")
 
 
 def upsert_deposit_event(db, swap_id: str, asset: str, event: dict):
+    """Write this payment's row, or touch the one that is already there.
+
+    THE LOOKUP MATCHES db.PAYMENT_UNIQUE_KEY, ALL FOUR COLUMNS, AND `address` JOINED IT
+    ON 2026-10-10 BECAUSE WITHOUT IT THIS FUNCTION GAVE A LIVE DEPOSIT'S ROW TO A
+    COMPLETED SWAP.
+
+    It read `asset = ? AND txid = ? AND vout = ?`, which is an identity only where a txid
+    is a hash. chains/icp.find_deposits_to_address() uses the LEDGER BLOCK INDEX as the
+    txid -- deliberately, and its docstring gives the reason -- and a block index is
+    unique only within ONE ledger. `docker compose down` destroys the local replica's
+    ledger and the rebuilt one restarts at block 0.
+
+    Measured on the operator's host, from their own admin page:
+
+        s_f5cf62e0b7a9342a  ICP  txid 2  vout 0  0.05000000  conf 1   2026-10-07, completed
+        s_968a69b37c3da5c9  ICP  txid 2  vout 0  2.44081155           2026-10-10, live
+
+    Two payments, two subaccounts, two ledgers. On the narrow key the SELECT found the
+    2026-10-07 row, the UPDATE below bumped its confirmations, and this returned -- it
+    does not re-point swap_id, correctly, because re-pointing would move a credited
+    payment off the swap it was credited to. So the live swap got NO ROW AT ALL and sat
+    at awaiting_deposit with "0 deposit row(s)" while its 2.44081155 ICP was provably in
+    its subaccount. Nothing raised and nothing logged.
+
+    THE NARROW LOOKUP WAS NOT MERELY INCOMPLETE, IT WAS CREDITING ONE CUSTOMER'S PAYMENT
+    AGAINST ANOTHER CUSTOMER'S ROW. refresh_swap_from_chain() sums `WHERE swap_id = ?`,
+    so the confirmations of a finished swap's deposit were being refreshed by an
+    unrelated live payment -- which is the one direction this tree treats as worse than
+    an uncredited deposit (attributable_events()' own closing sentence: "an uncredited
+    deposit is a support ticket, a misattributed one is somebody else's money").
+
+    SWAP_ID IS DELIBERATELY NOT IN THE LOOKUP. On an address-attributed chain the address
+    IS the swap (db.py says so at late_deposits.swap_id), and on a tag-attributed one the
+    tag is in `vout` and is unique in SQL, so the four columns already determine one swap.
+    Adding swap_id would make a re-scan INSERT a second row for one payment whenever the
+    attribution changed, and refresh_swap_from_chain() sums every row -- that is a double
+    count, which is the defect CLAUDE.md's closing section records on the vout fallback.
+    """
     existing = db.execute(
-        "SELECT * FROM deposit_events WHERE asset = ? AND txid = ? AND vout = ?",
-        (asset, event["txid"], int(event["vout"])),
+        "SELECT * FROM deposit_events WHERE asset = ? AND txid = ? AND vout = ? AND address = ?",
+        (asset, event["txid"], int(event["vout"]), event["address"]),
     ).fetchone()
     now = utc_now_iso()
     if existing:
@@ -236,7 +274,7 @@ def attributable_events(events, swap: dict) -> list[dict]:
     return [event for event in events if event.get("vout") is not None and event["vout"] == tag]
 
 
-def skip_txids(db, asset: str) -> frozenset[str]:
+def skip_txids(db, asset: str, *, address: str) -> frozenset[str]:
     """Every txid a scan of this asset need not read again. TWO sources, one set.
 
     settled_txids() names transactions that reached a swap and passed its
@@ -269,11 +307,77 @@ def skip_txids(db, asset: str) -> frozenset[str]:
     credited and somebody still has to act. Renamed through the three adapters in
     the same change rather than left as a correct value under a wrong name, which
     is the wrong-comment-is-a-bug rule applied to an identifier a caller reads.
+
+    `address` IS REQUIRED AND KEYWORD-ONLY, AND THAT COST A CUSTOMER'S DEPOSIT ON
+    2026-10-10. Until then the set was asset-wide: every settled txid on the asset,
+    whatever address it was paid to. On a chain whose txid is globally unique that
+    is harmless -- a txid settled at another address is one this scan can never
+    return anyway -- and on ICP it is a silent loss, because **the ICP txid is a
+    LEDGER BLOCK INDEX and a block index is only unique within one ledger**.
+
+    What happened, from the operator's own admin page rather than from reasoning:
+
+        deposit_events        s_f5cf62e0b7a9342a  ICP  txid 2  0.05000000  conf 1
+                              s_ebb03e8dc1b96e1c  ICP  txid 1  1.00000000  conf 1
+
+    Both rows were written on 2026-10-07, against a local replica ledger that
+    `docker compose down` then destroyed (docker-compose.yml's header records that
+    loss twice, 2026-10-07 and 2026-10-08). The ledger was rebuilt and re-minted,
+    so its block indexes restarted at 0. ICP_MIN_CONFIRMATIONS is 1 and every ICP
+    event is written with confirmations=1, so BOTH of those rows are permanently
+    settled and `settled_txids(db, "ICP")` returned {"1", "2"} forever.
+
+    Then a real 2.44081155 ICP deposit landed in block index 2 of the NEW ledger,
+    for swap s_968a69b37c3da5c9. The scan found it, the skip set dropped it, and
+    find_deposits_to_address() returned []. No row, no error, no log line -- the
+    swap sat at awaiting_deposit with "0 deposit row(s)" while the money was
+    provably in its subaccount (the desk's ICP balance read 1197.55908845, which is
+    1200 - 2.44081155 - 0.0001 exactly). That is the shape chains/icp.py's own
+    archived-blocks refusal exists to prevent, arriving through a different door:
+    the customer paid, the watcher polls forever, and nothing errors.
+
+    THE DATABASE OUTLIVES THE CHAIN. That is the general statement, and it is not
+    specific to ICP -- it is specific to a txid that is not a hash. A regtest BTC
+    chain rebuilt from genesis issues new random txids, so it cannot collide; a
+    sequential index collides on the first block.
+
+    SCOPING BY ADDRESS LOSES NO SKIPPING, which is the half that had to be checked
+    rather than assumed, because the skip set exists to stop a rate limit that cost
+    a real credited deposit on 2026-10-01. Measured 2026-10-10 by reading all four
+    producers: chains/base.py (both the real-vout and the fabricated-fallback
+    shapes), chains/solana.py, chains/xrp_payments.py and chains/icp.py every put
+    the SCANNED address into the event, which upsert_deposit_event() stores. So:
+
+      address-attributed chains  BTC, LTC, GRC and ICP give every swap its own
+      (the fix)                  address, and rows for another swap's address were
+                                 never going to appear in this scan. Dropping them
+                                 from the set removes false positives and no true
+                                 ones.
+      tag-attributed chains      SOL and XRP share ONE account, so every row on the
+      (unchanged by construction) asset carries that same address and the
+                                 address-scoped set EQUALS the asset-wide one. The
+                                 2026-10-01 saving is untouched.
+      after an operator          swaps keep the account they were created against
+      repoints an account        (shared_scan_targets() carries that reasoning), and
+                                 each address now gets the skip set for its own
+                                 rows. Scanning the new account cannot return the
+                                 old account's txids either way.
+
+    REQUIRED rather than defaulted to None, for the reason
+    skippable_unattributable_txids() already gives about `still_refreshed`: a default
+    here is the asset-wide set, which is precisely the defect above, so a new call
+    site that forgot the argument would reintroduce a lost deposit silently.
+    Keyword-only because `asset` and `address` are both strings and a positional
+    mix-up would not raise -- it would return an empty set and re-read everything,
+    which is the rate limit coming back.
     """
-    return settled_txids(db, asset) | skippable_unattributable_txids(db, asset, ACTIVE_STATUSES)
+    return (
+        settled_txids(db, asset, address=address)
+        | skippable_unattributable_txids(db, asset, ACTIVE_STATUSES, address=address)
+    )
 
 
-def settled_txids(db, asset: str) -> frozenset[str]:
+def settled_txids(db, asset: str, *, address: str) -> frozenset[str]:
     """Transactions on `asset` with nothing left to teach a scan. One SELECT.
 
     THE RATE-LIMIT FIX'S OTHER HALF, and it is the half that has to be right.
@@ -301,12 +405,26 @@ def settled_txids(db, asset: str) -> frozenset[str]:
 
     A DEPOSIT STILL CONFIRMING IS NEVER IN HERE. That is the whole reason the
     comparison is against the threshold rather than against "has a row".
+
+    `d.address = ?` IS THE 2026-10-10 FIX AND skip_txids() ABOVE CARRIES THE WHOLE
+    MEASUREMENT -- an ICP block index from a destroyed local ledger silenced a real
+    2.44081155 ICP deposit that landed at the same index on the rebuilt one. Read it
+    there rather than here, because that is the function the adapters call and the
+    one a reader arrives at first.
+
+    THE ADDRESS IS d.address AND NOT s.deposit_address, and the difference is the
+    repoint case. unattributable_deposits and late_deposits both carry their own
+    address for the reason db.py states at those columns -- "a row still says where
+    the coins are after the configuration changes" -- and deposit_events is read
+    here the same way: the column records the address that was SCANNED when the
+    event was found, which is what the caller is scanning now. Joining through the
+    swap would answer a different question on any swap whose address was repointed.
     """
     rows = db.execute(
         "SELECT DISTINCT d.txid AS txid FROM deposit_events d"
         " JOIN swaps s ON s.id = d.swap_id"
-        " WHERE s.from_asset = ? AND d.confirmations >= s.min_confirmations",
-        (asset,),
+        " WHERE s.from_asset = ? AND d.address = ? AND d.confirmations >= s.min_confirmations",
+        (asset, address),
     ).fetchall()
     return frozenset(str(row["txid"]) for row in rows)
 
@@ -537,12 +655,18 @@ def scan_shared_accounts(db, config, adapters: dict, swaps) -> SharedScans:
     # ONE SQL READ PER ASSET, NOT PER TARGET. skip_txids() is two SELECTs against
     # swap_terminal.db and costs no network call, but it answers the same question for every
     # address on an asset, so asking it twice would be two copies of one answer (rule 8).
-    skips: dict[str, frozenset[str]] = {}
+    skips: dict[tuple[str, str], frozenset[str]] = {}
     for asset, address in shared_scan_targets(swaps, config, adapters):
-        if asset not in skips:
-            skips[asset] = skip_txids(db, asset)
+        # KEYED ON (asset, address) SINCE 2026-10-10, not on asset. skip_txids() is now
+        # scoped to the address being scanned, so one answer per asset would be the
+        # wrong answer for a second address on the same asset -- which is exactly the
+        # repoint case shared_scan_targets() exists to keep watching. The cache still
+        # does its job: it answers once per TARGET, and the targets are already
+        # deduplicated, so this costs no extra SQL in the normal single-account case.
+        if (asset, address) not in skips:
+            skips[(asset, address)] = skip_txids(db, asset, address=address)
         adapter = adapters[asset]
-        scans[(asset, address)] = adapter.find_deposits_to_address(address, skip_txids=skips[asset])
+        scans[(asset, address)] = adapter.find_deposits_to_address(address, skip_txids=skips[(asset, address)])
         record_what_nobody_can_claim(db, asset, adapter)
         # RULE 14: THE WORK THAT STOPPED HAPPENING STILL HAS TO BE VISIBLE. Four scans printed
         # four adapter lines; one prints one, and an operator reading the log would otherwise
@@ -804,8 +928,16 @@ def refresh_swap_from_chain(db, config, adapters: dict, swap: dict, scans: Share
         # skip_txids() for the two sources and for why skipping either changes no
         # decision, and chains/solana.py for the measurement. Every other adapter
         # accepts the argument and ignores it: their discovery is one call.
+        # THE SAME VALUE GOES INTO BOTH ARGUMENTS, deliberately. The skip set is now
+        # scoped to the address being scanned (skip_txids() carries the 2026-10-10 ICP
+        # measurement), so handing one call `swap["deposit_address"]` and the other a
+        # normalized copy of it would make the two disagree on any address with
+        # stray whitespace -- the set would come back empty and every transaction
+        # would be re-read, which is the 2026-10-01 rate limit returning. One
+        # expression, read once, used twice.
+        deposit_address = swap["deposit_address"]
         events = adapter.find_deposits_to_address(
-            swap["deposit_address"], skip_txids=skip_txids(db, asset)
+            deposit_address, skip_txids=skip_txids(db, asset, address=deposit_address)
         )
         # RIGHT AFTER THE SCAN, WHERE THE DROPS EXIST -- the adapter clears
         # `unattributable_drops` per call, so this cannot be hoisted out of the branch that
@@ -1025,7 +1157,9 @@ def reconcile_shared_accounts(db, config, adapters: dict, scans: SharedScans | N
         # alone exercises.
         events = scans.get((asset, address)) if scans is not None else None
         if events is None:
-            events = adapter.find_deposits_to_address(address, skip_txids=skip_txids(db, asset))
+            events = adapter.find_deposits_to_address(
+                address, skip_txids=skip_txids(db, asset, address=address)
+            )
         rows = unclaimed_rows(events, claimed, asset, ACTIVE_STATUSES, credited)
         recorded += record_unattributable(db, rows, now=now)
         # AND CLOSE ANY ROW THAT TURNS OUT TO HAVE BEEN CREDITED. Written before this fix, or

@@ -141,7 +141,48 @@ CREATE TABLE IF NOT EXISTS deposit_events (
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     credited_at TEXT,
-    UNIQUE(asset, txid, vout),
+    -- THE ADDRESS IS PART OF THE KEY SINCE 2026-10-10, AND IT COST A DEPOSIT TO LEARN.
+    --
+    -- This was UNIQUE(asset, txid, vout) and that encodes an assumption: that a txid is
+    -- unique per asset. It holds for every chain whose txid is a HASH. It is false on
+    -- ICP, because chains/icp.find_deposits_to_address() uses the LEDGER BLOCK INDEX as
+    -- the txid -- deliberately, for the reason its docstring gives -- and a block index
+    -- is unique only within ONE ledger.
+    --
+    -- The local replica's ledger is destroyed by `docker compose down` and rebuilt from
+    -- genesis (docker-compose.yml's header records that loss on 2026-10-07 and again on
+    -- 2026-10-08), so its block indexes restart at 0. Measured on the operator's host
+    -- 2026-10-10, from their own admin page:
+    --
+    --     s_f5cf62e0b7a9342a  ICP  txid 2  vout 0  0.05000000  conf 1   written 2026-10-07
+    --     s_968a69b37c3da5c9  ICP  txid 2  vout 0  2.44081155           sent    2026-10-10
+    --
+    -- Two different payments, to two different subaccounts, on two different ledgers,
+    -- colliding on this key. services/deposit_service.upsert_deposit_event() found the
+    -- 2026-10-07 row, UPDATEd its confirmations and returned -- it does not re-point
+    -- swap_id -- so the live swap got NO ROW and sat at awaiting_deposit while its
+    -- 2.44081155 ICP was provably in its subaccount. Nothing errored. That is the
+    -- failure chains/icp.py's archived-blocks refusal exists to prevent, reached by a
+    -- different road.
+    --
+    -- THE ADDRESS IS WHAT DISTINGUISHES THEM AND IT WAS ALREADY IN THE ROW. Every one of
+    -- the four event producers -- chains/base.py in both its real-vout and
+    -- fabricated-fallback shapes, chains/solana.py, chains/xrp_payments.py and
+    -- chains/icp.py -- writes the SCANNED address into the event, so this column has
+    -- always identified which account the payment landed in.
+    --
+    -- WIDENING A UNIQUE KEY CANNOT FAIL AGAINST EXISTING ROWS, which is why this was
+    -- applied to a database holding real money history rather than named as work for
+    -- somebody else. Data satisfying (asset, txid, vout) necessarily satisfies
+    -- (asset, txid, vout, address): the new key is strictly weaker, so no pre-check of
+    -- the kind duplicate_live_payouts() does for the payout index is possible or needed.
+    -- No row is deleted and no evidence is destroyed (rule 7).
+    --
+    -- ON EVERY OTHER CHAIN THIS CHANGES NOTHING. BTC, LTC and GRC give each swap its own
+    -- address and their txids are hashes, so no two rows could have collided anyway; SOL
+    -- and XRP share ONE account per chain, so the address is constant across every row
+    -- on the asset and the wider key is the narrower one.
+    UNIQUE(asset, txid, vout, address),
     FOREIGN KEY (swap_id) REFERENCES swaps(id)
 );
 
@@ -290,7 +331,24 @@ CREATE TABLE IF NOT EXISTS late_deposits (
     last_seen_at TEXT NOT NULL,
     resolved_at TEXT,
     resolution_note TEXT,
-    UNIQUE(asset, txid, vout),
+    -- THE ADDRESS JOINS THE KEY HERE TOO, for the reason stated at length on
+    -- deposit_events above: an ICP txid is a ledger block index and is unique only within
+    -- one ledger. The comment block above deposit_events' own UNIQUE carries the
+    -- measurement; this table has the identical latent collision and is fixed in the same
+    -- commit rather than left as a second instance to be found later (rule 19: when you
+    -- find N instances, fix them -- not one).
+    --
+    -- NOT YET OBSERVED HERE, and that is said plainly rather than implied: the collision
+    -- was measured on deposit_events and this table has the same key over the same kind of
+    -- row. A latent duplicate of a defect is still the defect.
+    --
+    -- unattributable_deposits is deliberately NOT widened. Its key is UNIQUE(asset, txid)
+    -- with no vout -- the comment above it says why the discriminator cannot be part of a
+    -- key -- and only TAG-ATTRIBUTED chains ever write to it, because an address-attributed
+    -- deposit is attributed BY its address and can never be unattributable. Those chains
+    -- share one account each, so every row on an asset already carries the same address and
+    -- adding it would change nothing while rebuilding a table for no reason.
+    UNIQUE(asset, txid, vout, address),
     FOREIGN KEY (swap_id) REFERENCES swaps(id)
 );
 
@@ -1126,6 +1184,468 @@ def add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, dec
     return True
 
 
+#: The identity of ONE PAYMENT, as the two per-payment tables key it.
+#:
+#: `address` joined this tuple on 2026-10-10. db.py's SCHEMA carries the measurement at
+#: deposit_events' own UNIQUE clause -- an ICP txid is a ledger BLOCK INDEX, which is
+#: unique only within one ledger, and a row from a destroyed local replica owned the key a
+#: live 2.44081155 ICP deposit needed.
+PAYMENT_UNIQUE_KEY = ("asset", "txid", "vout", "address")
+
+#: What the key WAS, kept as a value rather than as prose because the migration below has
+#: to recognize it in an existing database. A database carrying this key is pre-2026-10-10
+#: and is widened on the next start.
+PAYMENT_UNIQUE_KEY_BEFORE = ("asset", "txid", "vout")
+
+#: Both tables that record one payment per row. Named here rather than at the call site so
+#: there is one list to read and the migration cannot cover one and miss the other -- which
+#: is how late_deposits came to carry the same latent collision for six days.
+PAYMENT_KEYED_TABLES = ("deposit_events", "late_deposits")
+
+
+def unique_keys(conn: sqlite3.Connection, table: str) -> list[tuple[str, ...]]:
+    """Every UNIQUE key on `table`, each as its tuple of column names, in index order.
+
+    READS THE DATABASE RATHER THAN THE SCHEMA STRING, which is the whole point: the
+    question a migration has to answer is what THIS file on disk actually has, not what
+    this module would create today. A `CREATE TABLE IF NOT EXISTS` is a no-op against an
+    existing table, so a database created last week carries last week's constraints and
+    SCHEMA says nothing about it.
+
+    A table-level `UNIQUE(...)` becomes an implicit index named `sqlite_autoindex_<table>_N`
+    rather than a named one, so both are read and nothing filters on the name.
+
+    Columns come back in INDEX order, not table order, and the tuple is compared as ordered
+    -- `(asset, txid, vout)` and `(txid, asset, vout)` are the same constraint but this
+    returns them differently. That is deliberate and harmless here, because both tuples
+    this module compares against are spelled in the order SCHEMA declares them; a caller
+    wanting set equality should say so.
+
+    Reads PRAGMA rows BY NAME. add_column_if_missing() records what positional access cost
+    on 2026-09-26: `row[1]` works for a plain connection and raises KeyError on the dict
+    row factory connect_db() actually installs, so a standalone check passed while the
+    app's own connection broke collection of the whole suite.
+    """
+    found: list[tuple[str, ...]] = []
+    # Identifiers cannot be bound as SQL parameters in SQLite, and `table` is a literal
+    # from PAYMENT_KEYED_TABLES in this module -- never a caller's string, never input.
+    for index in conn.execute(f"PRAGMA index_list({table})").fetchall():
+        name = index["name"] if hasattr(index, "keys") else index[1]
+        unique = index["unique"] if hasattr(index, "keys") else index[2]
+        if not unique:
+            continue
+        columns = conn.execute(f"PRAGMA index_info({name})").fetchall()
+        found.append(tuple(
+            (column["name"] if hasattr(column, "keys") else column[2]) for column in columns
+        ))
+    return found
+
+
+#: The scratch name the rebuild creates and immediately renames away. Spelled once,
+#: because rebuilt_create_sql() has to produce the same name _rebuild_widened() copies
+#: into and renames -- two spellings of it is a rebuild that creates one table and copies
+#: into another, which fails loudly but for a reason nobody would read correctly.
+WIDENING_SUFFIX = "_widening"
+
+#: WHAT unique_keys() SAYS ABOUT A TABLE, as the three answers the migration can act on.
+#: A total over the possibilities, so a caller can assert it handled all of them rather
+#: than discovering a fourth at runtime -- the construction stack_authority.py uses for
+#: LISTENER_VERDICTS and services/kill_switch.py for _REMEDY_FOR.
+WIDEN_ALREADY = "already-widened"
+WIDEN_PROCEED = "proceed"
+WIDEN_UNRECOGNIZED = "unrecognized"
+WIDEN_VERDICTS = (WIDEN_ALREADY, WIDEN_PROCEED, WIDEN_UNRECOGNIZED)
+
+
+def widening_verdict(keys) -> str:
+    """Does this table need its payment key widened? PURE -- it reads a list of tuples.
+
+    THE DECISION, extracted from widen_payment_unique_key() so it can be called with
+    seeded inputs (rule 10). It was three `if` branches inside the rebuild, which is
+    exactly the shape rule 12 describes: ruff's C901 on that function was pointing at a
+    decision buried in orchestration, not at a line count, and raising the ceiling would
+    have left it unreachable from a test.
+
+    `WIDEN_UNRECOGNIZED` IS NOT AN ERROR AND IS NOT A GO-AHEAD. It is rule 2's
+    distinction: a table carrying neither the old key nor the new one is a table this
+    module does not know the shape of, and "I do not recognize it" is not "it needs
+    rebuilding". The rebuild is the one operation in this module that can destroy rows,
+    so an unfamiliar shape is left exactly as it is.
+
+    Compares as ORDERED tuples, because both constants are spelled in the order SCHEMA
+    declares them and unique_keys() returns index order. unique_keys()' own docstring says
+    so; a caller wanting set equality has to ask for it.
+    """
+    present = [tuple(key) for key in keys]
+    if tuple(PAYMENT_UNIQUE_KEY) in present:
+        return WIDEN_ALREADY
+    if tuple(PAYMENT_UNIQUE_KEY_BEFORE) in present:
+        return WIDEN_PROCEED
+    return WIDEN_UNRECOGNIZED
+
+
+def sql_code_and_comment(line: str) -> tuple[str, str]:
+    """Split one DDL line into its code and its trailing `-- comment`. PURE.
+
+    WHY THIS EXISTS, AND IT WAS FOUND BY A TEST RATHER THAN BY THINKING. The rebuild below
+    finds the old UNIQUE clause by substring and replaces it. SCHEMA's own comment block
+    above deposit_events' key QUOTES the old clause -- "This was UNIQUE(asset, txid, vout)
+    and that encodes an assumption" -- and sqlite_master stores a CREATE statement with its
+    comments intact. So on a database whose DDL carries that sentence, the clause appears
+    TWICE and rebuilt_create_sql() refused.
+
+    It refused safely, which is the only reason this is a fragility and not an incident. But
+    it refused for a reason no operator would diagnose, and it would have done so on any
+    future database created from today's SCHEMA -- so the matching has to see code and not
+    prose.
+
+    Measured by tests/test_payment_key_widening.py, which reconstructs the previous schema
+    from today's by reversing the one substitution: the reconstruction put the clause in both
+    the comment and the constraint, and the rebuild declined. The real legacy database on the
+    operator's host predates that comment entirely and would have worked -- which is exactly
+    the kind of accident that is worth not relying on.
+
+    NO STRING-LITERAL HANDLING, and that is a stated limit rather than an oversight: a `--`
+    inside a quoted literal would be cut as a comment. None of the CREATE statements in
+    SCHEMA contains a quoted literal at all, and the caller counts the result to prove the
+    shape before substituting anything, so a DDL this is wrong about refuses rather than
+    being rewritten incorrectly.
+    """
+    code, sep, comment = line.partition("--")
+    return code, (sep + comment)
+
+
+def replace_outside_comments(text: str, before: str, after: str) -> tuple[str, int]:
+    """`text` with `before` replaced by `after`, ignoring anything after a `--`. PURE.
+
+    Returns the rewritten text and HOW MANY replacements happened, so the caller asserts the
+    count rather than hoping -- which is the whole reason this returns a pair instead of a
+    string (rule 17: a reason to believe is not a measurement).
+
+    Comments are kept verbatim in the output. Dropping them would be the easier
+    implementation and would throw away the documentation sqlite_master carries, leaving a
+    rebuilt table whose DDL no longer explains its own constraint.
+    """
+    lines = []
+    replaced = 0
+    for line in text.splitlines():
+        code, comment = sql_code_and_comment(line)
+        replaced += code.count(before)
+        lines.append(code.replace(before, after) + comment)
+    return "\n".join(lines), replaced
+
+
+def rebuilt_create_sql(create: str, table: str, rebuilt: str) -> str:
+    """The old CREATE statement with the key widened and the table renamed. PURE.
+
+    THE REBUILT TABLE IS THE OLD TABLE WITH ONE CLAUSE CHANGED, not a second copy of the
+    DDL kept in step by hand. A copy here would be rule 8's duplicate with a delay on it,
+    and the delay would expire the next time a column was added to SCHEMA -- the rebuild
+    would then silently drop it, which on these tables means dropping a column of a record
+    of money.
+
+    So the statement is read out of sqlite_master and substituted, which carries every
+    column, type, default, comment and foreign key across verbatim.
+
+    RAISES RATHER THAN RETURNING SOMETHING APPROXIMATE. Two guards, and each is a shape
+    that must not be rebuilt from a guess:
+
+      the UNIQUE clause is not there exactly once   the DDL is not what this module wrote,
+                                                    so there is nothing to substitute.
+                                                    COUNTED AS CODE, not as text: SCHEMA's
+                                                    own comment quotes the old clause, and
+                                                    matching prose made this refuse on a
+                                                    database it should have rebuilt. See
+                                                    sql_code_and_comment().
+      the table name is not where it should be      `CREATE TABLE ... <table> (` is the
+                                                    only form SCHEMA emits, and renaming by
+                                                    a looser match could rewrite a column
+                                                    name or a word inside a comment
+
+    Pure so both guards are testable without a database (rule 10).
+    """
+    before = f"UNIQUE({', '.join(PAYMENT_UNIQUE_KEY_BEFORE)})"
+    after = f"UNIQUE({', '.join(PAYMENT_UNIQUE_KEY)})"
+    widened, replaced = replace_outside_comments(create, before, after)
+    if replaced != 1:
+        raise ValueError(
+            f"the CREATE statement for {table} contains {before!r} as CODE {replaced} time(s), not "
+            f"once, so the clause to replace could not be identified. Nothing was rebuilt. "
+            f"(Occurrences inside `--` comments are ignored; see sql_code_and_comment().)"
+        )
+    renamed, named_count = replace_outside_comments(widened, f" {table} (", f" {rebuilt} (")
+    if named_count != 1:
+        raise ValueError(
+            f"the CREATE statement for {table} names the table as code {named_count} time(s), not "
+            f"once, so it could not be renamed without risking a substitution somewhere else in "
+            f"the DDL. Nothing was rebuilt."
+        )
+    return renamed
+
+
+def foreign_keys_enforced(conn: sqlite3.Connection) -> int:
+    """`PRAGMA foreign_keys` for this connection, read by name. 1 or 0.
+
+    A function rather than two lines at each of the three places that need it, and read by
+    NAME for the reason add_column_if_missing() records: a positional read of a PRAGMA is a
+    guess about the caller's row factory, and that guess broke collection of the whole
+    suite on 2026-09-26.
+    """
+    row = conn.execute("PRAGMA foreign_keys").fetchone()
+    if not row:
+        return 0
+    return int(row["foreign_keys"] if hasattr(row, "keys") else row[0])
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    """This table's column names, in table order. `table` is a literal from this module."""
+    return [
+        (column["name"] if hasattr(column, "keys") else column[1])
+        for column in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    ]
+
+
+def _named_indexes(conn: sqlite3.Connection, table: str) -> list[str]:
+    """The CREATE statements for this table's NAMED indexes.
+
+    Read from sqlite_master rather than listed here, for the same reason the table DDL is:
+    DROP TABLE takes its indexes with it, and a list spelled in this module would silently
+    lose any index added later. `sql IS NOT NULL` excludes the implicit autoindexes, which
+    the rebuilt table's own UNIQUE clause recreates.
+    """
+    return [
+        (row["sql"] if hasattr(row, "keys") else row[0])
+        for row in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL",
+            (table,),
+        ).fetchall()
+    ]
+
+
+def _row_count(conn: sqlite3.Connection, table: str) -> int:
+    """COUNT(*), with `table` interpolated because a parameter cannot bind an identifier."""
+    row = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()  # noqa: S608 -- `table` is a literal from PAYMENT_KEYED_TABLES in this module; no value is interpolated anywhere in this statement
+    return int(row["n"] if hasattr(row, "keys") else row[0])
+
+
+def restore_foreign_keys(conn: sqlite3.Connection, was_enforced: int) -> None:
+    """Put `PRAGMA foreign_keys` back to what the caller had. A no-op when it was off.
+
+    Three paths through the rebuild below need this -- a refused substitution, a rolled-back
+    transaction, and success -- and spelling it three times was three chances to forget one.
+    Rule 8: the copies agree on the day they are written.
+
+    It RESTORES rather than setting ON, because both states are legitimate on a real
+    connection: db.py's SCHEMA turns enforcement on and a bare connect_db() leaves it off,
+    which services/xrp_tag_service.py's own operator message already says out loud. Which
+    one a connection runs with is not this module's to decide.
+    """
+    if was_enforced:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _rebuild_widened(conn: sqlite3.Connection, table: str, ddl: str) -> int:
+    """Create-copy-drop-rename, in ONE transaction. Raises, having rolled back, on anything.
+
+    SQLite's documented procedure for changing a table constraint, which is the only way:
+    it can add and drop a COLUMN and cannot drop a table-level UNIQUE.
+
+    THE ROW COUNT IS CHECKED INSIDE THE TRANSACTION, so a copy that lost a row rolls the
+    whole thing back rather than committing a shorter table. Losing a row here is destroying
+    the record of a payment, which rule 7 forbids outright -- and a create-copy-drop-rename
+    is exactly the shape that can do it quietly.
+
+    Extracted from widen_payment_unique_key() because ruff's C901 on that function was
+    pointing at orchestration that had swallowed this, not at a line count (rule 12).
+
+    IT TAKES THREE ARGUMENTS AND DERIVES THE REST, which is the second thing ruff was
+    right about: the first version took seven, five of which were values the caller had
+    computed from `conn` and `table` and handed over. A parameter that only ever carries
+    one derivation of its neighbors is a chance for the caller to pass a mismatched pair --
+    a column list from one table with another table's name is a rebuild that copies the
+    wrong rows. `ddl` stays a parameter because the caller has to be able to REFUSE on a
+    DDL it cannot rewrite, before any of this runs.
+
+    THE ROW COUNT IS READ INSIDE THE TRANSACTION, which is also better than taking it: the
+    before and after counts then come from one consistent snapshot rather than from either
+    side of the BEGIN. Returns the count carried, so the caller can log a measured figure.
+    """
+    rebuilt = table + WIDENING_SUFFIX
+    columns = ", ".join(_table_columns(conn, table))
+    index_sql = _named_indexes(conn, table)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        expected = _row_count(conn, table)
+        conn.execute(ddl)
+        conn.execute(f"INSERT INTO {rebuilt} ({columns}) SELECT {columns} FROM {table}")  # noqa: S608 -- identifiers only, from this module and from PRAGMA table_info; no value is interpolated
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE {rebuilt} RENAME TO {table}")
+        for statement in index_sql:
+            conn.execute(statement)
+        carried = _row_count(conn, table)
+        if carried != expected:
+            raise RuntimeError(
+                f"the rebuild of {table} carried {carried} row(s) out of {expected}. Rolling back: "
+                f"losing a row here is destroying the record of a payment."
+            )
+    except Exception:
+        conn.rollback()
+        logger.exception(
+            "migration: %s was NOT rebuilt and has been rolled back to exactly its previous "
+            "state  <- no row was deleted and no constraint was changed.", table,
+        )
+        raise
+    conn.commit()
+    return carried
+
+
+def _verify_widened(conn: sqlite3.Connection, table: str) -> None:
+    """Prove the rebuild did what it claimed. Raises otherwise. Both checks are reads.
+
+    THE OUTCOME IS MEASURED, NOT INFERRED FROM THE DDL HAVING RUN (rule 17), and the two
+    questions are different:
+
+      foreign_key_check   enforcement was OFF for the rebuild, so this is the check that it
+                          was safe to turn off. Nothing in SCHEMA references these two
+                          tables -- they are the child side, with a FOREIGN KEY to swaps(id)
+                          -- so this is expected to be empty, which is why it is worth
+                          asserting rather than assuming.
+      the unique key      read back from PRAGMA. A CREATE that ran without producing the
+                          constraint would otherwise leave the migration reporting success.
+
+    Neither deletes a row to make itself pass.
+    """
+    orphans = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if orphans:
+        raise RuntimeError(
+            f"{table} was rebuilt and PRAGMA foreign_key_check now reports {len(orphans)} "
+            f"violation(s). The rebuild is committed; the violations are named by the pragma and "
+            f"nothing here deletes a row to clear them."
+        )
+    keys = [tuple(key) for key in unique_keys(conn, table)]
+    if tuple(PAYMENT_UNIQUE_KEY) not in keys:
+        raise RuntimeError(
+            f"{table} was rebuilt and its unique keys read back as {keys}, which does not include "
+            f"{PAYMENT_UNIQUE_KEY}. The DDL ran and did not produce the constraint."
+        )
+
+
+def widen_payment_unique_key(conn: sqlite3.Connection, table: str) -> bool:
+    """Rebuild `table` so its payment key includes `address`. Returns whether it did.
+
+    IDEMPOTENT AND A NO-OP ON A CURRENT DATABASE: it rebuilds only when the old key is
+    present, so a second run reads two PRAGMAs and returns False.
+
+    WHY A REBUILD. SQLite can ADD a column and can DROP one, and cannot drop a table-level
+    constraint -- so changing `UNIQUE(asset, txid, vout)` means the documented
+    create-copy-drop-rename, which is more machinery than any other migration in this
+    module. It is justified by what the narrow key did on 2026-10-10: it silently handed a
+    live deposit's row to a swap that had completed three days earlier. SCHEMA's comment on
+    deposit_events carries that measurement in full.
+
+    IT CANNOT FAIL AGAINST EXISTING ROWS, and that is a property of the change rather than
+    a hope. The new key is strictly WEAKER: any set of rows satisfying (asset, txid, vout)
+    satisfies (asset, txid, vout, address) too. So there is no analogue of
+    duplicate_live_payouts()' pre-check here -- there is no data that could refuse this
+    index -- and nothing is deleted to make it succeed.
+
+    THE NEW TABLE IS THE OLD TABLE WITH ONE CLAUSE CHANGED, not a DDL copy kept in step by
+    hand. The old CREATE statement is read out of sqlite_master and the exact clause is
+    substituted, so every column, type, default, comment and foreign key is carried over
+    verbatim and a column this module has forgotten about cannot be dropped by the rebuild.
+    A second copy of the DDL here would be rule 8's duplicate with a delay on it -- and the
+    delay would expire the next time a column was added.
+
+    THREE THINGS ARE PROVEN RATHER THAN ASSUMED, inside the transaction, and any of them
+    failing rolls the whole rebuild back and leaves the original table untouched:
+
+      the substitution hit exactly once   otherwise the DDL was not the shape expected and
+                                          nothing should be rebuilt from a guess
+      the row count is unchanged          a copy that lost a row would be destroying the
+                                          record of money (rule 7)
+      the new key is actually there       read back from PRAGMA, so the outcome is measured
+                                          rather than inferred from the DDL having run
+
+    FOREIGN KEY ENFORCEMENT IS TURNED OFF FOR THE REBUILD AND PUT BACK, which is step 1 and
+    step 11 of SQLite's own documented procedure for changing a constraint. THIS PARAGRAPH
+    USED TO SAY THE OPPOSITE -- that sqlite3 leaves `PRAGMA foreign_keys` OFF, that
+    connect_db() does not set it, and that the rebuild therefore refuses if it is ON -- and
+    every clause of that was true except the one that mattered: **db.py's own SCHEMA begins
+    with `PRAGMA foreign_keys=ON;` (line 68)**, and the real startup path runs
+    executescript(SCHEMA) before apply_migrations() on the same connection. So enforcement
+    is ON for every connection this migration actually gets, the refusal would have fired
+    in production, and the widening would never have happened -- with a log line explaining
+    why, which nobody reads on a worker that started fine.
+
+    Caught by tests/test_payment_key_widening.py on the first run rather than by reading,
+    which is the whole of rule 17: the claim was plausible, the measurement was cheap, and
+    the two disagreed.
+
+    THE PRAGMA IS A NO-OP INSIDE A TRANSACTION, so it is set BEFORE the BEGIN and READ BACK
+    rather than trusted -- a transaction already open would otherwise leave the rebuild
+    running with enforcement live, which is the one case the old refusal was right about.
+    If it cannot be turned off, this refuses and changes nothing.
+
+    AND NOTHING REFERENCES THESE TABLES ANYWAY, which is why the window is safe rather than
+    merely brief: deposit_events and late_deposits are the CHILD side -- each has a
+    FOREIGN KEY to swaps(id) and no table in SCHEMA references either of them -- so the DROP
+    has no dependents to orphan. That is asserted rather than assumed too:
+    `PRAGMA foreign_key_check` runs after the rebuild and a violation raises.
+    """
+    verdict = widening_verdict(unique_keys(conn, table))
+    if verdict == WIDEN_ALREADY:
+        return False
+    if verdict == WIDEN_UNRECOGNIZED:
+        logger.warning(
+            "migration: %s has neither the old payment key %s nor the new one %s, so it was "
+            "LEFT ALONE  <- nothing was rebuilt and nothing was deleted; its unique keys are "
+            "%s. A table this module does not recognize is not a table to rebuild from a guess.",
+            table, PAYMENT_UNIQUE_KEY_BEFORE, PAYMENT_UNIQUE_KEY, unique_keys(conn, table),
+        )
+        return False
+
+    # SAVED SO IT CAN BE PUT BACK EXACTLY. See restore_foreign_keys() for why this restores
+    # rather than setting ON.
+    was_enforced = foreign_keys_enforced(conn)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    if foreign_keys_enforced(conn):
+        logger.error(
+            "migration: %s NOT rebuilt -- `PRAGMA foreign_keys = OFF` did not take, which means a "
+            "transaction is already open on this connection (the pragma is a no-op inside one). "
+            "Rebuilding with enforcement live is the one case that can orphan rows, so this "
+            "refuses. Nothing was changed.",
+            table,
+        )
+        return False
+
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    create = (row["sql"] if hasattr(row, "keys") else row[0]) if row else ""
+    try:
+        ddl = rebuilt_create_sql(create, table, table + WIDENING_SUFFIX)
+    except ValueError:
+        restore_foreign_keys(conn, was_enforced)
+        logger.exception("migration: %s NOT rebuilt and nothing was changed", table)
+        return False
+
+    try:
+        carried = _rebuild_widened(conn, table, ddl)
+    finally:
+        # BEFORE _verify_widened(), so foreign_key_check runs under the enforcement the
+        # caller had rather than under the pragma this function turned off -- and in a
+        # `finally` so a rolled-back rebuild cannot leave enforcement off either.
+        restore_foreign_keys(conn, was_enforced)
+
+    _verify_widened(conn, table)
+    logger.info(
+        "migration: %s rebuilt with UNIQUE%s, %d row(s) carried  <- was UNIQUE%s, which on ICP "
+        "let a block index from a destroyed ledger own a live deposit's row",
+        table, PAYMENT_UNIQUE_KEY, carried, PAYMENT_UNIQUE_KEY_BEFORE,
+    )
+    return True
+
+
 def apply_migrations(conn: sqlite3.Connection) -> dict:
     """Bring an EXISTING database up to the current constraints. Idempotent.
 
@@ -1148,6 +1668,13 @@ def apply_migrations(conn: sqlite3.Connection) -> dict:
     # constraint but not the column fails at swap creation rather than at start.
     added_deposit_tag = add_column_if_missing(conn, "swaps", "deposit_tag", "INTEGER")
 
+    # THE PAYMENT KEY GOES UP BEFORE THE INDEX WORK, for the same reason the ADD COLUMN
+    # does: the early return below must not skip it. Without it, a deposit whose txid
+    # collides with one from a destroyed ICP ledger is credited to the WRONG SWAP and the
+    # live one never gets a row -- measured on the operator's host 2026-10-10 and recorded
+    # in full at deposit_events' UNIQUE clause in SCHEMA above.
+    widened = [table for table in PAYMENT_KEYED_TABLES if widen_payment_unique_key(conn, table)]
+
     # THE CORRECTIONS TABLE GOES UP BEFORE THE INDEX WORK, for the same reason the
     # ADD COLUMN does: the early return below must not skip it. It is where a
     # repair to a money column records the figure it replaced, and a database with
@@ -1168,10 +1695,12 @@ def apply_migrations(conn: sqlite3.Connection) -> dict:
             len(duplicates),
             rows,
         )
-        return {"index_created": False, "duplicates": duplicates, "deposit_tag_added": added_deposit_tag}
+        return {"index_created": False, "duplicates": duplicates, "deposit_tag_added": added_deposit_tag,
+                "payment_keys_widened": widened}
     conn.execute(PAYOUT_UNIQUE_INDEX_SQL)
     conn.commit()
-    return {"index_created": True, "duplicates": [], "deposit_tag_added": added_deposit_tag}
+    return {"index_created": True, "duplicates": [], "deposit_tag_added": added_deposit_tag,
+            "payment_keys_widened": widened}
 
 
 def dict_factory(cursor, row):

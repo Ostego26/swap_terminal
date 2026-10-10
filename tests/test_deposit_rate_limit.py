@@ -178,7 +178,7 @@ def test_a_deposit_at_its_threshold_is_settled(db):
     seed_swap(db, "s_done", 1, min_conf=3)
     seed_deposit_event(db, "s_done", "tx_done", 1, confirmations=3)
 
-    assert deposit_service.settled_txids(db, "SOL") == {"tx_done"}
+    assert deposit_service.settled_txids(db, "SOL", address=ACCOUNT) == {"tx_done"}
 
 
 def test_a_deposit_still_confirming_is_NEVER_settled(db):
@@ -191,7 +191,7 @@ def test_a_deposit_still_confirming_is_NEVER_settled(db):
     seed_swap(db, "s_confirming", 2, min_conf=3)
     seed_deposit_event(db, "s_confirming", "tx_pending", 2, confirmations=1)
 
-    assert deposit_service.settled_txids(db, "SOL") == frozenset()
+    assert deposit_service.settled_txids(db, "SOL", address=ACCOUNT) == frozenset()
 
 
 def test_the_threshold_comes_from_the_SWAP_and_not_from_config(db):
@@ -205,7 +205,7 @@ def test_the_threshold_comes_from_the_SWAP_and_not_from_config(db):
     seed_swap(db, "s_old", 3, min_conf=1)
     seed_deposit_event(db, "s_old", "tx_old", 3, confirmations=1)
 
-    assert deposit_service.settled_txids(db, "SOL") == {"tx_old"}, (
+    assert deposit_service.settled_txids(db, "SOL", address=ACCOUNT) == {"tx_old"}, (
         "settled at the swap's own threshold of 1, not at the current config's 3"
     )
 
@@ -215,7 +215,7 @@ def test_another_asset_s_deposits_are_not_included(db):
     seed_swap(db, "s_sol", 4, min_conf=3)
     seed_deposit_event(db, "s_sol", "tx_sol", 4, confirmations=3)
 
-    assert deposit_service.settled_txids(db, "GRC") == frozenset()
+    assert deposit_service.settled_txids(db, "GRC", address=ACCOUNT) == frozenset()
 
 
 # --- what the scan actually re-reads ------------------------------------------
@@ -333,7 +333,7 @@ def seed_unattributable(
 def skippable(db, asset="SOL"):
     """The real narrowed predicate, asked the way skip_txids() asks it."""
     return deposit_service.skippable_unattributable_txids(
-        db, asset, deposit_service.ACTIVE_STATUSES
+        db, asset, deposit_service.ACTIVE_STATUSES, address=ACCOUNT
     )
 
 
@@ -347,8 +347,8 @@ def test_a_recorded_unattributable_txid_WITH_NO_DISCRIMINATOR_is_in_the_skip_set
     """
     seed_unattributable(db, STRANDED[0])
     assert skippable(db) == {STRANDED[0]}
-    assert deposit_service.skip_txids(db, "SOL") == {STRANDED[0]}
-    assert deposit_service.settled_txids(db, "SOL") == frozenset(), (
+    assert deposit_service.skip_txids(db, "SOL", address=ACCOUNT) == {STRANDED[0]}
+    assert deposit_service.settled_txids(db, "SOL", address=ACCOUNT) == frozenset(), (
         "it reached no swap, which is exactly why settled_txids could never name it"
     )
 
@@ -359,7 +359,7 @@ def test_both_sources_land_in_one_set(db):
     seed_deposit_event(db, "s_one", "tx_done", 1, 3)
     seed_unattributable(db, STRANDED[1])
 
-    combined = deposit_service.skip_txids(db, "SOL")
+    combined = deposit_service.skip_txids(db, "SOL", address=ACCOUNT)
     assert combined == {"tx_done", STRANDED[1]}
 
 
@@ -367,14 +367,14 @@ def test_a_resolved_unattributable_txid_is_still_skipped(db):
     """A deposit a human has already dealt with is a STRONGER reason not to re-read
     it than an open one, not a weaker one."""
     seed_unattributable(db, STRANDED[0], resolved="2026-10-02T00:00:00+00:00")
-    assert STRANDED[0] in deposit_service.skip_txids(db, "SOL")
+    assert STRANDED[0] in deposit_service.skip_txids(db, "SOL", address=ACCOUNT)
 
 
 def test_the_skip_set_is_per_asset(db):
     """A GRC row must not suppress a SOL read. Same property settled_txids has."""
     seed_unattributable(db, STRANDED[0], asset="GRC")
-    assert deposit_service.skip_txids(db, "SOL") == frozenset()
-    assert deposit_service.skip_txids(db, "GRC") == {STRANDED[0]}
+    assert deposit_service.skip_txids(db, "SOL", address=ACCOUNT) == frozenset()
+    assert deposit_service.skip_txids(db, "GRC", address=ACCOUNT) == {STRANDED[0]}
 
 
 # --- the rows the scan must KEEP reading --------------------------------------

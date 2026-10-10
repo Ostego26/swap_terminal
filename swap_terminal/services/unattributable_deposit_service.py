@@ -184,6 +184,19 @@ _SKIPPABLE_SQL = """
 SELECT u.txid AS txid
 FROM unattributable_deposits u
 WHERE u.asset = ?
+  -- THE ACCOUNT THE MONEY LANDED IN, added 2026-10-10 alongside the same clause on
+  -- deposit_events. deposit_service.skip_txids() carries the measurement in full: an
+  -- ICP txid is a ledger BLOCK INDEX, so it is unique only within one ledger, and a
+  -- row left over from a destroyed local replica silenced a real deposit that landed
+  -- at the same index on the rebuilt one. Scoping both halves of the skip set to the
+  -- scanned address is what stops a stale index from speaking for a live one.
+  --
+  -- A NO-OP ON THE CHAINS THIS TABLE ACTUALLY HOLDS ROWS FOR, and that is why it is
+  -- safe rather than merely correct: only tag-attributed assets produce
+  -- unattributable rows (an address-attributed deposit is attributed BY its address),
+  -- and those share one account per chain, so every row on an asset carries the same
+  -- address and this clause removes nothing from the set.
+  AND u.address = ?
   AND (
         -- A HUMAN HAS DEALT WITH IT. Stronger than any of the others: whatever the
         -- chain says next, somebody has already written the answer down.
@@ -209,7 +222,7 @@ WHERE u.asset = ?
 """
 
 
-def skippable_unattributable_txids(db, asset: str, still_refreshed) -> frozenset[str]:
+def skippable_unattributable_txids(db, asset: str, still_refreshed, *, address: str) -> frozenset[str]:
     """Recorded unattributable txids a scan need not read again. NOT all of them.
 
     THE DEFECT THIS FUNCTION'S PREVIOUS VERSION WAS, established by running it rather
@@ -272,6 +285,15 @@ def skippable_unattributable_txids(db, asset: str, still_refreshed) -> frozenset
     tests/test_deposit_rate_limit.py::test_a_FAILED_swap_is_never_refreshed_back_into_an_active_status
     pins the absence so adding one fails a test instead of losing money quietly.
 
+    `address` IS REQUIRED AND KEYWORD-ONLY for the same reason `still_refreshed` is
+    required, and deposit_service.skip_txids() carries the 2026-10-10 measurement that
+    forced it: a default would be the asset-wide set, which is the defect, so a call
+    site that forgot the argument would silence a deposit instead of raising. Keyword-only
+    because `asset` and `address` are both strings and a positional mix-up would return an
+    empty set rather than an error -- every transaction re-read, which is the rate limit
+    this function's own cost paragraph is about. On the chains this table holds rows for it
+    changes nothing; the SQL above says why.
+
     `still_refreshed` IS PASSED IN, not imported, for the reason unclaimed_events() already
     gives for the same tuple: the authority is deposit_service.ACTIVE_STATUSES and that
     module imports this one, so importing it back would be a real cycle and spelling the
@@ -303,7 +325,7 @@ def skippable_unattributable_txids(db, asset: str, still_refreshed) -> frozenset
     statuses = ",".join("?" for _ in still_refreshed)
     rows = db.execute(
         _SKIPPABLE_SQL.format(statuses=statuses),
-        (asset, *still_refreshed),
+        (asset, address, *still_refreshed),
     ).fetchall()
     return frozenset(str(row["txid"]) for row in rows)
 

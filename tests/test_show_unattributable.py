@@ -166,7 +166,7 @@ def test_the_default_is_the_OPPOSITE_of_the_scanners_skip_set(db_file):
     conn.commit()
     assert [row["txid"] for row in outstanding(conn, "SOL")] == [STRANDED_B]
     assert skippable_unattributable_txids(
-        conn, "SOL", ("awaiting_deposit", "deposit_seen", "confirming")
+        conn, "SOL", ("awaiting_deposit", "deposit_seen", "confirming"), address=ACCOUNT
     ) == frozenset({STRANDED_A}), (
         "the resolved no-discriminator row is skippable; the unresolved one carrying a "
         "discriminator no swap holds must still be read, or no later swap can claim it"
