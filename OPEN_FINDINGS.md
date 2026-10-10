@@ -315,6 +315,89 @@ a second gunicorn on its own loopback port; a loopback-only `before_request` on
 - `payout_service.payout_unlock_context()` locks before it proves.
 - `s_d503f64d6c5e601f` (9,049.69 GRC against a 2,000 GRC desk) still unrevived.
 
+### 19. Does the replica's tECDSA key survive `docker compose down`? — NOT MEASURED
+**This is now the question gating a verb that is one short command away.** As of
+2026-10-10 `docker-compose.yml` declares `include:` for the icp and web files, so
+a bare `docker compose down` reaches the whole terminal and **removes containers**.
+
+**What is measured, and it is two different things:**
+
+| when | measurement |
+|---|---|
+| 2026-10-07 15:58 UTC | the SAME canister id with the SAME `dfx_test_key` gave **two different public keys** across one ordinary container recreation (`1373fa3`) |
+| 2026-10-07 20:38 UTC | `icp-replica-data:/root/.local/share/dfx` added as a **named volume** (`28de99c`), over a directory measured inside the running container at **180M**, holding `network/local/<hash>/state` |
+
+The key measurement is **three hours older than the volume**, so it describes a
+topology that no longer exists. `docker compose down` without `-v` removes
+containers and keeps named volumes, so the ledger canister should now survive —
+but **nothing has measured whether the tECDSA key material for `dfx_test_key`
+lives under that path or elsewhere in the container.** A reason to believe it
+survives is not a reading of it (rule 17), and this was not measurable from the
+container the change was written in: no replica, and `docker` was forbidden.
+
+**The check, read-only, with the replica up. Run it with NOTHING at a
+canister-derived address:**
+
+```
+dfx canister call threshold_custody public_key '(vec {})'
+docker compose down && docker compose up -d
+dfx canister call threshold_custody public_key '(vec {})'
+```
+
+Same hex means `down` is survivable and the warning at
+`docker-compose.yml`'s hazard 1 can be narrowed. A different hex means it is not,
+and every address `icp_custody_addresses.py` prints is already unreachable.
+
+**Costs while open**: `swap_stack.py down` still runs `docker compose stop` rather
+than `down`, so the repository's own lever is unaffected. What is open is that the
+literal `docker compose down` is now easy to reach and nobody can say what it costs
+the replica's key. Moving custody to canister-derived addresses on a local replica
+stays unsafe regardless — `HANDOFF.md` §2 already says so.
+
+### 20. May a `-f` overlay override a service that arrived through `include:`? — NOT MEASURED
+**The armed path depends on the answer and this session could not take it.**
+`docker-compose.web.armed-grc.yml`, `-sol.yml`, `-xrp.yml` and
+`docker-compose.web.hostnet.yml` override `web`, which since 2026-10-10 reaches
+compose through `docker-compose.yml`'s `include:` rather than through a `-f`.
+
+Whether compose **permits** a later `-f` file to override a resource an earlier
+file imported, **errors** on the conflict, or **silently keeps one of the two**, is
+a question about compose's own merge rules. It was not measured: running `docker`
+was forbidden where this change was made, `docker compose config` included.
+
+**Everything that could be made independent of the answer was.** `swap_stack.py`,
+`chains/icp.py`, `fund_desk.py`, `icp_operator_admin.py` and every printed remedy
+now pass `-f docker-compose.yml` alone, and
+`tests/test_compose_default_project.py::test_no_command_passes_a_file_that_include_already_supplies`
+fails if any of them grows an entry `include:` already supplies. The four overlays
+are the one path that cannot be reduced that way.
+
+**The check, read-only, before an armed run** (and it is in each overlay's header):
+
+```
+docker compose -f docker-compose.yml -f docker-compose.web.armed-sol.yml config --services
+```
+
+A service list means the override is accepted. An error about a conflict with an
+imported resource means **stop** — do not improvise a longer `-f` chain, because
+the failure mode is a container that comes up **without** the overlay: for an armed
+overlay a payout worker that cannot sign, for hostnet every chain unreachable.
+
+**Costs while open**: no armed run should be attempted until that one command has
+been pasted back. Nothing is armed today, so nothing is broken today.
+
+**A third, smaller one on the same mechanism, and it already has a reader.**
+`web` and `icp-replica` used to arrive through `-f`, where `docker-compose.yml`'s
+`networks: default: ipam` block and their service definitions merged by one
+mechanism. They now arrive through `include:`, and neither of their files declares
+a `networks:` key — so whether they attach to the pinned `default` or to one
+compose derives separately is also unmeasured. This one needs no new command:
+`swap_stack.py status` already reads the live subnet out of docker and prints
+`drifted` rather than `matches` when it differs from `172.18.0.0/16`. If that line
+reads `drifted` on a stack started by a bare `docker compose up`, this is it — and
+the symptom would otherwise be every chain reading NOT CONFIGURED in a container
+whose environment is perfectly correct (finding 3's failure mode).
+
 ---
 
 ## Open — claude
@@ -894,6 +977,36 @@ functions themselves are the ones the regtest panel has been running against rea
 daemons since 2026-10-10, and the shapes the stubs answer with are the ones recorded in
 this tree from live runs — but "the stub answered" is not "the daemon answered" and the
 two must not be written in the same voice (rule 17).
+
+### 21. `docker compose up`/`down` now cover the terminal — three things named rather than done
+**Measured on this checkout before the change**: 8 `docker-compose*.yml` files,
+**0** declaring `include:`, **0** declaring `profiles:`. A bare `docker compose up`
+read `docker-compose.yml` alone and started `abstergo` + `harness` — the Node
+bridge and the **regtest harness**, on a host holding funded testnet wallets. The
+terminal existed only inside `swap_stack.py` as a three-name tuple.
+
+Fixed: `include:` for the icp and web files, a profile named after each of the two
+non-terminal services, and every `-f` list in the tree reduced to the one file.
+`tests/test_compose_default_project.py` is 18 cases over it, each mutation-checked.
+
+**What is NOT closed by it, and none of these is a baseline (rule 19):**
+
+- **Findings 19 and 20 above** are the two measurements this container could not
+  take. Both are the operator's because both need a running replica or a running
+  docker.
+- **`docker compose -f docker-compose.yml -f docker-compose.grc-desk.yml up -d
+  grc-desk` now demands `SWAP_DB_DIR`**, a variable with nothing to do with the
+  Gridcoin desk. That is the 2026-10-05 defect this tree split eight files over,
+  returning through `include:`, and it was accepted deliberately: the alternative
+  is a default for `SWAP_DB_DIR`, which would be a compose file choosing which swap
+  database the terminal opens. The cost is **bounded to one variable** —
+  `test_the_default_project_requires_exactly_the_one_variable` fails if a second
+  one ever arrives the same way — and `grc-desk` has never been built or run
+  anywhere. The remedy for anyone who hits it is one `export`.
+- **No container was started, stopped, built or configured to verify any of this.**
+  Every assertion is over what the compose files SAY, parsed as YAML. "The file
+  declares it" is not "compose did it", and the two must not be written in the same
+  voice.
 
 ---
 

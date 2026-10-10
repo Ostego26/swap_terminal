@@ -70,10 +70,35 @@ ordinary recreation. A `docker compose down` DID happen earlier today. Funds at 
 canister-derived address on a local replica are lost on container replacement, so
 that custody path is not safe to arm against a local replica.
 
+> **ADDENDUM, 2026-10-10, appended rather than rewritten because the drift is the
+> point (rule 1).** That measurement was taken at **15:58 UTC** on 2026-10-07.
+> `icp-replica-data:/root/.local/share/dfx` — a **named volume** over the directory
+> measured inside the running container at 180M holding `network/local/<hash>/state`
+> — entered `docker-compose.icp.yml` at **20:38 UTC the same day** (`28de99c`). So
+> the paragraph above describes a topology that no longer exists, and
+> `docker compose down` without `-v` keeps named volumes.
+>
+> **It is NOT therefore safe, and nothing has re-measured it.** Whether the tECDSA
+> key material for `dfx_test_key` lives under that path or elsewhere in the
+> container is unestablished — a reason to believe it now survives is not a reading
+> of it (rule 17). The three-command check that would settle it is in
+> `docker-compose.yml`'s hazard-1 block and in `OPEN_FINDINGS.md` finding 19.
+>
+> This matters more than it did, because `docker-compose.yml` now declares
+> `include:` for the icp and web files: a bare `docker compose down` reaches the
+> whole terminal in one flagless command. `swap_stack.py down` still runs
+> `docker compose stop`. **The last sentence above is unchanged and still stands**:
+> a local replica cannot validate durability, so canister-derived custody is not
+> safe to arm against one whatever the answer turns out to be.
+
 ## 3. Architecture — has NOT drifted
 
 - Docker: 8 compose files; `docker-compose.yml` and `docker-compose.web.yml` both
-  touched today.
+  touched today. **Since 2026-10-10 `docker-compose.yml` declares `include:` for
+  `docker-compose.icp.yml` and `docker-compose.web.yml`, and `abstergo`/`harness`
+  sit behind profiles of their own names** — so a bare `docker compose up` starts
+  `web` + `icp-replica` and nothing else. The armed overlays and `hostnet` are
+  still separate opt-in files and are included by nothing.
 - Canisters: `threshold_custody` and `operator_admin`, Rust, wasm built for
   `wasm32-unknown-unknown/release`, plus `icp/dfx.json` and
   `docker-compose.icp.yml`.
