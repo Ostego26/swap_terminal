@@ -42,8 +42,11 @@ from swap_terminal.stack_authority import (
     _PREFIX_NOTES,
     CANDID_UI_CANISTER_NAME,
     CANISTER_SURFACES,
+    CHAIN_ADAPTERS_KEY,
+    CHAIN_ATTEMPTED_KEY,
     CHAIN_EXIT_CODES,
     CHAIN_PROBE_ROWS_KEY,
+    CHAIN_PROBED_AT_KEY,
     DOWN_VERDICTS,
     LISTENER_VERDICTS,
     NEVER_STOPPED,
@@ -57,6 +60,7 @@ from swap_terminal.stack_authority import (
     canister_lookup_names,
     canister_lookup_verdict,
     canister_surface_lines,
+    chain_census_lines,
     chain_exit_code,
     chain_network_lines,
     chain_probe_envelope,
@@ -2912,3 +2916,107 @@ def test_the_network_column_widens_for_the_longest_network_in_hand():
     assert "pays bcrt1" in lines[0]
     # the BTC note must sit past where XRP's long network name ends
     assert lines[0].index("pays bcrt1") > len("  XRP   testnet (network_id 1)")
+
+
+# ---------------------------------------------------------------------------
+# WHEN IT WAS ASKED, AND WHETHER EVERY CONFIGURED CHAIN IS EVEN IN THE REPORT.
+#
+# chain_probe_envelope() has carried probed_at, adapters_configured and
+# probes_attempted since it was written, and its docstring says why: "Echo what
+# decided the answer (rule 14): WHEN it was asked, how many adapters exist, and
+# how many were actually contacted -- because '0 of 6 answered' and '0 of 6 could
+# be probed' are different facts." Measured 2026-10-10 off the operator's own
+# pasted body: NOTHING read any of the three. Second field in two days found with
+# zero readers, after `network`.
+# ---------------------------------------------------------------------------
+
+
+def test_the_report_says_WHEN_the_container_asked():
+    """The block gets pasted back a day later, which rule 14 names directly.
+
+    It is also the only field distinguishing a fresh probe from a container
+    serving older code: a port answering 200 says nothing about when it last
+    asked a daemon.
+    """
+    body = chain_probe_envelope(
+        [_answered("BTC", "regtest")], probed_at="2026-10-10T00:14:24+00:00", adapters_configured=1
+    )
+    _status, _headline, detail = chain_reachability_verdict(body)
+    assert "2026-10-10T00:14:24+00:00" in "\n".join(detail)
+
+
+def test_a_configured_chain_MISSING_from_the_rows_is_shouted_about():
+    """THE DEFECT CLASS THIS REPORT COULD NOT SEE AT ALL.
+
+    Every count here is derived from the rows in front of it, so a chain absent
+    from the rows entirely is invisible: the headline reads "all 4 probeable
+    chain(s) answered" and nothing says two chains were never mentioned. Rule
+    13's "skipped plus success in one output" at the level of the whole report.
+
+    MUTATION CHECKED: dropping the `configured != returned` branch fails here and
+    nowhere else.
+    """
+    rows = [_answered(asset, "regtest") for asset in ("BTC", "LTC", "GRC", "XRP")]
+    body = {
+        "probed_at": "2026-10-10T00:14:24+00:00",
+        "adapters_configured": 6,
+        "probes_attempted": 4,
+        CHAIN_PROBE_ROWS_KEY: rows,
+    }
+    status, headline, detail = chain_reachability_verdict(body)
+    assert status == "reachable", "the rows present really did all answer"
+    blob = "\n".join(detail)
+    assert "2 CONFIGURED ADAPTER(S) ARE NOT IN THIS REPORT" in blob
+    assert "UNMENTIONED" in blob, "absent must not read the same as fine"
+    assert "all 4 probeable" in headline, (
+        "the headline is still derived from the rows -- the census line is what corrects it"
+    )
+
+
+def test_the_reachable_branch_claims_only_what_the_ROWS_support():
+    """It said "every configured chain with a probe was asked" and could not know that.
+
+    With adapters_configured > len(rows) that printed directly above a census
+    line reporting two chains missing -- a contradiction on one screen. The
+    deployment-level claim belongs to the census, which can check it.
+    """
+    body = {
+        "probed_at": "x",
+        "adapters_configured": 6,
+        "probes_attempted": 1,
+        CHAIN_PROBE_ROWS_KEY: [_answered("BTC", "regtest")],
+    }
+    _status, _headline, detail = chain_reachability_verdict(body)
+    blob = "\n".join(detail)
+    assert "every chain in this report with a probe was asked" in blob
+    assert "every configured chain" not in blob
+
+
+def test_an_envelope_with_no_counts_says_a_missing_chain_CANNOT_be_detected():
+    """An older build's body must not read as a clean census (rule 17).
+
+    Silence here would mean "nothing missing", and what is true is "nobody can
+    tell" -- the same distinction the bech32 classifier exists for.
+    """
+    body = {CHAIN_PROBE_ROWS_KEY: [_answered("BTC", "regtest")]}
+    _status, _headline, detail = chain_reachability_verdict(body)
+    blob = "\n".join(detail)
+    assert "not\nstated" in blob or "not stated" in blob
+    assert "cannot be detected" in blob
+
+
+def test_the_census_reads_defensively_and_never_raises():
+    """It is handed parsed JSON that may be any shape (rule 12)."""
+    for body in (None, "a string", 42, [], {"chains": []}):
+        assert isinstance(chain_census_lines(body, []), list)
+
+
+def test_the_census_key_names_match_what_the_producer_writes():
+    """A producer rename would otherwise print "(not stated)" forever, silently.
+
+    Asserted against the real envelope rather than against literals, so the two
+    sides cannot drift (rule 8).
+    """
+    produced = chain_probe_envelope([], probed_at="t", adapters_configured=3)
+    for key in (CHAIN_PROBED_AT_KEY, CHAIN_ADAPTERS_KEY, CHAIN_ATTEMPTED_KEY):
+        assert key in produced, f"{key!r} is read by the report and not written by the producer"

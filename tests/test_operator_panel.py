@@ -2297,3 +2297,259 @@ def test_the_teller_routes_REACH_THE_SAME_SERVICES_the_web_form_does():
     # AND NOTHING FROM A REQUEST REACHES A SUBPROCESS, which is this panel's standing
     # invariant. These routes call Python functions; they do not spawn.
     assert "subprocess" not in quote_body + swap_body
+
+
+# =============================================================================
+# THE CORE-WALLET READ PANES, 2026-10-10.
+#
+# Seeded daemons, never a real one: each stub answers the RPCs a real build of its
+# vintage answers and RAISES for the ones it does not have. That is the only way to
+# test the GRC fallback at all -- there is no pre-0.17 daemon in this session -- and
+# it is the same technique the funding-step tables use.
+# =============================================================================
+
+
+class _StubNode:
+    """A daemon that answers a fixed table and RAISES for anything absent.
+
+    RAISES RATHER THAN RETURNING None, because that is what a daemon does for a
+    method it lacks ("Method not found"), and a stub that returned None would let a
+    caller pass this test while being broken against a real older daemon -- which is
+    the mutation that matters here.
+    """
+
+    def __init__(self, answers: dict):
+        self.answers = answers
+        self.calls = []
+
+    def call(self, method, *params):
+        self.calls.append((method, params))
+        if method not in self.answers:
+            raise RuntimeError(f"Method not found: {method}")
+        value = self.answers[method]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+class _StubRun:
+    """Just enough of funding_steps.Run for the panes: node(wallet=...)."""
+
+    def __init__(self, answers: dict):
+        self._node = _StubNode(answers)
+
+    def node(self, wallet: bool = True):
+        return self._node
+
+
+_MODERN = {
+    "listwallets": ["desk_hot"],
+    "listwalletdir": {"wallets": [{"name": "desk_hot"}, {"name": "cold_backup"}]},
+    "getwalletinfo": {"balance": 1.5, "unconfirmed_balance": 0.25,
+                      "immature_balance": 50.0, "txcount": 812},
+    "listtransactions": [
+        {"txid": "aa", "category": "receive", "amount": 0.5, "confirmations": 6,
+         "address": "bcrt1qold", "label": "", "time": 100},
+        {"txid": "bb", "category": "send", "amount": -0.25, "fee": -0.0001,
+         "confirmations": 1, "address": "bcrt1qnew", "label": "payout", "time": 200},
+    ],
+    "getpeerinfo": [{"addr": "172.17.0.1:18444", "subver": "/Satoshi:28.0.0/",
+                     "inbound": False, "pingtime": 0.02, "synced_blocks": 812}],
+    "getblockchaininfo": {"chain": "test", "blocks": 812, "headers": 812,
+                          "verificationprogress": 0.9999, "pruned": False,
+                          "size_on_disk": 123456},
+    "getnetworkinfo": {"version": 280000, "subversion": "/Satoshi:28.0.0/",
+                       "protocolversion": 70016, "connections": 1},
+}
+
+
+def test_a_node_with_NO_WALLET_LOADED_is_not_reported_as_a_zero_balance():
+    """THE DEFECT THIS CLASSIFIER EXISTS FOR, measured on the host 2026-10-10.
+
+    Their regtest bitcoind answered getblockcount with 812 and answered BOTH
+    getbalance and getaddressinfo with nothing, because no wallet was loaded. A
+    diagnostic that swallowed stderr printed `balance   BTC` -- a swallowed error
+    rendered as a value. A pane showing 0.00000000 for a node with no wallet is
+    the same defect with better typography, and worse, because an operator would
+    conclude their coins were gone.
+    """
+    run = _StubRun({"listwallets": [], "listwalletdir": {"wallets": [{"name": "desk_hot"}]},
+                    "getblockcount": 812})
+    state = decisions.wallet_state(run)
+    assert state["state"] == decisions.WALLET_NONE_LOADED
+    assert state["balances"] is None, "there is no wallet, so there is no balance to show"
+    assert "not a balance of zero" in state["why"]
+    assert state["on_disk"] == ["desk_hot"], (
+        "the wallet EXISTS on disk and is merely not loaded -- which is the actionable half"
+    )
+
+
+def test_a_daemon_nobody_could_ask_is_NOT_ESTABLISHED_rather_than_empty():
+    """Third outcome. "Could not ask" must never render as "has nothing" (rule 17)."""
+    run = _StubRun({})
+    state = decisions.wallet_state(run)
+    assert state["state"] == decisions.WALLET_NOT_ESTABLISHED
+    assert state["balances"] is None
+    assert "NOT\nestablished" in state["why"] or "NOT established" in state["why"]
+    assert "not zero" in state["why"]
+
+
+def test_a_loaded_wallet_carries_cores_own_three_numbers_under_cores_own_words():
+    """available / pending / immature -- an operator should not learn a second vocabulary."""
+    state = decisions.wallet_state(_StubRun(_MODERN))
+    assert state["state"] == decisions.WALLET_LOADED
+    assert state["balances"]["available"]["value"] == 1.5
+    assert state["balances"]["pending"]["value"] == 0.25
+    assert state["balances"]["immature"]["value"] == 50.0
+    assert all(state["balances"][k]["reported"] for k in ("available", "pending", "immature"))
+    assert state["txcount"] == 812
+
+
+def test_a_pre_0_17_daemon_falls_back_to_getinfo_and_says_which_numbers_it_LACKS():
+    """GRC has no getwalletinfo. The two missing numbers must not render as 0.0.
+
+    MUTATION CHECKED: defaulting `pending` and `immature` to 0.0 instead of None
+    fails here -- and that mutation is the tempting one, because it makes the pane
+    look complete while claiming a measurement nobody took.
+    """
+    run = _StubRun({"getinfo": {"balance": 82.65}})
+    balances, why = decisions.wallet_balances(run)
+    assert why == ""
+    assert balances["available"]["value"] == 82.65
+    assert balances["available"]["reported"] is True
+    for absent in ("pending", "immature"):
+        assert balances[absent]["value"] is None, f"{absent} was not reported and must not be 0.0"
+        assert balances[absent]["reported"] is False
+
+
+def test_an_unreadable_balance_returns_None_and_names_BOTH_routes_it_tried():
+    balances, why = decisions.wallet_balances(_StubRun({}))
+    assert balances is None
+    assert "getwalletinfo" in why and "getinfo" in why
+
+
+def test_transactions_come_back_NEWEST_FIRST():
+    """listtransactions returns OLDEST first; the GUI shows newest at the top.
+
+    An operator checking whether a send just went out reads the first row, and the
+    daemon's own order puts it last.
+    """
+    rows, why = decisions.recent_transactions(_StubRun(_MODERN))
+    assert why == ""
+    assert [row["txid"] for row in rows] == ["bb", "aa"]
+    assert rows[0]["category"] == "send"
+    assert rows[0]["fee"] == -0.0001
+
+
+def test_the_transaction_category_is_kept_VERBATIM_and_not_collapsed_to_a_direction():
+    """`generate` and `immature` matter on a desk that mines, and both read as `receive`
+    if a renderer normalizes them."""
+    run = _StubRun({**_MODERN, "listtransactions": [
+        {"txid": "cc", "category": "immature", "amount": 50.0, "confirmations": 3},
+        {"txid": "dd", "category": "generate", "amount": 50.0, "confirmations": 101},
+    ]})
+    rows, _ = decisions.recent_transactions(run)
+    assert {row["category"] for row in rows} == {"immature", "generate"}
+
+
+def test_ZERO_PEERS_is_reported_as_a_FINDING_and_not_as_an_empty_pane():
+    """The thing that would have saved the evening, measured on the host 2026-10-10.
+
+    Both regtest daemons had getconnectioncount 0. A broadcast from a node with no
+    peers is valid, confirms on that node's own chain, and is seen by nobody.
+    """
+    run = _StubRun({**_MODERN, "getpeerinfo": []})
+    pane = decisions.wallet_pane(run)
+    assert pane["peers"]["rows"] == []
+    assert pane["peers"]["error"] == ""
+    assert "broadcasts into nothing" in pane["peers"]["note"]
+
+
+def test_peers_that_EXIST_carry_no_scary_note():
+    pane = decisions.wallet_pane(_StubRun(_MODERN))
+    assert len(pane["peers"]["rows"]) == 1
+    assert pane["peers"]["note"] == ""
+    assert pane["peers"]["rows"][0]["subver"] == "/Satoshi:28.0.0/"
+
+
+def test_a_daemon_without_getpeerinfo_is_an_ERROR_and_not_zero_peers():
+    """"No such method" and "no peers" are opposite findings and share a renderer."""
+    run = _StubRun({k: v for k, v in _MODERN.items() if k != "getpeerinfo"})
+    pane = decisions.wallet_pane(run)
+    assert pane["peers"]["rows"] == []
+    assert pane["peers"]["error"], "a missing method must be reported, not shown as 0 peers"
+    assert pane["peers"]["note"] == "", "and must NOT claim the node talks to nobody"
+
+
+def test_every_node_summary_field_says_whether_the_daemon_REPORTED_it():
+    """An invented `pruned: false` is a claim about disk retention.
+
+    On a chain where an HTLC needs getrawtransaction for an arbitrary txid, that
+    claim decides whether a spend path can work -- so it must come from the daemon
+    or be marked absent.
+    """
+    full = decisions.node_summary(_StubRun(_MODERN))
+    assert full["chain"]["value"] == "test"
+    assert full["pruned"]["reported"] is True
+    assert full["pruned"]["value"] is False
+    bare = decisions.node_summary(_StubRun({}))
+    for key in ("chain", "blocks", "pruned", "version", "connections"):
+        assert bare[key]["value"] is None
+        assert bare[key]["reported"] is False
+    assert bare["errors"], "and it must say the reads failed"
+
+
+def test_verification_progress_is_passed_through_unrounded():
+    """0.9999 and 100% are different things to somebody deciding whether a sync finished."""
+    assert decisions.node_summary(_StubRun(_MODERN))["verificationprogress"]["value"] == 0.9999
+
+
+def test_a_wallet_less_node_does_not_waste_calls_listing_transactions():
+    """Nothing to list, and the pane says that rather than reporting an RPC error."""
+    run = _StubRun({"listwallets": [], "getpeerinfo": [], "getblockchaininfo": {"chain": "test"}})
+    pane = decisions.wallet_pane(run)
+    assert pane["transactions"]["rows"] == []
+    assert "no wallet is loaded" in pane["transactions"]["error"]
+    assert "listtransactions" not in [call[0] for call in run.node().calls]
+
+
+def test_the_pane_never_offers_a_send_a_passphrase_or_a_key():
+    """The refusals, asserted rather than only commented.
+
+    swap_terminal/CLAUDE.md: a passphrase must never appear in a command this repo
+    emits and the panel must never have a passphrase field; never read back a key.
+    And `getnewaddress` is a WALLET WRITE, which wallet_custody.py's header already
+    draws the line on -- a Receive pane shows addresses the wallet HAS.
+    """
+    pane = decisions.wallet_pane(_StubRun(_MODERN))
+    blob = repr(pane).lower()
+    for forbidden in ("passphrase", "dumpprivkey", "privkey", "walletpassphrase", "sendtoaddress",
+                      "getnewaddress", "wallet.dat", "mnemonic", "seed"):
+        assert forbidden not in blob, f"the read pane must not mention {forbidden}"
+
+
+def test_no_pane_rpc_is_outside_the_READ_ONLY_allowlist():
+    """THE INVARIANT THAT KEEPS THIS A VIEWER. Every call these panes make must
+    already be permitted by refuse_unless_read_only(), so adding a pane cannot
+    widen what the panel may ask a daemon.
+
+    MUTATION CHECKED: swapping any read for `sendtoaddress` or `getnewaddress`
+    fails here, which is the single most valuable assertion in this file.
+    """
+    run = _StubRun(_MODERN)
+    decisions.wallet_pane(run)
+    asked = {call[0] for call in run.node().calls}
+    assert asked, "the panes must actually call something, or this asserts nothing"
+    for method in asked:
+        assert decisions.refuse_unless_read_only(method) == "", (
+            f"{method} is called by a pane and is NOT in READ_ONLY_RPCS"
+        )
+
+
+def test_every_wallet_state_is_in_the_published_tuple():
+    """A renderer with one case per state can only be tested against a complete list."""
+    reached = {
+        decisions.wallet_state(_StubRun(answers))["state"]
+        for answers in ({}, {"listwallets": []}, _MODERN)
+    }
+    assert reached == set(decisions.WALLET_STATES)

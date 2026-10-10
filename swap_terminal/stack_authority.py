@@ -1379,6 +1379,83 @@ def _prefix_note(asset: str, network: str) -> str:
     return _PREFIX_NOTES[status].format(prefix=prefix)
 
 
+#: The envelope keys chain_census_lines() reads. Named so a producer change that
+#: renames one fails a test rather than silently printing "(not stated)" forever --
+#: which is how `network` went unread from the day it was added.
+CHAIN_PROBED_AT_KEY = "probed_at"
+CHAIN_ADAPTERS_KEY = "adapters_configured"
+CHAIN_ATTEMPTED_KEY = "probes_attempted"
+
+
+def chain_census_lines(body: object, rows: list) -> list[str]:
+    """When the probe ran, and whether every configured adapter is even IN the report.
+
+    chain_probe_envelope() carries three fields for a reader and its docstring says
+    why: "Echo what decided the answer (rule 14): WHEN it was asked, how many
+    adapters exist, and how many were actually contacted -- because '0 of 6
+    answered' and '0 of 6 could be probed' are different facts." Measured
+    2026-10-10 from the operator's own pasted body: NOTHING read any of the three.
+    The producer stated an intent and the renderer never honored it, which makes
+    that docstring a wrong comment by omission (rule 16) as much as a missing
+    feature.
+
+    THE CROSS-CHECK IS THE PART THAT MATTERS, and it is a defect class the report
+    could not see at all. Every count in this report is derived from the rows in
+    front of it, so a chain missing from the rows ENTIRELY is invisible: six
+    adapters configured, four rows returned, and the headline reads "all 4
+    probeable chain(s) answered" with nothing anywhere saying two chains were
+    never mentioned. That is rule 13's "skipped plus success in the same output"
+    at the level of the whole report rather than one cycle.
+
+    `probed_at` IS PRINTED BECAUSE THE BLOCK GETS PASTED BACK A DAY LATER, which
+    rule 14 names directly. It is also the only field that distinguishes a fresh
+    probe from a container serving older code off a cached render -- a port answering
+    200 says nothing about when it last asked a daemon.
+
+    Reads defensively and NEVER raises: this is handed parsed JSON that may be an
+    older build's envelope, so a missing field prints as not stated rather than
+    killing a report (rule 12 -- the caller can tell, because the line says so).
+    """
+    if not isinstance(body, Mapping):
+        return []
+    lines = []
+    probed_at = body.get(CHAIN_PROBED_AT_KEY)
+    lines.append(
+        f"  asked at          {probed_at}  <- by the CONTAINER, in UTC"
+        if probed_at
+        else "  asked at          (not stated) <- this build's envelope carries no timestamp, so "
+        "whether this is a fresh probe is NOT established"
+    )
+    configured = body.get(CHAIN_ADAPTERS_KEY)
+    attempted = body.get(CHAIN_ATTEMPTED_KEY)
+    returned = len(rows)
+    if isinstance(configured, int):
+        lines.append(
+            f"  adapters          {configured} configured, {attempted} probeable, "
+            f"{returned} row(s) in this report"
+        )
+        if configured != returned:
+            # LOUD, because every other number here is derived from the rows and
+            # therefore cannot notice its own omissions.
+            missing = configured - returned
+            lines.append("")
+            lines.append(
+                f"  *** {missing} CONFIGURED ADAPTER(S) ARE NOT IN THIS REPORT AT ALL. Every count"
+            )
+            lines.append(
+                "      above and below is derived from the rows present, so those chains are not"
+            )
+            lines.append(
+                "      failing here -- they are UNMENTIONED, which reads the same as fine. ***"
+            )
+    else:
+        lines.append(
+            f"  adapters          {returned} row(s) in this report; how many are CONFIGURED is not "
+            f"stated by this build, so a missing chain cannot be detected"
+        )
+    return lines
+
+
 def _refusal_lines(refused: list) -> list[str]:
     """One line per refused chain, plus the recorded remedy where there is one.
 
@@ -1578,13 +1655,22 @@ def chain_reachability_verdict(body: object, trouble: str = "") -> tuple[str, st
     if not refused:
         return "reachable", f"all {len(answered)} probeable chain(s) answered: {', '.join(answered)}", [
             f"not asked: {', '.join(not_asked)} -- no read-only probe for those adapters, which is"
-            if not_asked else "every configured chain with a probe was asked.",
+            # "IN THIS REPORT", NOT "CONFIGURED", and the word matters. This line is
+            # derived from the rows, so it cannot speak for a chain that never
+            # appeared in them -- and with adapters_configured > len(rows) the old
+            # wording printed "every configured chain with a probe was asked"
+            # directly above a census line saying two were missing entirely. The
+            # deployment-level claim belongs to chain_census_lines(), which can
+            # check it; this one says only what it can see.
+            if not_asked else "every chain in this report with a probe was asked.",
             *(["by design and not a fault."] if not_asked else []),
             # REACHABLE IS NOT THE WHOLE ANSWER, which is why these print in the
             # branch that passed. See chain_network_lines() for the 2026-10-09
             # measurement: three daemons answered, one was on a network that
             # could not pay the address the operator was aiming at, and this
             # headline said "all 3 probeable chain(s) answered".
+            "",
+            *chain_census_lines(body, rows),
             "",
             *chain_network_lines(rows),
         ]
@@ -1612,6 +1698,8 @@ def chain_reachability_verdict(body: object, trouble: str = "") -> tuple[str, st
         f"{', '.join(row['asset'] for row in refused)} ***"
     ), [
         *_refusal_lines(refused),
+        "",
+        *chain_census_lines(body, rows),
         "",
         # THE ONES THAT DID ANSWER STILL HAVE A NETWORK WORTH READING. A refusal on
         # one chain is no reason to stop reporting the others, and the operator

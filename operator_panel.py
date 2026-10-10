@@ -345,6 +345,109 @@ $("out").addEventListener("scroll", () => {
 
 function esc(s) { return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 
+function walletPanes(w) {
+  // THE CORE WALLET, AS FOUR READ PANES. 2026-10-10, at the operator's instruction to make
+  // the daemon tab "bassically a literally ripoff of the entire btc, ltc, or grc core gui
+  // wallet". The tab already existed (2026-09-30, also theirs); what it lacked was a wallet.
+  // Every number here comes from an RPC READ_ONLY_RPCS already allowed, so this widened
+  // nothing -- and tests/test_operator_panel.py asserts exactly that over the real calls.
+  //
+  // NO SEND BOX, NO PASSPHRASE BOX, NO getnewaddress. All three are refusals stated in
+  // regtest/operator_panel.py beside the data functions; the short form is that money
+  // movement is the operator's call (rule 16), a passphrase must never reach a POST body or
+  // this server's request log, and minting an address is a WALLET WRITE.
+  if (!w) { return ""; }
+  let h = "<h3>wallet</h3>";
+  const st = w.wallet || {};
+  // THREE STATES AND THEY LOOK DIFFERENT. "No wallet loaded" rendered as 0.00000000 is the
+  // defect measured on the operator's host this morning, where a swallowed error printed as
+  // a value and would have read as "my coins are gone".
+  if (st.state === "loaded") {
+    h += '<p><span class="ok">WALLET LOADED</span> &mdash; ' + esc((st.loaded || []).join(", ")) +
+         (st.txcount === null || st.txcount === undefined ? "" : ", " + esc(st.txcount) + " transactions") + "</p>";
+    h += "<table><tr><th>&nbsp;</th><th>amount</th><th>what it is</th></tr>";
+    for (const k of ["available", "pending", "immature"]) {
+      const b = (st.balances || {})[k] || {};
+      // NOT REPORTED IS NOT ZERO. Gridcoin has no getwalletinfo, so its pending and immature
+      // are absent rather than nil, and printing 0.00000000 would claim a measurement nobody
+      // took (rule 17).
+      const cell = b.reported ? esc(Number(b.value).toFixed(8))
+                              : '<span class="sub">not reported by this daemon</span>';
+      h += "<tr><td>" + esc(k) + "</td><td>" + cell + "</td><td>" + esc(b.note || "") + "</td></tr>";
+    }
+    h += "</table>";
+  } else if (st.state === "none_loaded") {
+    h += '<p class="bad">NO WALLET IS LOADED on this node.</p>';
+    h += '<p class="sub">' + esc(st.why || "") + "</p>";
+    if ((st.on_disk || []).length) {
+      h += "<p>on disk and NOT loaded: <b>" + esc(st.on_disk.join(", ")) +
+           "</b> &mdash; so one exists to load rather than create.</p>";
+    } else {
+      h += '<p class="sub">and none exists on disk either, so one has to be created before this node can hold a coin.</p>';
+    }
+  } else {
+    h += '<p class="bad">WALLET NOT ESTABLISHED</p><p class="sub">' + esc(st.why || "") + "</p>";
+  }
+
+  const tx = w.transactions || {};
+  h += "<h3>transactions</h3>";
+  if (tx.error) { h += '<p class="sub">' + esc(tx.error) + "</p>"; }
+  if ((tx.rows || []).length) {
+    h += "<table><tr><th>when</th><th>kind</th><th>amount</th><th>conf</th><th>address</th></tr>";
+    for (const r of tx.rows) {
+      // CONFIRMATIONS COLOURED, because that is the single thing an operator opens this for:
+      // 0 means the network has not accepted it yet, and on a node with no peers it never will.
+      const cc = (r.confirmations === 0 || r.confirmations === null) ? "bad" : "ok";
+      h += "<tr><td>" + esc(r.time ? new Date(r.time * 1000).toISOString().replace("T", " ").slice(0, 19) : "?") +
+           "</td><td>" + esc(r.category) + "</td><td>" +
+           esc(r.amount === null ? "?" : Number(r.amount).toFixed(8)) +
+           '</td><td class="' + cc + '">' + esc(r.confirmations) + "</td><td>" +
+           esc(r.address || "") + "</td></tr>";
+    }
+    h += "</table>";
+  } else if (!tx.error) {
+    // (none) IS A RESULT. A blank gap is ambiguous between zero rows and a broken query.
+    h += '<p class="sub">(none) &mdash; this wallet has no transactions in the last ' +
+         esc(tx.asked_for) + " entries.</p>";
+  }
+
+  const pr = w.peers || {};
+  h += "<h3>peers</h3>";
+  if (pr.error) { h += '<p class="sub">' + esc(pr.error) + "</p>"; }
+  if ((pr.rows || []).length) {
+    h += "<table><tr><th>address</th><th>build</th><th>dir</th><th>ping</th><th>their height</th></tr>";
+    for (const r of pr.rows) {
+      h += "<tr><td>" + esc(r.addr) + "</td><td>" + esc(r.subver) + "</td><td>" +
+           (r.inbound ? "in" : "out") + "</td><td>" +
+           esc(r.pingtime === null || r.pingtime === undefined ? "?" : Number(r.pingtime).toFixed(3)) +
+           "</td><td>" + esc(r.synced_blocks) + "</td></tr>";
+    }
+    h += "</table>";
+  } else if (pr.note) {
+    // THE FINDING THAT WOULD HAVE SAVED AN EVENING. Measured 2026-10-10: both regtest daemons
+    // had zero peers, and a broadcast from a node with no peers is seen by nobody.
+    h += '<p class="bad">NO PEERS</p><p class="sub">' + esc(pr.note) + "</p>";
+  }
+
+  const n = w.node || {};
+  h += "<h3>node</h3><table><tr><th>field</th><th>value</th></tr>";
+  for (const k of ["chain", "blocks", "headers", "verificationprogress", "initialblockdownload",
+                   "pruned", "size_on_disk", "version", "subversion", "connections"]) {
+    const f = n[k] || {};
+    h += "<tr><td>" + esc(k) + "</td><td>" +
+         (f.reported ? esc(String(f.value)) : '<span class="sub">not reported</span>') +
+         "</td></tr>";
+  }
+  h += "</table>";
+  for (const e of (n.errors || [])) { h += '<p class="sub">' + esc(e) + "</p>"; }
+  // ECHO WHAT THIS PAGE COST THE DAEMON (rule 14). An operator watching their own debug.log
+  // scroll should be able to account for this traffic rather than wondering what is hammering
+  // the node. Fetched on a TAB CLICK, not on the 5-second timer.
+  h += '<p class="sub">' + esc(w.rpc_calls) + " read-only RPCs per click; no write, no key, " +
+       "no passphrase. This tab is a viewer.</p>";
+  return h;
+}
+
 function methodsTable(methods) {
   if (!methods || !methods.length) { return ""; }
   let h = "<table><tr><th>daemon has</th><th>&nbsp;</th><th>what its absence costs</th></tr>";
@@ -432,6 +535,7 @@ async function loadChain(asset) {
          esc(d.network) + "</span></p>";
     h += methodsTable(d.methods);
     h += fundingBlock(d.funding);
+    h += walletPanes(d.wallet_pane);
   } else {
     h += '<p class="bad">NOT REACHABLE' + (d.endpoint ? " at " + esc(d.endpoint) : "") + "</p>";
     if (d.error) { h += '<p class="sub">' + esc(d.error) + "</p>"; }
