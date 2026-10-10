@@ -125,6 +125,39 @@ cannot be minted, and `fund_testnets.py` refuses at its `assert_regtest` check.
 `regtest_htlc_harness` is now a misnomer in both files and worth dropping: the
 harness cannot run on testnet at all.
 
+**`desk_hot` NOW EXISTS ON BOTH, 2026-10-10**, created by `testnet_wallets.py`
+(C55) on the operator's own daemons. Both reported `loadwallet` rpc code -18
+("Path does not exist") and then created cleanly, which is the sequence
+`ensure_wallet_on()` is ordered for:
+
+| chain | network | kind | address prefix | balance |
+|---|---|---|---|---|
+| BTC | `testnet4` | descriptor (Core 28) | `tb1` ✓ | 0.0 |
+| LTC | `test` | legacy (Litecoin 0.21) | `tltc1` ✓ | 0.0 |
+
+The two wallet KINDS are the measurement `ensure_wallet_on()`'s docstring
+predicted and deliberately did not choose, now confirmed on real daemons rather
+than from release notes. Both addresses passed the bech32 prefix check against the
+network each daemon reported — which is the guard that would have caught an
+address still coming from the abandoned regtest datadir.
+
+**WHAT IS STILL OWED, narrowed to two things.** FAUCET COINS, which nothing in
+this tree can get: a tBTC or tLTC faucet is a web form with a captcha or a
+sign-in, so the addresses are printed and the click is the operator's. And
+DROPPING `wallet=regtest_htlc_harness` from both confs, which is a conf edit and
+therefore theirs — this repo deliberately never writes a daemon conf
+(`regtest/daemons.py:797` refuses, because "writing an rpcpassword into a file on
+the operator's behalf is not this harness's business").
+
+**AND THE DATADIRS ARE NAMED `regtest`**, holding testnet chains:
+`~/regtest/btc/testnet4/wallets/desk_hot` and `~/regtest/ltc/testnet4/...` —
+visible in both `loadwallet` refusals above. Same misnomer shape as
+`regtest_htlc_harness`, and NOT proposed for renaming: a live datadir path is in
+every conf, every `-datadir=` flag and every ufw-adjacent habit the operator has,
+so the rename is a large change with no behavioral benefit (the trade rule 10
+refuses for directory layout). Recorded because a wrong name costs somebody an
+hour in six months, and knowing it is wrong is most of the fix.
+
 ### 2. GRC rejects the container's RPC with 403
 **Measured**: `did not answer: 403 Client Error: Forbidden for url:
 http://host.docker.internal:25779/`. Socket open, RPC refused — so `rpcallowip`,
