@@ -604,6 +604,42 @@ by grepping for the NAME rather than the import graph (rule 2).
 - **Four copies of the console recorder in tests** (`test_chain_balances.py:74`,
   `test_xrp_balances.py:240`, `test_atomic_swap_xrp_driver.py:302`, `_QuietConsole:178`),
   three of them byte-identical. Belongs in `tests/conftest.py`.
+  **CLOSED 2026-10-10 (C49–C51), and this entry was wrong in two ways.** Three were
+  byte-identical, as it says — confirmed by `ast.unparse` with docstrings stripped rather
+  than by eye — but `_QuietConsole` is NOT a fourth copy: it discards instead of recording
+  AND its `check()` returns `True` unconditionally rather than the `ok` it was handed, which
+  is a different contract, not a smaller one. The real count, measured over all of `tests/`:
+  **22 console-shaped stub definitions, 19 distinct bodies, 2 bodies at more than one
+  site** — the recorder triple, plus a pair this entry never named (`_QuietRun` twice in
+  `test_grc_htlc_verify.py`, eleven lines under a module-level `_SilentRun` that is a strict
+  superset of both). Now **17 definitions, 17 distinct bodies, 0 duplicated**, held by a
+  CLEAN GATE with no allowlist (`test_step_console.py::test_no_two_console_stubs_in_tests_SHARE_A_BODY`).
+  Two line numbers in this entry were also stale, which is why the closure re-measured
+  rather than trusting them.
+
+- **Eight duplicate class bodies remain in `tests/`, and they are named work rather than a
+  baseline** (rule 19). The console-stub gate above covers console stubs only; the same
+  scan over EVERY base-less class in `tests/` reads **178 definitions, 163 distinct bodies,
+  8 bodies at more than one site, 23 definitions inside those**:
+
+  | sites | lines | where |
+  |---|---|---|
+  | 2 | 10 | `test_payout_concurrency.py:664` / `:710` `LockedWallet` (one file) |
+  | 2 | 6 | `test_solana_chain_check_units.py:629` `Response` / `:2065` `_Throttled` (one file) |
+  | 2 | 5 | `test_desktop_launcher.py:988` `NeverExits` / `:1030` `Alive` (one file) |
+  | 2 | 4 | `test_xrp_adapter.py:552` / `test_xrp_payout_wiring.py:146` `StubResponse` |
+  | 4 | 3 | `test_open_swap.py:333` `Payer` / `test_payable_assets.py:47` `Signs` / `test_supervisor.py:904` + `test_swap_readiness.py:644` `CanSign` |
+  | 2 | 3 | `test_payable_assets.py:54` / `test_supervisor.py:921` `CannotSign` |
+  | 7 | 2 | `_Key` — `test_funding_payload_is_json.py:67` and six in `test_operator_panel.py` |
+  | 2 | 2 | `test_htlc_spend.py:1044` / `:2126` `Holder` (one file) |
+
+  Four of the eight are two copies in ONE file, which is the cheapest kind to fix and the
+  kind nothing had to be greped for to find. `_Key` is `class _Key: address = "ours"` and
+  the judgment there is **not** to hoist it: each copy sits beside a `listtransactions` row
+  in the same test body that spells `"ours"` again, so the value is part of that test's
+  fixture and sharing it would make a reader jump to learn what `address` is. Said here
+  rather than silently skipped. Widening the gate to all classes requires clearing the
+  other seven first.
 - **Five copies of the `spec_from_file_location` entry-point loader**
   (`test_operator_panel.py:50`, `test_solana_payout.py:1199`, `test_grc_htlc_verify.py:58`,
   `test_reclaim_funding.py:43`, `test_icp_replica_entrypoint.py:34`).
@@ -615,6 +651,14 @@ by grepping for the NAME rather than the import graph (rule 2).
   and their `check()` disagrees about whether the verdict is a `bool` or a string.
   Not merged — they are genuinely different consoles — but `step_console.check` now
   REFUSES a non-bool, because crossing them printed OK and exited 0 (C16).
+  **AND I ALMOST MADE IT THREE, 2026-10-10 (C50).** The shared recorder that closed the
+  entry above was first called `RecordingConsole`, which is the name of a different
+  recorder in `tests/test_swap_runners_report_completion.py:96` — whose `check()` puts
+  verdicts in a separate `results` list and NOT in `lines`. Two console stubs under one
+  name disagreeing about what `check()` does is this exact entry, one layer down, created
+  inside the commit consolidating duplicates. Caught before pushing; the shared one is
+  `conftest.TranscriptConsole`, named for the transcript, and both docstrings now name the
+  other.
 - **Six report lines still exceed 150 columns**, measured on one `swap_stack.py
   status` run after C25: 255 and 222 from `swap_terminal/workers/common.py`
   (`database`, `it holds`), and 165/174/285/212 from
@@ -743,6 +787,9 @@ by grepping for the NAME rather than the import graph (rule 2).
 
 | | what | commit |
 |---|---|---|
+| C49 | **Three character-identical console recorders in three files, and a fourth pair nobody had counted.** `ast.unparse` with docstrings stripped, over every base-less class in `tests/`: 22 console-stub definitions, 19 distinct bodies, 2 bodies at more than one site — the `_Recorder`/`_Recorder`/`_PricingRecorder` triple (whose third docstring read *"Same shape as the other recorders here"*, rule 8's finding written down and left in place), and `_QuietRun` TWICE in `test_grc_htlc_verify.py`, eleven lines below a module-level `_SilentRun` that is a strict superset of both. Now `conftest.TranscriptConsole`, instantiated 18 times across the three files it absorbed (13 / 1 / 4, counted) plus twice in its own tests, and both `_QuietRun`s are `_SilentRun()` — the **stricter** stub, because its `node()` raises and that is exactly the guard the copies lacked. **17 definitions, 17 distinct bodies, 0 duplicated**, held by a clean gate with no allowlist plus a non-vacuity floor, since a gate asserting an absence is loudest when its scanner has stopped working. Also merged: the closest non-identical pair in the whole tree, two 15-line `_Run` stubs at **0.99 similarity** differing in one token (the name of the enclosing test's local) | `this commit` |
+| C50 | **And I created the defect I was removing: a second class named `RecordingConsole`.** `tests/test_swap_runners_report_completion.py:96` already had one, whose `check()` records `(label, ok)` into `results` and puts NO check line in `lines`. Two console stubs, one name, disagreeing about what `check()` does — which is `OPEN_FINDINGS`' own "two classes are named `Console`" entry, one layer down, written inside the commit consolidating duplicates. Caught by scanning for stub classes rather than by anything failing. Renamed to `TranscriptConsole` (a transcript: every say and check in one ordered list) against the other's SESSION shape (`step_console.StepSession`, the five-member surface a runner drives); both docstrings name the other, and a test asserts the difference so a later merge cannot flatten them quietly | `this commit` |
+| C51 | **A claim that lived only in a comment, in two of the three copies: "a recorder with fewer arguments would silently accept a call the real Console rejects."** It is now four tests (five cases) in `test_step_console.py`, which is the file whose whole subject is two Consoles that look identical — 8 cases there before this commit, 15 after, the other six being the gate and its floor. Signatures are compared as (name, kind, is-required) per parameter against the real `Console` — names because a checker matches them for anything not positional-only, kinds because a keyword call reaches one and raises in the other, and **is-required because its absence SURVIVED a mutation**: the first version compared names and kinds only, and `def check(self, label, got, expected, ok=None)` passed clean, which is word for word the hazard the comment described. Annotations are deliberately NOT compared and a negative control proves it. Six mutations of the recorder, six caught; two of the gate, two caught | `this commit` |
 | C47 | **The survivor of a five-copy merge was the one thing with no tests.** `conftest.root_entry_point()` absorbed five hand-written `spec_from_file_location` loaders and **nine call sites across seven files** now depend on it — and nothing asserted on any of its guards, so a mutation in it would have reported as thirty `AttributeError`s in files about the ICP replica, the GRC HTLC harness and the teller pane. That is precisely how the unchecked-`spec.loader` hole survived in all five copies long enough to be **diagnosed four separate times**. Six mutations, six caught: dropping the existence check, the `spec is None` guard, the `sys.modules` registration, the cleanup on a failed exec, the two deliberate module names, and re-adding the dead `sys.path.insert`. **The `spec.loader is None` branch is NOT covered and the module docstring says so** with the measurement — a directory, `README.md` and a nonexistent `.py` reach the other two branches, and nothing in this tree produces a spec carrying no loader; a test asserting the SOURCE contains the check would be "the SQL text contains X", which the behavioral-verification principle forbids | `this commit` |
 | C48 | **And my first version of the `sys.path` test was wrong for the reason the whole file is about.** It loaded the REAL `suite_baseline.py` and asserted `sys.path` was unchanged — but every root entry point in this tree does its own `sys.path.insert(0, <root>/swap_terminal)` as its first statement (`suite_baseline.py:80`, `operator_panel.py:59`, `reclaim_funding.py:52`, `grc_htlc_verify.py:79`), because a rule 10 root file cannot import this repository's modules without it. So the assertion measured the MODULE, not the loader, and failed on the first run. It now loads a synthetic entry point that touches nothing, and the comment carries the measurement rather than the assumption | `this commit` |
 | C45 | **The window icon starts a DIFFERENT deployment and said it was "Swap Terminal".** Clicked on the operator's host: gunicorn on **:5000**, host database, `swap workers NOT STARTED HERE`, and **all five chains NOT CONFIGURED** on a machine whose `.env` is fully configured. `config.py:17` records why, deliberately: nothing in the serving path loads a `.env`, because `load_dotenv()` at import makes every later import order-dependent (rule 12). `docker compose` reads `.env` by itself, so the containerized stack gets the chain ports and a host gunicorn gets none. Two deployments, one blind to the operator's config, and the only thing that said so was five lines offering the remedy for a *different* problem ("set BTC_RPC_PORT", when what they have is a `.env` this server does not read). Icon renamed to **Swap Terminal: Window (dev server)** with a Comment naming the port, the reason, and `swapterm up` | `this commit` |

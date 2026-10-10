@@ -285,16 +285,19 @@ def test_the_preimage_is_generated_but_never_used_and_never_returned(monkeypatch
     _with_seed(monkeypatch)
     entry = _entry()
 
-    class _QuietRun:
-        asset = "GRC"
-
-        def step(self, *a, **k):
-            pass
-
-        def say(self, *a, **k):
-            pass
-
-    contract = entry.build_contract(_QuietRun(), 3_000_000)
+    # _SilentRun, NOT a local stub. This file defined `class _QuietRun` TWICE -- here
+    # and in the test below -- with character-identical bodies, eleven lines under a
+    # module-level `_SilentRun` that is a strict SUPERSET of both (it adds `check` and a
+    # `node()` that raises). Rule 8, inside one file, where nothing had to be greped for
+    # to find it.
+    #
+    # AND _SilentRun IS THE STRICTER STUB, which is why it is the survivor rather than
+    # the smaller one: its docstring's reason -- "a test that reaches the daemon is a
+    # test asserting something other than what it says it does, and it should say so
+    # loudly" -- is exactly the guard the two _QuietRun copies lacked. build_contract()
+    # must not reach a daemon, and now a version that did would fail by name here
+    # instead of by AttributeError.
+    contract = entry.build_contract(_SilentRun(), 3_000_000)
     assert "preimage" not in contract and "secret" not in contract
     assert set(contract) == {"participant", "refund", "locktime", "redeem_script", "secret_hash"}
 
@@ -303,16 +306,7 @@ def test_the_contract_locktime_is_the_tip_plus_the_named_constant(monkeypatch):
     _with_seed(monkeypatch)
     entry = _entry()
 
-    class _QuietRun:
-        asset = "GRC"
-
-        def step(self, *a, **k):
-            pass
-
-        def say(self, *a, **k):
-            pass
-
-    contract = entry.build_contract(_QuietRun(), 3_000_000)
+    contract = entry.build_contract(_SilentRun(), 3_000_000)
     assert contract["locktime"] == 3_000_000 + entry.LOCKTIME_BLOCKS_AHEAD
 
 

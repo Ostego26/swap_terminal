@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
 
+from conftest import TranscriptConsole
 from step_console import Console
 
 import atomic_swap_xrp as driver
@@ -184,7 +185,15 @@ def test_the_rate_that_reproduces_the_recorded_run_is_the_INVERSE_of_the_recorde
 
 
 class _QuietConsole:
-    """A console that answers check() and says nothing. The rate path only prints on error."""
+    """A console that answers check() and says nothing. The rate path only prints on error.
+
+    NOT conftest.TranscriptConsole, and not a smaller version of it. Two differences, and
+    each one would change what a test measures: this DISCARDS rather than recording, and
+    its check() returns True UNCONDITIONALLY rather than the `ok` it was handed. A test
+    that swapped it for the shared recorder would start seeing the real verdict, and a
+    test that swapped the recorder for this would stop. The shared one is used four times
+    further down this same file for the pricing path, where the lines are the assertion.
+    """
 
     def check(self, *_args, **_kwargs):
         return True
@@ -316,21 +325,13 @@ def test_MAIN_PASSES_EVERY_FIELD_SwapContext_REQUIRES():
 # ---------------------------------------------------------------------------
 
 
-class _PricingRecorder:
-    """A Console that keeps its lines. Same shape as the other recorders here."""
-
-    def __init__(self):
-        self.lines = []
-
-    def say(self, text):
-        self.lines.append(text)
-
-    def check(self, label, got, expected, ok):
-        self.lines.append(f"CHECK {label} got={got} expected={expected} ok={ok}")
-        return ok
-
-    def text(self):
-        return "\n".join(self.lines)
+# THE RECORDER IS conftest.TranscriptConsole, imported above. "Same shape as the other
+# recorders here" is what this copy's docstring said, which is rule 8's finding stated
+# and then left in place; it was character-identical to the two in
+# tests/test_chain_balances.py and tests/test_xrp_balances.py. `_QuietConsole` above is
+# NOT merged into it: that one discards rather than records AND its check() returns True
+# unconditionally rather than the `ok` it was handed, which is a different contract
+# rather than a smaller one.
 
 
 class _Quote:
@@ -355,7 +356,7 @@ def test_COINGECKO_IS_TRIED_when_coinpaprika_fails_and_the_line_names_which_answ
     MUTATION: return the amount without the source sentence and this fails on
     "CoinGecko". Verified 2026-09-29.
     """
-    recorder = _PricingRecorder()
+    recorder = TranscriptConsole()
     calls = []
 
     def _paprika_dies(chain):
@@ -388,7 +389,7 @@ def test_BOTH_feeds_failing_REFUSES_and_prints_every_reason():
     MUTATION: keep only the last failure and this fails on the CoinPaprika text.
     Verified 2026-09-29.
     """
-    recorder = _PricingRecorder()
+    recorder = TranscriptConsole()
 
     def _dies(message):
         def _attempt(chain):
@@ -417,7 +418,7 @@ def test_a_THIN_market_says_so_beside_the_rate():
     MUTATION: drop the say_how_thin_this_market_is() call and this fails.
     Verified 2026-09-29.
     """
-    recorder = _PricingRecorder()
+    recorder = TranscriptConsole()
     # The measured GRC figures: $299.28 of volume against a derived $7,665,794 cap.
     thin = _Quote("GRC", 7665794.0, 299.2754905121976, derived=True)
 
@@ -443,7 +444,7 @@ def test_an_UNMEASURABLE_depth_says_so_rather_than_printing_nothing():
     That is the one thing it cannot mean -- no cap and no volume is no evidence,
     not good evidence.
     """
-    recorder = _PricingRecorder()
+    recorder = TranscriptConsole()
     blind = _Quote("GRC", None, None)
 
     original = driver._paprika_priced

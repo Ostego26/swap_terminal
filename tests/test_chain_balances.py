@@ -27,6 +27,7 @@ import sys
 import pytest
 from chains import wallet_hint
 from chains.daemon_network import CHAIN_TEST_NETWORKS
+from conftest import TranscriptConsole
 from regtest.daemons import CHAIN_DEFAULTS
 
 SOURCE = pathlib.Path(__file__).resolve().parent.parent / "chain_balances.py"
@@ -71,23 +72,13 @@ FORBIDDEN_CALLS = ("send_to_address", "sendtoaddress", "walletpassphrase", "unlo
 WALLET_METHODS = frozenset({"getbalance", "getbalances", "getwalletinfo"})
 
 
-class _Recorder:
-    """A Console that keeps every line instead of printing it."""
-
-    def __init__(self):
-        self.lines = []
-
-    def say(self, text):
-        self.lines.append(text)
-
-    def check(self, label, got, expected, ok):
-        # step_console.Console.check's real signature. A recorder with fewer
-        # arguments would silently accept a call the real Console rejects.
-        self.lines.append(f"CHECK {label} got={got} expected={expected} ok={ok}")
-        return ok
-
-    def text(self):
-        return "\n".join(self.lines)
+# THE RECORDER IS conftest.TranscriptConsole, imported above. This file held one of
+# three character-identical copies (the others were tests/test_xrp_balances.py and
+# tests/test_atomic_swap_xrp_driver.py, whose own docstring said "Same shape as the
+# other recorders here"). The comment that used to sit inside check() -- "a recorder
+# with fewer arguments would silently accept a call the real Console rejects" -- is now
+# an assertion rather than a comment: tests/test_step_console.py compares the shared
+# recorder's signatures against the real Console's.
 
 
 class _Adapter:
@@ -128,7 +119,7 @@ def test_a_MAINNET_daemon_is_never_asked_about_a_balance_at_all():
     the recorded method list. Verified 2026-09-29.
     """
     adapter = _Adapter({**TESTNET_DAEMON, "getblockchaininfo": {"chain": "main"}})
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     spendable = chain_balances.report_chain(recorder, "GRC", {"GRC": adapter})
 
     assert spendable is None, "a mainnet daemon must not count as a chain that reported"
@@ -142,7 +133,7 @@ def test_a_MAINNET_daemon_is_never_asked_about_a_balance_at_all():
 def test_an_UNREADABLE_network_is_refused_rather_than_assumed_to_be_testnet():
     """Fail closed. chain_network() returns "unknown (...)" and that is not in any allowlist."""
     adapter = _Adapter({"getbalance": 1.0})  # neither getblockchaininfo nor getinfo answers
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     spendable = chain_balances.report_chain(recorder, "BTC", {"BTC": adapter})
 
     assert spendable is None
@@ -163,7 +154,7 @@ def test_a_test_network_daemon_reports_BOTH_halves_of_the_balance():
     Verified 2026-09-29.
     """
     adapter = _Adapter(TESTNET_DAEMON)
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     spendable = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
     out = recorder.text()
 
@@ -186,7 +177,7 @@ def test_an_older_daemon_with_no_getbalances_says_so_instead_of_printing_zero():
     """
     adapter = _Adapter({"getblockchaininfo": {"chain": "testnet"}, "getblockcount": 3296544,
                         "getbalance": 3862.76944485, "getwalletinfo": {"unlocked_until": 0}})
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     spendable = chain_balances.report_chain(recorder, "GRC", {"GRC": adapter})
     out = recorder.text()
 
@@ -262,7 +253,7 @@ def test_a_wallet_holding_more_than_getbalance_admits_says_so_loudly():
     Dropping it fails here on the "HOLDS MORE" line. Verified 2026-10-08.
     """
     adapter = _AccountShadowed(11.00248643, 2000.0)
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     held = chain_balances.report_chain(recorder, "GRC", {"GRC": adapter})
     out = recorder.text()
 
@@ -293,7 +284,7 @@ def test_two_agreeing_readings_print_no_alarm_at_all():
     fixed once, for XRP's get_balance().
     """
     adapter = _AccountShadowed(49.87654321, 49.87654321)
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
     out = recorder.text()
     assert "HOLDS MORE" not in out, out
@@ -307,7 +298,7 @@ def test_an_unreadable_second_opinion_says_so_rather_than_claiming_agreement():
     would claim agreement it never established, which is the fail-open direction.
     """
     adapter = _AccountShadowed(11.00248643, None)
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     held = chain_balances.report_chain(recorder, "GRC", {"GRC": adapter})
     out = recorder.text()
     assert "whole     not reported" in out, out
@@ -335,7 +326,7 @@ def test_an_unreadable_second_opinion_says_so_rather_than_claiming_agreement():
 
 def test_an_unconfigured_chain_names_the_variable_that_is_missing():
     """Rule 14: "no adapter" is useless; which environment variable is actionable."""
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     spendable = chain_balances.report_chain(recorder, "BTC", {})
     assert spendable is None
     assert "BTC_RPC_PORT" in recorder.text(), recorder.text()
@@ -429,7 +420,7 @@ def test_the_ENVIRONMENT_wins_over_the_conf_so_an_explicit_setting_is_never_over
         raise AssertionError("report_chain() consulted the conf for a chain that was configured")
 
     adapter = _Adapter(TESTNET_DAEMON)
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     original = chain_balances.adapter_from_conf
     try:
         chain_balances.adapter_from_conf = _must_not_be_called
@@ -477,7 +468,7 @@ def test_a_chain_with_neither_route_names_BOTH_of_them():
     which understates what was attempted and sends the reader to export three
     variables they may not need.
     """
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     assert chain_balances.report_chain(recorder, "LTC", {}) is None
     out = recorder.text()
     assert "LTC_RPC_*" in out, out
@@ -514,7 +505,7 @@ def test_a_daemon_that_is_NOT_RUNNING_gets_the_command_that_starts_it():
     fails on "litecoind". Verified 2026-09-29.
     """
     adapter = _Unreachable()
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     spendable = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
     out = recorder.text()
 
@@ -604,7 +595,7 @@ def test_a_daemon_with_no_wallet_loaded_NAMES_the_wallets_it_could_load():
     this fails on the wallet name. Verified 2026-09-29.
     """
     adapter = _NoWalletLoaded(["regtest_htlc_harness", "other"])
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     spendable = chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
     out = recorder.text()
 
@@ -635,7 +626,7 @@ def test_a_daemon_with_an_EMPTY_wallet_directory_is_told_to_create_one():
     nothing to report.
     """
     adapter = _NoWalletLoaded([])
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     chain_balances.report_chain(recorder, "LTC", {"LTC": adapter})
     out = recorder.text()
 

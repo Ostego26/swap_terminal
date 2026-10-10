@@ -328,3 +328,86 @@ def poisoned_rpc_table(rpc) -> dict:
 #: that a substring search for them cannot match anything a banner legitimately
 #: prints.
 RPC_CANARIES = {"user": "canary-rpc-user", "password": "canary-rpc-password"}
+
+
+class TranscriptConsole:
+    """A step_console.Console that keeps a TRANSCRIPT instead of printing. The one copy.
+
+    NAMED FOR THE TRANSCRIPT, AND NOT `RecordingConsole`, WHICH IS TAKEN. The first
+    version of this class was called RecordingConsole, which collides with
+    tests/test_swap_runners_report_completion.py:96 -- a different recorder whose
+    `check()` appends `(label, ok)` to a separate `results` list and does NOT put the
+    check in `lines`, and which also carries the runner surface (step, banner, summary,
+    elapsed, failures). Two console stubs under one name, disagreeing about what
+    `check()` does, is the defect OPEN_FINDINGS already records for the two classes
+    called `Console`, and landing it while consolidating duplicates would have been
+    rule 8's failure created on purpose. The distinction the names now carry: this one
+    is a TRANSCRIPT -- every say and every check in one ordered list, readable as text()
+    -- and that one is a SESSION, satisfying step_console.StepSession, the five-member
+    surface a top-level runner drives.
+
+    Three test files each defined this, and `ast.unparse` with docstrings stripped
+    confirms the bodies were character-identical rather than merely similar
+    (measured 2026-10-10 over EVERY base-less class in tests/ -- 22 console-shaped stub
+    definitions, 19 distinct bodies, 2 bodies at more than one site; the other was
+    _QuietRun, twice in one file):
+
+        tests/test_chain_balances.py:74          _Recorder          13 usages
+        tests/test_xrp_balances.py:240           _Recorder           1 usage
+        tests/test_atomic_swap_xrp_driver.py:319 _PricingRecorder    4 usages
+
+    The third's own docstring said "Same shape as the other recorders here", which is
+    the sentence rule 8 asks you to act on rather than write down.
+
+    IT MUST NOT SUBCLASS Console, AND THE REASON IS ALREADY WRITTEN DOWN -- see
+    step_console.StepNarrator's docstring, which argues it at length and names these
+    recorders while doing so: "Their whole value is failing loudly the day a production
+    function reaches for something new; inheriting would have the shipped Console answer
+    instead, silently." So this duplicates the SIGNATURES on purpose and inherits
+    nothing, and the parity is held by a test rather than by a comment --
+    tests/test_step_console.py::test_the_shared_recorder_matches_the_real_Consoles_signature.
+    Both `say` and `check` carry the real parameter NAMES, because
+    step_console.StepReporter matches `ok` by name and pyright refuses a stub that spells
+    it anything else.
+
+    WHY check() RETURNS `ok` RATHER THAN None. Console.check returns its verdict and
+    callers branch on it; a recorder returning None turns every `if console.check(...)`
+    into a false, which is a test passing for a reason unrelated to its claim.
+
+    THE FOUR CONSOLE STUBS THAT ARE NOT THIS ONE, named here because rule 8's harder half
+    is that a reader who finds one copy must be told the others exist and why they are not
+    the same thing. Each of the four names this one back:
+
+      tests/test_atomic_swap_xrp_driver.py:187  _QuietConsole
+          DISCARDS instead of recording, and its check() returns True unconditionally
+          rather than the `ok` it was handed. That is a different contract, not a
+          subset: it is for the rate path, which only prints on error.
+      tests/test_operator_panel.py:1363         _Recorder (nested in one test)
+          Appends the CALL as a tuple -- `("check", *args)` -- because the thing under
+          test is SaysEachLineOnce, a wrapper whose property is which calls reach the
+          console beneath it. A formatted string would destroy the structure that test
+          is about. It also has no text().
+      tests/test_swap_runners_report_completion.py:96  RecordingConsole
+          A SESSION rather than a transcript: it satisfies step_console.StepSession (step,
+          banner, summary and elapsed on top of say and check), and its check() goes into a
+          separate `results` list so its `lines` holds no check lines at all. The two were
+          ONE NAME APART until 2026-10-10 -- this class was called RecordingConsole first,
+          which would have put two console stubs under one name disagreeing about check().
+      tests/test_xrp_balances.py:371            _CountingConsole
+          `say` and NOTHING ELSE, deliberately. step_console.StepNarrator's docstring
+          records the measurement: annotating its caller as the two-method protocol turned
+          19 pyright errors into 7 NEW ones because of this class.
+    """
+
+    def __init__(self):
+        self.lines = []
+
+    def say(self, text):
+        self.lines.append(text)
+
+    def check(self, label, got, expected, ok):
+        self.lines.append(f"CHECK {label} got={got} expected={expected} ok={ok}")
+        return ok
+
+    def text(self):
+        return "\n".join(self.lines)

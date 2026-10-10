@@ -33,6 +33,7 @@ import pathlib
 import sys
 
 import pytest
+from conftest import TranscriptConsole
 
 SOURCE = pathlib.Path(__file__).resolve().parent.parent / "xrp_balances.py"
 TREE = ast.parse(SOURCE.read_text())
@@ -237,23 +238,11 @@ LIVE_ESCROW = {"Account": SENDER, "Destination": DESTINATION, "Amount": "1000000
 LIVE_CANCEL_AFTER_ISO = "2026-09-27T00:39:28"
 
 
-class _Recorder:
-    """A Console that keeps every line instead of printing it."""
-
-    def __init__(self):
-        self.lines = []
-
-    def say(self, text):
-        self.lines.append(text)
-
-    def check(self, label, got, expected, ok):
-        # step_console.Console.check's real signature. A recorder with fewer
-        # arguments would silently accept a call the real Console rejects.
-        self.lines.append(f"CHECK {label} got={got} expected={expected} ok={ok}")
-        return ok
-
-    def text(self):
-        return "\n".join(self.lines)
+# THE RECORDER IS conftest.TranscriptConsole, imported above -- one of three
+# character-identical copies this file held. `_CountingConsole` further down is NOT
+# the same thing and is not merged: it implements `say` and nothing else, which
+# step_console.StepNarrator's docstring records as the measurement that split the
+# protocol ladder in the first place.
 
 
 def _report(address: str, owner_count, escrows):
@@ -265,7 +254,7 @@ def _report(address: str, owner_count, escrows):
             return {"account_objects": escrows}
         raise AssertionError(f"report_account asked for {method}, which it should not")
 
-    recorder = _Recorder()
+    recorder = TranscriptConsole()
     original = xrp_balances.rpc
     try:
         xrp_balances.rpc = _rpc
@@ -382,7 +371,16 @@ def test_the_epoch_offset_has_exactly_one_definition_in_the_tree():
 
 
 class _CountingConsole:
-    """Collects what would be printed, so the test can assert on the SCREEN."""
+    """Collects what would be printed, so the test can assert on the SCREEN.
+
+    NOT conftest.TranscriptConsole, which this file uses above. This implements `say` and
+    NOTHING ELSE on purpose, and step_console.StepNarrator's docstring records the
+    measurement that makes it load-bearing: annotating the function it is handed to
+    (`xrp_balances._sequence_from_the_creating_tx`, which only ever says lines) as the
+    two-method protocol turned 19 pyright errors into 7 new ones, because of this class.
+    Giving it a check() it does not need would make the one-method protocol unreachable
+    and put the 7 back.
+    """
 
     def __init__(self):
         self.lines = []

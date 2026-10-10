@@ -1354,6 +1354,12 @@ def test_A_PAGE_DRAW_DOES_NOT_RESTATE_THE_SAME_FIVE_LINES_FOREVER():
     so an operator who notices the lines stopped is told they stopped on purpose. A line never
     said before is never suppressed, so a new payment or a refusal still arrives at once.
     """
+    # NOT conftest.TranscriptConsole, and the reason is this test's subject. The thing
+    # under test is SaysEachLineOnce, a wrapper, and the property is WHICH CALLS reach
+    # the console beneath it -- so check() has to record the call as a tuple rather than
+    # formatting it into a string, which is exactly what the shared recorder does. It
+    # also needs no text(). Named here and there, because a reader who finds one recorder
+    # has to be told the other exists and why this is not it (rule 8).
     class _Recorder:
         def __init__(self):
             self.lines = []
@@ -1513,6 +1519,47 @@ def test_A_CANDIDATE_OUTPUT_IS_NOT_ANNOUNCED_AS_THE_OPERATORS_FUNDING():
 
 
 TIP_HEIGHT = 3_298_078
+
+
+def _a_run_reporting_one_send(txid: str, tip: dict):
+    """A run whose wallet reports exactly ONE send of `txid`, at a tip the caller can move.
+
+    TWO TESTS BELOW HAD THIS AS A NESTED CLASS and the two bodies were fifteen lines that
+    differed in ONE TOKEN -- the name of the enclosing test's local holding the txid
+    (`unspent` in one, `txid` in the other). Measured 2026-10-10 by unparsing every
+    base-less class in tests/ with docstrings stripped: 184 definitions, 166 distinct
+    bodies, 10 bodies at more than one site -- and this pair came out at 0.99 similarity,
+    the closest NON-identical pair in the tree. A parameter is what that difference was.
+
+    `tip` IS A DICT RATHER THAN AN INT because both callers MOVE the tip mid-test and
+    assert on what the panel does with the new blocks -- that is the property each exists
+    for. Passing an int would freeze it and both tests would still pass, having stopped
+    measuring the thing they are about.
+
+    NOT SHARED WITH THE OTHER SIX `_Run` STUBS IN THIS FILE, and that is measured rather
+    than assumed: the next-closest pair is 0.95 and differs in whether `say` DISCARDS or
+    appends to a recorder, which is a different fixture rather than a different argument.
+    The rest run 0.05 to 0.80. One factory per shape that actually recurs; a factory with
+    a flag for every caller is the duplication wearing a parameter list.
+    """
+    class _Run:
+        asset = "GRC"
+
+        def say(self, *a):
+            pass
+
+        def node(self, wallet=True):
+            return self
+
+        def call(self, method, *params):
+            if method == "getblockcount":
+                return tip["now"]
+            if method == "listtransactions":
+                return [{"address": "ours", "category": "send", "txid": txid, "confirmations": 5}]
+            raise AssertionError(method)
+
+    return _Run()
+
 
 
 class _Console:
@@ -1861,22 +1908,6 @@ def test_an_unspent_output_is_RE_EXAMINED_but_not_RE_WALKED(monkeypatch):
     class _Key:
         address = "ours"
 
-    class _Run:
-        asset = "GRC"
-
-        def say(self, *a):
-            pass
-
-        def node(self, wallet=True):
-            return self
-
-        def call(self, method, *params):
-            if method == "getblockcount":
-                return tip["now"]
-            if method == "listtransactions":
-                return [{"address": "ours", "category": "send", "txid": unspent, "confirmations": 5}]
-            raise AssertionError(method)
-
     tip = {"now": TIP_HEIGHT}
     monkeypatch.setattr(funding_steps, "find_operator_funding", lambda run, key, txid: _Outpoint(txid))
 
@@ -1888,7 +1919,8 @@ def test_an_unspent_output_is_RE_EXAMINED_but_not_RE_WALKED(monkeypatch):
 
     spent_cache: dict = {}
     watermark: dict = {}
-    first = decisions.payment_rows(_Run(), _Key(), spent_cache, watermark)
+    run = _a_run_reporting_one_send(unspent, tip)
+    first = decisions.payment_rows(run, _Key(), spent_cache, watermark)
     assert [r.usable for r in first] == [True]
     assert depths == [6], f"the first look must walk the full depth (confirmations + 1), got {depths}"
     assert watermark == {(unspent, 1): TIP_HEIGHT}, (
@@ -1897,12 +1929,12 @@ def test_an_unspent_output_is_RE_EXAMINED_but_not_RE_WALKED(monkeypatch):
     assert spent_cache == {}, "an unspent outpoint must never reach the SPENT cache"
 
     # The tip has not moved: nothing can have spent it, and it costs nothing to say so.
-    decisions.payment_rows(_Run(), _Key(), spent_cache, watermark)
+    decisions.payment_rows(run, _Key(), spent_cache, watermark)
     assert depths == [6, 0], f"an unchanged tip cost another walk: {depths}"
 
     # Four blocks arrive. Four blocks are examined.
     tip["now"] = TIP_HEIGHT + 4
-    rows = decisions.payment_rows(_Run(), _Key(), spent_cache, watermark)
+    rows = decisions.payment_rows(run, _Key(), spent_cache, watermark)
     assert depths == [6, 0, 4], f"the incremental walk was not sized to the new blocks: {depths}"
     assert watermark == {(unspent, 1): TIP_HEIGHT + 4}, "the watermark did not advance"
     assert "since height" in rows[0].note, (
@@ -1923,22 +1955,6 @@ def test_a_WATERMARK_IS_DELETED_the_moment_the_output_is_found_spent(monkeypatch
     class _Key:
         address = "ours"
 
-    class _Run:
-        asset = "GRC"
-
-        def say(self, *a):
-            pass
-
-        def node(self, wallet=True):
-            return self
-
-        def call(self, method, *params):
-            if method == "getblockcount":
-                return tip["now"]
-            if method == "listtransactions":
-                return [{"address": "ours", "category": "send", "txid": txid, "confirmations": 5}]
-            raise AssertionError(method)
-
     tip = {"now": TIP_HEIGHT}
     monkeypatch.setattr(funding_steps, "find_operator_funding", lambda run, key, txid_: _Outpoint(txid_))
     monkeypatch.setattr(funding_steps, "find_the_spender",
@@ -1946,14 +1962,15 @@ def test_a_WATERMARK_IS_DELETED_the_moment_the_output_is_found_spent(monkeypatch
 
     spent_cache: dict = {}
     watermark: dict = {}
-    decisions.payment_rows(_Run(), _Key(), spent_cache, watermark)
+    run = _a_run_reporting_one_send(txid, tip)
+    decisions.payment_rows(run, _Key(), spent_cache, watermark)
     assert watermark, "precondition: it was recorded as unspent"
 
     # Now a block spends it.
     tip["now"] = TIP_HEIGHT + 1
     monkeypatch.setattr(funding_steps, "find_the_spender",
                         lambda run, outpoint, max_depth=0: ("what-consumed-it", "SPENT"))
-    rows = decisions.payment_rows(_Run(), _Key(), spent_cache, watermark)
+    rows = decisions.payment_rows(run, _Key(), spent_cache, watermark)
     assert [r.usable for r in rows] == [False]
     assert spent_cache == {(txid, 1): "what-consumed-it"}
     assert watermark == {}, (

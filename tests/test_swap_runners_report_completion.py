@@ -94,13 +94,27 @@ FINAL_BANNER = "== WHAT CHANGED HANDS =="
 
 
 class RecordingConsole:
-    """A console that records instead of printing. Satisfies step_console.StepReporter.
+    """A console that records instead of printing. Satisfies step_console.StepSession.
 
     NOT step_console.Console AND NOT A SUBCLASS OF IT, deliberately. The point of
     a recorder is to fail loudly the day a runner reaches for something the stub
     does not have; inheriting would have the shipped Console answer instead,
     silently. See step_console.StepNarrator's docstring, which argues this at
     length for the protocols added the same day.
+
+    NOT conftest.TranscriptConsole EITHER, AND THE DIFFERENCE IS check(). That one is
+    the shared recorder for the SAY-AND-CHECK rung (step_console.StepReporter): it puts
+    every say and every check into one ordered list, readable as `text()`. This one
+    keeps verdicts in a separate `results` list so `summary()` can do the real Console's
+    arithmetic, and `lines` therefore contains NO check lines -- an assertion written
+    against one that is moved to the other will pass or fail for the wrong reason. It is
+    also a rung higher: step, banner, summary and elapsed are what a top-level runner
+    drives, which is why this stub is here rather than shared. Named in both places
+    because a reader who finds one recorder has to be told the other exists (rule 8).
+
+    IT ALSO SATISFIES StepSession RATHER THAN StepReporter, which this docstring used to
+    say. Both are true -- StepSession extends StepReporter -- but the weaker claim is
+    the misleading one in a file whose whole subject is the five-member runner surface.
     """
 
     def __init__(self) -> None:
