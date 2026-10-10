@@ -82,6 +82,7 @@ from microfortnights import format_duration  # noqa: E402  -- same sys.path.inse
 
 from swap_terminal.stack_authority import (  # noqa: E402
     CANDID_UI_CANISTER_NAME,
+    DECLARED_BRIDGE_SUBNET,
     REPLICA_STATE_PATH,
     REPLICA_STATUS_URL,
     STACK_PORTS,
@@ -89,6 +90,7 @@ from swap_terminal.stack_authority import (  # noqa: E402
     WEB_PORT_CANDIDATES,
     CanisterLookups,
     GitReading,
+    bridge_subnet_verdict,
     canister_lookup_names,
     canister_lookup_verdict,
     chain_exit_code,
@@ -553,6 +555,12 @@ def cmd_status(files: tuple[str, ...]) -> int:
             say(f"                    {line}")
     say("")
     print_listeners(report_listeners(files))
+    say("")
+    # THE BRIDGE, BEFORE THE WORKERS AND THE WEB PROBE, because a wrong subnet is what
+    # makes those two report a healthy stack that cannot reach a single chain -- the
+    # firewall rule that admits this subnet is what the container's RPC crosses. Rule
+    # 14: the parameter that decides the answer, printed beside the answer.
+    _say_bridge_state(files)
     say("")
     say("  workers           supervisor.py owns these; this is its own report")
     supervisor.main(["status", "--run-dir", str(supervisor.DEFAULT_RUN_DIR)])
@@ -1309,6 +1317,124 @@ def replica_state(files: tuple[str, ...]) -> tuple[str, str, list[str]]:
             container, "", f"docker inspect exited {inspected.returncode}: "
                            f"{inspected.stderr.strip() or '(no stderr)'}")
     return replica_state_verdict(container, inspected.stdout)
+
+
+def _docker_read(args: list[str], what: str) -> tuple[str, str]:
+    """One plain `docker <args>` read, as (stdout, reason). Exactly one of them is empty.
+
+    NOT `compose()`: these are `docker inspect` and `docker network inspect`, neither
+    of which accepts the `-f <compose file>` flags compose() prepends.
+
+    A REASON RATHER THAN AN EXCEPTION, because every failure here has to become
+    `unknown` on one line of a status report. A read that raised would end the status
+    run, and rule 14's complaint about that is specific: a diagnostic that dies tells
+    the operator nothing about the thing they asked about, including whether it is
+    fine.
+    """
+    try:
+        done = subprocess.run(  # noqa: S603 -- no shell; argv is this file's literals plus an id or name docker itself printed
+            [_DOCKER, *args], capture_output=True, text=True, check=False,
+            timeout=_CANISTER_ID_TIMEOUT_SECONDS,
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        return "", f"{type(error).__name__} running {what}"
+    if done.returncode != 0:
+        return "", (f"{what} exited {done.returncode}: "
+                    f"{done.stderr.strip() or '(no stderr)'}")
+    return done.stdout, ""
+
+
+def _web_container_id(files: tuple[str, ...]) -> tuple[str, str]:
+    """The running web container's id, as (id, reason). Both empty means "none exists".
+
+    THREE OUTCOMES AND NOT TWO, which is the distinction the caller needs: an id, a
+    failure to ask, and a successful ask that found nothing. The third is `up` has not
+    run yet and is not a problem; collapsing it into the second would report "nobody
+    checked" for a stack that is simply down.
+    """
+    try:
+        listed = compose(["ps", "-q", "web"], files=files, timeout=_CANISTER_ID_TIMEOUT_SECONDS)
+    except (subprocess.TimeoutExpired, OSError) as error:
+        return "", f"{type(error).__name__} running docker compose ps"
+    if listed.returncode != 0:
+        return "", (f"docker compose ps exited {listed.returncode}: "
+                    f"{listed.stderr.strip() or '(no stderr)'}")
+    lines = listed.stdout.strip().splitlines()
+    return (lines[0].strip() if lines else ""), ""
+
+
+def _observed_bridge_subnet(files: tuple[str, ...]) -> tuple[str, str]:
+    """The subnet the compose bridge is ACTUALLY on, as (subnet, reason).
+
+    Three reads, none of which writes: `docker compose ps -q web` for a container id,
+    `docker inspect` for the NAME of the network it is on, and `docker network
+    inspect` for that network's subnet.
+
+    WHY THREE AND NOT ONE. The obvious one-liner is `docker network inspect
+    swap_terminal_default`, and it is wrong for the reason replica_state()'s docstring
+    already gives about volume names: compose prefixes the network with the PROJECT,
+    which is the directory name by default and something else entirely under
+    COMPOSE_PROJECT_NAME. A hardcoded name would report `absent` -- "nothing is wrong,
+    `up` will create it" -- on a correctly running stack whose project is named
+    differently, which is the quietest possible false all-clear. Asking the container
+    which network it is on is project-name independent by construction.
+
+    THE WEB SERVICE, because it is the one that reaches the daemons across this bridge
+    and therefore the one the firewall rule is about. `harness` and `abstergo` sit on
+    the same network and would answer the same, and neither is always up.
+    """
+    container, reason = _web_container_id(files)
+    if reason or not container:
+        return "", reason
+    named, reason = _docker_read(
+        ["inspect", "--format", "{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}",
+         container],
+        "docker inspect",
+    )
+    if reason:
+        return "", reason
+    network = named.strip().splitlines()[0].strip() if named.strip() else ""
+    if not network:
+        return "", (f"container {container[:12]} reports no network at all, which should be "
+                    f"impossible for a service with a published port")
+    subnet, reason = _docker_read(
+        ["network", "inspect", "--format", "{{range .IPAM.Config}}{{.Subnet}}{{end}}", network],
+        "docker network inspect",
+    )
+    return subnet.strip(), reason
+
+
+def bridge_state(files: tuple[str, ...]) -> tuple[str, str, list[str]]:
+    """Ask docker which subnet the compose bridge is on, and judge it. Changes nothing.
+
+    The read is _observed_bridge_subnet(); the DECISION is
+    stack_authority.bridge_subnet_verdict(), which is pure and is tested with seeded
+    subnets rather than with a docker daemon (rule 10). This function is the two-line
+    seam between them, and that split is why the extraction happened: the first
+    version had the reads and the verdict in one body and ruff's PLR0911 flagged it at
+    seven returns -- which rule 12 says to fix by extracting the decision, not by
+    raising the ceiling.
+    """
+    subnet, reason = _observed_bridge_subnet(files)
+    return bridge_subnet_verdict(subnet, reason)
+
+
+def _say_bridge_state(files: tuple[str, ...]) -> None:
+    """The subnet line, printed in `status` beside everything else it echoes.
+
+    Rule 14's "echo the parameters that decide the answer": which subnet the bridge is
+    on decides whether the operator's firewall rule admits it, and that rule is what
+    decides whether any chain is reachable from inside the container at all. It was
+    nowhere on screen before 2026-10-10 -- docker-compose.yml now pins the subnet, and
+    a pin nobody reads back is the verify-the-deploy-not-the-artifact defect rule 13 is
+    about.
+    """
+    say(f"  bridge subnet     is the compose network on {DECLARED_BRIDGE_SUBNET}, "
+        f"which the firewall rule names?")
+    status, headline, detail = bridge_state(files)
+    say(f"  {('OK' if status == 'matches' else status.upper()):<16}  {headline}")
+    for line in detail:
+        say(f"                    {line}")
 
 
 def _say_replica_state(files: tuple[str, ...]) -> None:

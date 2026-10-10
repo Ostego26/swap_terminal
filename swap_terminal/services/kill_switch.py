@@ -445,6 +445,80 @@ class CaseInsensitiveHeaders(Protocol):
 #: buttons render, it needs to be something an attacker cannot create.
 _CONTAINER_MARKERS = (Path("/.dockerenv"), Path("/run/.containerenv"))
 
+#: The environment variable carrying the HOST side of a container's port publish.
+#: Named like operator_panel.MAY_STOP_VARIABLE and for the same reason: the decision
+#: is made outside the browser, by somebody editing a file in a shell, and cannot be
+#: made by anything that merely reaches the port.
+PUBLISH_HOST_VARIABLE = "SWAP_TERMINAL_PUBLISH_HOST"
+
+#: What is known about the publish mapping. Four outcomes, and the two that are not
+#: "it is loopback" are different reasons rather than one -- an operator who set the
+#: variable to the wrong thing and an operator who never set it need different
+#: sentences, which is the distinction `bech32_prefix_status()` and `sync_verdict()`
+#: are both shaped around (chains/daemon_network.py).
+PUBLISH_LOOPBACK = "publish-loopback"
+PUBLISH_EXPOSED = "publish-exposed"
+PUBLISH_NOT_DECLARED = "publish-not-declared"
+PUBLISH_NO_MAPPING = "publish-no-mapping"
+
+#: Every outcome, so a reader and a test have one list rather than four literals.
+PUBLISH_VERDICTS = (PUBLISH_LOOPBACK, PUBLISH_EXPOSED, PUBLISH_NOT_DECLARED, PUBLISH_NO_MAPPING)
+
+
+def publish_verdict(facts: RequestFacts) -> str:
+    """What is known about the HOST side of this container's port publish.
+
+    WHY THIS EXISTS AT ALL, and the operator made the call on 2026-10-10 after a
+    session in which /admin's controls refused on the only deployment they have.
+    Inside a container `SWAP_TERMINAL_HOST` must be 0.0.0.0 -- 127.0.0.1 there is the
+    CONTAINER's loopback and the published port then reaches nothing, measured
+    2026-10-05 and recorded in docker-compose.web.yml beside the port it publishes.
+    So the socket scan sees 0.0.0.0, correctly, and refuse_off_box() refused -- on a
+    deployment whose publish is `127.0.0.1:5100:5000` and is therefore private.
+
+    THE PUBLISH IS NOT VISIBLE FROM IN HERE. `ports:` maps at the docker proxy, on
+    the host; nothing in the container's /proc, environment or socket table
+    distinguishes `127.0.0.1:5100:5000` from a bare `5100:5000`. That is why this
+    reads a DECLARATION rather than measuring anything, and why the name says
+    PUBLISH_HOST rather than anything implying evidence.
+
+    WHAT MAKES THE DECLARATION HONEST IS THE COUPLING, not the variable. The compose
+    file interpolates ONE token into both sides:
+
+        ports:        "${SWAP_TERMINAL_PUBLISH_HOST:-127.0.0.1}:${...PORT:-5100}:5000"
+        environment:  SWAP_TERMINAL_PUBLISH_HOST: "${SWAP_TERMINAL_PUBLISH_HOST:-127.0.0.1}"
+
+    so the value this function reads IS the host that docker bound, and changing the
+    publish changes the declaration in the same edit because they are the same edit.
+    A separate boolean -- PUBLISH_IS_LOOPBACK=1 -- would have been two copies of one
+    fact, agreeing on the day it was written and drifting after (rule 8), and the
+    drift would have been invisible in exactly the direction that matters.
+
+    IT CAN STILL BE WRONG AND THE LIMIT IS NAMED RATHER THAN GLOSSED: `docker run -p
+    0.0.0.0:5100:5000` by hand, or a further -f file that overrides `ports:` and not
+    `environment:`, breaks the coupling and nothing here can tell. What the coupling
+    buys is that the ORDINARY path cannot lie.
+
+    NOT A CONTAINER MEANS NO MAPPING, AND THAT IS THE IMPORTANT BRANCH. On a host
+    there is no publish: the bind IS the reachability, and a host process that
+    exported this variable would otherwise hand itself a pass. So the variable is
+    read only when a container marker is present, and `in_a_container()` is
+    presence-only (see its docstring) -- which means this is the one place that flag
+    does change a verdict, and it changes it only in the direction where a publish
+    mapping exists to be declared.
+
+    ABSENT AND EMPTY BOTH MEAN NOT DECLARED. `os.getenv` returns "" for a variable
+    that is set and empty, and "" is not a host; refuse_off_box() already carries
+    that measurement for SWAP_TERMINAL_HOST, where an empty value makes gunicorn bind
+    ALL interfaces. Fail closed on both.
+    """
+    if not facts.in_container:
+        return PUBLISH_NO_MAPPING
+    raw = facts.env.get(PUBLISH_HOST_VARIABLE)
+    if raw is None or not raw.strip():
+        return PUBLISH_NOT_DECLARED
+    return PUBLISH_LOOPBACK if raw.strip() in LOOPBACK_HOSTS else PUBLISH_EXPOSED
+
 
 def in_a_container() -> bool:
     """Is this process inside a container? Presence of a runtime's own marker file.
@@ -630,6 +704,12 @@ def refuse_off_box(facts: RequestFacts) -> list[str]:
     that is correct under both.
     """
     refusals: list[str] = []
+    # READ ONCE, so the two branches below cannot disagree -- they are the same
+    # question asked of the bind and of the intent, and a publish that is loopback
+    # answers both. NOT consulted for the two NOT-ESTABLISHED branches: a declared
+    # publish says who can reach the port, not what this process is bound to, and a
+    # control surface that cannot establish its own bind must refuse regardless.
+    publish = publish_verdict(facts)
 
     if facts.listening is None:
         refusals.append(
@@ -640,12 +720,12 @@ def refuse_off_box(facts: RequestFacts) -> list[str]:
         )
     else:
         exposed = sorted(host for host in facts.listening if not is_loopback_host(host))
-        if exposed:
+        if exposed and publish != PUBLISH_LOOPBACK:
             refusals.append(
                 f"This server is listening on {', '.join(exposed)}, and nothing on this surface "
                 f"authenticates a caller -- so a start or stop button here would let anyone who "
                 f"can reach the port stop the desk or arm a payout worker. "
-                + (_CONTAINER_REMEDY if facts.in_container else _HOST_REMEDY)
+                + _remedy_for(publish)
             )
         elif not facts.listening:
             refusals.append(
@@ -658,7 +738,14 @@ def refuse_off_box(facts: RequestFacts) -> list[str]:
     raw = facts.env.get("SWAP_TERMINAL_HOST")
     if raw is not None:
         host = raw.strip()
-        if host not in LOOPBACK_HOSTS:
+        # THE SAME RELAXATION, AND IT HAS TO BE THE SAME OR THE CHANGE DOES NOTHING.
+        # Inside a container SWAP_TERMINAL_HOST is 0.0.0.0 *by design* -- compose sets
+        # it, because the alternative binds the container's own loopback and the
+        # published port reaches nothing. So this branch fired on exactly the
+        # deployment the socket branch fired on, for the same reason, and relaxing one
+        # without the other would have left the controls refused with the reason
+        # changed. Both are gated on the publish, once, read above.
+        if host not in LOOPBACK_HOSTS and publish != PUBLISH_LOOPBACK:
             # "CONFIGURED TO BE REACHABLE OFF-BOX" IS NOT TRUE OF A CONTAINER and the
             # sentence used to say it flatly. Inside one, 0.0.0.0 is what reaches the
             # docker proxy and says nothing about who can reach THAT.
@@ -680,21 +767,35 @@ def refuse_off_box(facts: RequestFacts) -> list[str]:
     return refusals
 
 
-#: WHAT TO DO ABOUT A NON-LOOPBACK BIND, per deployment. Two sentences because the
-#: right answer is opposite in the two, and the wrong one breaks the page.
+#: WHAT TO DO ABOUT A NON-LOOPBACK BIND, per deployment. THREE sentences since
+#: 2026-10-10, where there were two: a host, a container that never declared its
+#: publish, and a container whose declared publish is not loopback. Three, because the
+#: right instruction differs in each and the wrong one breaks the page -- which is not
+#: hypothetical here, it is what this block was last rewritten for.
 #:
 #: The host remedy is the original and is correct there: gunicorn binds what
 #: SWAP_TERMINAL_HOST says, so setting it to loopback makes the deployment private.
 #:
-#: THE CONTAINER REMEDY CANNOT BE "SET IT TO LOOPBACK", because that binds the
+#: NEITHER CONTAINER REMEDY MAY BE "SET IT TO LOOPBACK", because that binds the
 #: CONTAINER's loopback and the published port then reaches nothing --
-#: docker-compose.web.yml:102 records exactly that outcome, measured 2026-10-05.
-#: What actually makes a container private is the PUBLISH, on the host, and the
-#: container cannot see it. So the remedy names the check rather than an edit, and
-#: says plainly that this page cannot do it.
+#: docker-compose.web.yml records exactly that outcome, measured 2026-10-05, and a
+#: security refusal printed that instruction on the operator's host. What makes a
+#: container private is the PUBLISH, on the host, which the container cannot see.
 _HOST_REMEDY = (
     "Set SWAP_TERMINAL_HOST=127.0.0.1 and restart the server."
 )
+
+#: THE CONTAINER FACTS, IN ONE PLACE, because both container remedies need all three
+#: and they were one string until the verdict stopped being the same for every
+#: container. Splitting the tail off and sharing the preamble is rule 8's answer to
+#: "two messages that agree about most of it"; keeping two full copies is how they
+#: drift. Every clause is load-bearing and two are measurements:
+#:
+#:   do NOT set the loopback bind   measured 2026-10-05, the UI came up empty.
+#:   the PUBLISH is what decides    it maps on the host, so that is the thing to read.
+#:   how to read it                 `docker compose port web 5000`. A remedy this
+#:                                  process cannot carry out has to say where it CAN
+#:                                  be carried out (rule 14).
 _CONTAINER_REMEDY = (
     "THIS PROCESS IS IN A CONTAINER, so do NOT set SWAP_TERMINAL_HOST=127.0.0.1 -- inside a "
     "container that binds the CONTAINER's loopback and the published port then reaches nothing "
@@ -702,9 +803,66 @@ _CONTAINER_REMEDY = (
     "0.0.0.0 is the correct bind here. What decides whether this is private is the PUBLISH on "
     "the host, which this process CANNOT SEE: `ports: 127.0.0.1:5100:5000` restricts it to the "
     "host's loopback, a bare `5100:5000` does not. Check it with `docker compose port web 5000` "
-    "or by reading the compose ports line. These controls still refuse, because from in here "
-    "those two are indistinguishable and this surface arms a payout worker."
+    "or by reading the compose ports line."
 )
+
+#: The tail for a container whose publish was never declared, and it is the half that
+#: is NEW. Until 2026-10-10 the only honest tail was "these controls still refuse,
+#: because from in here those two are indistinguishable and this surface arms a payout
+#: worker" -- true, and nothing an operator could act on. Now there is something to
+#: do, so the sentence says it instead.
+_PUBLISH_NOT_DECLARED_REMEDY = _CONTAINER_REMEDY + (
+    f" NOTHING HERE DECLARED IT, which is why these controls are refusing. {PUBLISH_HOST_VARIABLE} "
+    "carries the host side of that publish, and docker-compose.web.yml already sets it from the "
+    "SAME ${} token it builds the ports line from -- so a stack brought up with `swapterm up` "
+    "carries it and cannot disagree with its own publish. A deployment that reaches this image "
+    "another way (a hand-written `docker run -p`, a further -f file overriding `ports:` and not "
+    "`environment:`) has to declare it deliberately, which is the point: it is an assertion about "
+    "the host, made in a file, and not something a browser request can set."
+)
+
+#: And the tail for a container that DID declare a publish, and declared one that is
+#: not loopback. Nothing is ambiguous about this one: it was declared, and what it
+#: says is "anyone who can route to this host can reach this port."
+_PUBLISH_EXPOSED_REMEDY = _CONTAINER_REMEDY + (
+    f" {PUBLISH_HOST_VARIABLE} DECLARES A NON-LOOPBACK PUBLISH, so the refusal above is not a "
+    "false positive -- it is the configuration. Publish on 127.0.0.1 (the default in "
+    "docker-compose.web.yml) and bring the stack back up, or put an authenticating proxy in front "
+    "of this port. Nothing on this surface authenticates a caller, so there is no third option "
+    "that keeps the buttons."
+)
+
+#: Remedy per verdict, TOTAL over every verdict that can reach _remedy_for().
+#: PUBLISH_LOOPBACK is absent on purpose and a test asserts the other three are
+#: present -- the completeness-asserted-map shape this repo already uses for
+#: chains/daemon_network.bech32_prefix_status(), where the alternative was a renderer
+#: that invented a fact about XRP for a case nobody had enumerated.
+_REMEDY_FOR: dict[str, str] = {
+    PUBLISH_NO_MAPPING: _HOST_REMEDY,
+    PUBLISH_NOT_DECLARED: _PUBLISH_NOT_DECLARED_REMEDY,
+    PUBLISH_EXPOSED: _PUBLISH_EXPOSED_REMEDY,
+}
+
+
+def _remedy_for(publish: str) -> str:
+    """Which remedy a non-loopback bind gets, given what is known about the publish.
+
+    A MAP PLUS ONE FUNCTION rather than a conditional chain, for rule 10's reason:
+    this is the decision, and it is callable with each verdict in a test that needs no
+    socket, no container and no server.
+
+    PUBLISH_LOOPBACK NEVER REACHES THIS, because every caller checks for it before
+    building a refusal -- a remedy for a refusal that did not happen is a sentence
+    with no reader. It is therefore ABSENT from the map rather than mapped to
+    something harmless, so a test can assert the map is total over the three that DO
+    arrive, which is the check that catches a fifth verdict added without a remedy.
+
+    THE FALLBACK IS A SENTENCE AND NOT A KeyError, and that is not belt-and-braces: a
+    KeyError here is a 500 on a page that was in the middle of refusing, which turns a
+    working security refusal into an outage. The completeness test is what makes the
+    fallback unreachable; the fallback is what makes an unreachable case harmless.
+    """
+    return _REMEDY_FOR.get(publish, _CONTAINER_REMEDY)
 
 
 def refuse_cross_origin(facts: RequestFacts) -> list[str]:
@@ -831,9 +989,55 @@ def bind_evidence(facts: RequestFacts) -> list[str]:
     return [
         f"listening sockets (this process, from /proc/net/tcp): {sockets}",
         f"SWAP_TERMINAL_HOST: {raw!r} ({'the 127.0.0.1 default applies' if raw is None else 'set explicitly'})",
+        *_publish_evidence(facts),
         "the Host header and the request's peer address are NOT treated as evidence of the bind -- "
         "a caller writes both. They are checked separately, and only to refuse.",
     ]
+
+
+#: WHAT THE PUBLISH LINE SAYS, per verdict. Written out rather than assembled,
+#: because the one an operator is most likely to be reading -- PUBLISH_LOOPBACK, the
+#: case where the buttons WORK -- is the one that has to carry what it does not
+#: prove. A page that permits an action should say what it accepted, not only what
+#: it checked (rule 14), and this is the sentence that would otherwise exist only in
+#: a docstring nobody reading the page can see.
+_PUBLISH_EVIDENCE = {
+    PUBLISH_LOOPBACK: (
+        "declared loopback -- this is a DECLARATION and not a measurement: the publish maps on the "
+        "HOST and no container can read it. It is the same ${} token docker-compose.web.yml builds "
+        "the ports line from, so the ordinary path cannot disagree with itself; a hand-written "
+        "`docker run -p` can. WHAT IT DOES NOT COVER: every other container on this compose bridge "
+        "reaches this port DIRECTLY, without going through the publish at all -- that is "
+        "OPEN_FINDINGS finding 4, it is not addressed by a loopback publish, and the services "
+        "sharing this bridge are the ones in the -f files (abstergo, harness, icp-replica, web)."
+    ),
+    PUBLISH_EXPOSED: "declared NON-loopback -- the refusal above is the declared configuration, not a false positive",
+    PUBLISH_NOT_DECLARED: "NOT DECLARED -- in a container, and nothing says which host address the port is published on",
+    PUBLISH_NO_MAPPING: "not applicable -- no container marker, so there is no publish mapping and the bind IS the reachability",
+}
+
+
+def _publish_evidence(facts: RequestFacts) -> list[str]:
+    """The publish line for bind_evidence(), or nothing at all on a bare host.
+
+    SILENT ON A HOST, DELIBERATELY. `PUBLISH_NO_MAPPING` is the overwhelmingly common
+    case for anyone running this outside compose, and a line saying "not applicable"
+    on every render is the noise rule 14 warns trains a reader to skip the block that
+    matters -- the same argument `trust_note()` makes for not printing GNOME advice at
+    an LXQt operator (C43). It is printed when the variable IS set on a host, because
+    then somebody set it expecting it to do something and it does not.
+    """
+    verdict = publish_verdict(facts)
+    if verdict == PUBLISH_NO_MAPPING and facts.env.get(PUBLISH_HOST_VARIABLE) is None:
+        return []
+    raw = facts.env.get(PUBLISH_HOST_VARIABLE)
+    line = f"{PUBLISH_HOST_VARIABLE}: {raw!r} -- {_PUBLISH_EVIDENCE[verdict]}"
+    if verdict == PUBLISH_NO_MAPPING and raw is not None:
+        line += (
+            " (SET BUT IGNORED: it is read only inside a container, because on a host there is no "
+            "publish to declare and a process could otherwise hand itself a pass)"
+        )
+    return [line]
 
 
 def stop_proof(outcome: str, pid: int | None, gone: bool, signals: list[str]) -> str:

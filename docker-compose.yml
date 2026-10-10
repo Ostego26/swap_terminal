@@ -304,3 +304,43 @@ services:
     # reaper's own timeout would SIGKILL the harness mid-proof, which turns a
     # provable stop into an unprovable one by configuration.
     stop_grace_period: 65s
+
+
+# ---------------------------------------------------------------------------
+# THE BRIDGE, PINNED. Added 2026-10-10 at the operator's instruction.
+#
+# WHAT WAS WRONG: there was no `networks:` block in any of the three -f files, so
+# compose created `<project>_default` and DOCKER CHOSE THE SUBNET from its pool.
+# The operator's firewall has a rule that names `172.18.0.0/16` by hand -- the
+# rule that lets this bridge reach the chain daemons' RPC on the host. Two copies
+# of one fact, in two systems that cannot see each other, agreeing on the day they
+# were written. That is rule 8's defect with a delay on it, and the delay here is
+# "the next time docker assigns a different /16".
+#
+# HOW IT FAILS IS THE PART THAT MAKES IT WORTH PINNING. A subnet reassignment does
+# not error. The firewall rule simply stops matching, and the symptom is every
+# chain reading NOT CONFIGURED in a container whose environment is perfectly
+# correct -- which is a diagnosis this session has already paid for once, from the
+# other direction (a host gunicorn that reads no .env, C45). Rule 13's "verify the
+# artifact, not the deploy" applies to a network as much as to a view.
+#
+# THE DEFAULT IS THE VALUE THE FIREWALL RULE ALREADY NAMES, deliberately: pinning
+# it to anything else would silently require the operator to edit ufw, and a change
+# that needs a second change somewhere else to stay correct is the thing this block
+# exists to remove. Overridable for a host where 172.18/16 is taken.
+#
+# WHAT THIS DOES NOT FIX, said rather than implied: every service in these files
+# shares this one bridge -- abstergo, harness, icp-replica and web -- so a rule
+# that admits the subnet admits all four, which is OPEN_FINDINGS finding 4 and is
+# not addressed by pinning the address. A /16 is also 65,534 addresses for four
+# containers; narrowing it is a follow-up that requires a ufw edit in the same
+# change, which is why it is not done here unasked.
+#
+# VERIFY IT RATHER THAN TRUST IT: `swap_stack.py status` reads the live subnet back
+# out of docker and prints it beside this declared value, because a pin nobody
+# reads back is the same defect as a deploy nobody verifies.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: "${SWAP_TERMINAL_BRIDGE_SUBNET:-172.18.0.0/16}"

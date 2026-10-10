@@ -89,15 +89,36 @@ services:
     # therefore 0.0.0.0, and the 127.0.0.1 in this publish line is what keeps it
     # off-box rather than the bind address.
     #
-    # THAT HAS A CONSEQUENCE THE OPERATOR MUST DECIDE (design doc §6.2, decision
-    # 4): kill_switch.refuse_off_box() reads the bind from /proc and REFUSES on a
-    # 0.0.0.0 bind. Inside a container that refusal is a false positive -- the
-    # publish is loopback-only -- but it is a refusal, and the controls stay
-    # refused until somebody changes refuse_off_box() to understand a namespace.
-    # That change is not made here: it would weaken a guard on the order path to
-    # suit a deployment, which is backwards.
+    # THAT HAD A CONSEQUENCE THE OPERATOR HAD TO DECIDE (design doc §6.2, decision
+    # 4), AND ON 2026-10-10 THEY DECIDED IT. The paragraph that used to sit here
+    # said the change "is not made here: it would weaken a guard on the order path
+    # to suit a deployment, which is backwards." That was the right default and it
+    # is no longer the instruction. What it described: kill_switch.refuse_off_box()
+    # reads the bind from /proc and REFUSED on a 0.0.0.0 bind, which inside a
+    # container is a false positive -- the publish is loopback-only -- but a
+    # refusal nonetheless, so /admin's controls stayed refused on the operator's
+    # only deployment.
+    #
+    # THE HOST SIDE OF THIS PUBLISH IS NOW A VARIABLE, AND IT IS THE SAME VARIABLE
+    # THE CONTAINER IS TOLD. That coupling is the whole design and the reason this
+    # is not a promise the container makes about itself:
+    #
+    #     ports:        "${SWAP_TERMINAL_PUBLISH_HOST:-127.0.0.1}:...:5000"
+    #     environment:  SWAP_TERMINAL_PUBLISH_HOST: "${SWAP_TERMINAL_PUBLISH_HOST:-127.0.0.1}"
+    #
+    # ONE token builds the docker-proxy bind and ONE token reaches the process, so
+    # the declaration cannot drift from the publish -- change the publish and the
+    # declaration changes with it, in the same edit, because they are the same
+    # edit. A separate `PUBLISH_IS_LOOPBACK=1` flag would have been two copies of
+    # one fact (rule 8), agreeing the day it was written.
+    #
+    # IT IS STILL A CLAIM AND NOT EVIDENCE, and kill_switch says so where it reads
+    # it: `docker run -p 0.0.0.0:5100:5000` by hand, or a fourth -f file that
+    # overrides `ports:` and not `environment:`, breaks the coupling and this
+    # process cannot tell. What it buys is that the ORDINARY path -- this file,
+    # edited here -- cannot lie.
     ports:
-      - "127.0.0.1:${SWAP_TERMINAL_HOST_PORT:-5100}:5000"
+      - "${SWAP_TERMINAL_PUBLISH_HOST:-127.0.0.1}:${SWAP_TERMINAL_HOST_PORT:-5100}:5000"
 
     # 127.0.0.1 INSIDE A CONTAINER IS THE CONTAINER, AND THAT IS WHY THE UI CAME
     # UP EMPTY. Measured on the operator's host 2026-10-05: GET / answered HTTP
@@ -133,6 +154,18 @@ services:
       ST_WORKER_RUN_DIR: /runtime
       SWAP_TERMINAL_HOST: "0.0.0.0"
       SWAP_TERMINAL_PORT: "5000"
+      # THE HOST SIDE OF THE PUBLISH ABOVE, PASSED IN BECAUSE THE CONTAINER CANNOT
+      # SEE IT. `ports:` maps on the HOST, at the docker proxy; from in here
+      # `127.0.0.1:5100:5000` and a bare `5100:5000` are indistinguishable, and
+      # kill_switch.refuse_off_box() must not guess which (it arms a payout
+      # worker). Same ${} token as the ports line thirty lines up, so this is the
+      # publish rather than a claim about it -- see the comment there.
+      #
+      # ABSENT MEANS REFUSE, not "assume the default". A deployment that reaches
+      # this image without this variable -- `docker run`, a hand-written compose
+      # file -- is a deployment whose publish nobody declared, and the controls
+      # refuse exactly as they did before this existed.
+      SWAP_TERMINAL_PUBLISH_HOST: "${SWAP_TERMINAL_PUBLISH_HOST:-127.0.0.1}"
       # 2, matching gunicorn.conf.py's own default. Its closing section records why
       # it is not 4: two payout workers paid the same swap twice, 2 sends for 1
       # swap. The bottleneck here is SQLite's single writer lock, not CPU.

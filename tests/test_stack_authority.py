@@ -64,6 +64,7 @@ from swap_terminal.stack_authority import (
     WEB_PORT_CANDIDATES,
     WEB_SURFACES,
     GitReading,
+    bridge_subnet_verdict,
     candid_url,
     canister_lookup_names,
     canister_lookup_verdict,
@@ -3411,3 +3412,170 @@ def test_a_CURRENT_container_with_no_probes_stays_quiet():
     )
     _status, _headline, detail = chain_reachability_verdict(body)
     assert "OLDER CODE" not in "\n".join(detail)
+
+
+# ---------------------------------------------------------------------------
+# THE BRIDGE SUBNET, 2026-10-10. docker-compose.yml pins it because the
+# operator's firewall has a rule naming 172.18.0.0/16 by hand, and before the pin
+# docker chose the subnet from its own pool -- two copies of one fact, in two
+# systems that cannot see each other (rule 8).
+#
+# Pinning is half of it. bridge_subnet_verdict() is the other half: rule 13's
+# verify-the-artifact-not-the-deploy, applied to a network.
+# ---------------------------------------------------------------------------
+
+
+def test_the_bridge_subnet_MATCHES_when_the_live_network_is_the_pinned_one():
+    """The good case, and it still says what it did NOT check.
+
+    This function cannot read ufw and must not imply it did. The headline says which
+    subnet is live; the detail says the rule has to name that one, and says plainly
+    that the rule itself was not read.
+    """
+    status, headline, detail = bridge_subnet_verdict(stack_authority.DECLARED_BRIDGE_SUBNET)
+    assert status == "matches"
+    assert stack_authority.DECLARED_BRIDGE_SUBNET in headline
+    blob = " ".join(detail)
+    assert "does NOT read the firewall" in blob, "it must not imply it checked the rule"
+
+
+def test_a_DRIFTED_subnet_names_both_and_says_the_symptom_is_SILENT():
+    """The case the pin exists for, and the detail is the whole value of the line.
+
+    A reassignment does not error. The firewall rule stops matching and every chain
+    reads NOT CONFIGURED in a container whose environment is perfectly correct -- a
+    shape this repository has already paid for once from the other direction (C45, a
+    host gunicorn that reads no .env). An operator who sees only "drifted" goes
+    looking at the chain config; one who sees the symptom named goes to the firewall.
+    """
+    status, headline, detail = bridge_subnet_verdict("172.21.0.0/16")
+    assert status == "drifted"
+    assert "172.21.0.0/16" in headline and stack_authority.DECLARED_BRIDGE_SUBNET in headline, (
+        "both subnets, because the difference between them IS the finding"
+    )
+    blob = " ".join(detail)
+    assert "NOT CONFIGURED" in blob and "silent" in blob
+    assert "down" in blob and "up" in blob, "and the remedy, which recreates the network"
+
+
+def test_NO_NETWORK_YET_is_a_result_and_not_a_problem():
+    """`up` has not run. Nothing is wrong, and the line says so rather than printing nothing.
+
+    Rule 14: "(none) is a result". A blank region here is ambiguous between "the
+    network is fine" and "the check broke", which is the distinction the whole
+    verdict exists to make.
+    """
+    status, headline, detail = bridge_subnet_verdict("")
+    assert status == "absent"
+    assert "does not exist yet" in headline
+    assert stack_authority.DECLARED_BRIDGE_SUBNET in " ".join(detail), (
+        "and it names what `up` will create, so the operator can check the rule in advance"
+    )
+
+
+def test_an_UNREADABLE_subnet_NEVER_reads_as_a_match():
+    """Fail closed. A false "your rule is still right" is worse than no line at all.
+
+    The same reason replica_state_verdict() has an `unknown` that is not `on_volume`:
+    an operator who is told the check passed stops looking, and the thing they stop
+    looking at is why no chain is reachable.
+    """
+    status, headline, detail = bridge_subnet_verdict("", reason="docker inspect exited 1")
+    assert status == "unknown"
+    assert "COULD NOT READ" in headline
+    assert "docker inspect exited 1" in headline, "with the actual reason, not a paraphrase"
+    assert "nobody checked" in " ".join(detail)
+
+
+def test_a_reason_WINS_over_a_subnet_that_was_also_returned():
+    """Both arguments present is a contradiction, and it resolves to `unknown`.
+
+    A caller that hit an error AND had a stale value in hand must not get a verdict
+    about the stale value. This is the ordering that makes the fail-closed property
+    hold in the one case where it could be lost, and it is asserted rather than
+    trusted to the order of the ifs staying as it is.
+    """
+    status, _headline, _detail = bridge_subnet_verdict(
+        stack_authority.DECLARED_BRIDGE_SUBNET, reason="docker compose ps exited 1")
+    assert status == "unknown", "a reason means the read failed, whatever else came back with it"
+
+
+def test_the_declared_subnet_is_spelled_ONCE_and_the_compose_file_is_the_authority():
+    """One spelling here, and a compose gate that asserts the file agrees with it.
+
+    The same hazard REPLICA_STATE_PATH's comment names: a second spelling that drifts
+    reports drift where there is none, or the reverse. This file is the READER; the
+    authority is docker-compose.yml, and
+    tests/test_compose_chain_variables.py::test_the_compose_bridge_SUBNET_IS_PINNED_and_not_left_to_docker
+    is what holds the two together. Asserted here so that deleting that gate shows up
+    as this test losing its partner rather than as nothing.
+    """
+    compose = (Path(__file__).resolve().parent.parent / "docker-compose.yml").read_text()
+    found = re.findall(r"subnet:\s+\"\$\{SWAP_TERMINAL_BRIDGE_SUBNET:-([0-9./]+)\}\"", compose)
+    assert found == [stack_authority.DECLARED_BRIDGE_SUBNET], (
+        f"docker-compose.yml pins {found!r} and stack_authority spells "
+        f"{stack_authority.DECLARED_BRIDGE_SUBNET!r}. One of the two is wrong, and the compose "
+        f"file is the authority"
+    )
+
+
+def test_the_bridge_READ_asks_the_CONTAINER_which_network_it_is_on(monkeypatch):
+    """Project-name independence, which is the defect the three-read chain avoids.
+
+    The obvious one-liner is `docker network inspect swap_terminal_default`, and under
+    COMPOSE_PROJECT_NAME it inspects a network that does not exist -- which returns
+    nothing and reads as `absent`, "nothing is wrong, `up` will create it", on a
+    correctly running stack. That is the quietest possible false all-clear, and it is
+    the same hazard replica_state()'s docstring records for volume names.
+
+    So this seeds a network whose name has NOTHING to do with this directory and
+    asserts the read still finds its subnet -- which it can only do by asking the
+    container.
+    """
+    calls: list[list[str]] = []
+
+    def _compose(args, files, check=False, timeout=None):
+        calls.append(["compose", *args])
+        return subprocess.CompletedProcess(args, 0, stdout="deadbeefcafe\n", stderr="")
+
+    def _docker(args, what):
+        calls.append(["docker", *args])
+        if args[0] == "inspect":
+            return "someone_elses_project_default\n", ""
+        return "172.18.0.0/16\n", ""
+
+    monkeypatch.setattr(swap_stack, "compose", _compose)
+    monkeypatch.setattr(swap_stack, "_docker_read", _docker)
+    assert swap_stack.bridge_state(("docker-compose.yml",))[0] == "matches"
+    assert any("someone_elses_project_default" in arg for call in calls for arg in call), (
+        "the network name came from the container, not from this directory's name"
+    )
+
+
+def test_a_DOWN_stack_reads_as_absent_and_not_as_a_failed_check(monkeypatch):
+    """`docker compose ps -q web` printing nothing is "no container", not "could not ask".
+
+    Three outcomes rather than two, and this is the third. Collapsing it into the
+    failure case would report "nobody checked" every time the stack is simply down,
+    which is the false alarm that teaches an operator to skip the line (rule 13).
+    """
+    monkeypatch.setattr(
+        swap_stack, "compose",
+        lambda args, files, check=False, timeout=None: subprocess.CompletedProcess(args, 0, "", ""))
+    status, headline, _detail = swap_stack.bridge_state(("docker-compose.yml",))
+    assert status == "absent" and "does not exist yet" in headline
+
+
+def test_a_FAILING_docker_read_becomes_unknown_rather_than_raising(monkeypatch):
+    """A status report must survive a missing docker, and must not claim a match.
+
+    A read that raised would end the run and the operator would learn nothing about
+    anything below this line -- which is rule 14's complaint about a diagnostic that
+    dies. Every failure becomes a reason string, and a reason is `unknown`.
+    """
+    monkeypatch.setattr(
+        swap_stack, "compose",
+        lambda args, files, check=False, timeout=None: (_ for _ in ()).throw(OSError("no docker")))
+    status, headline, _detail = swap_stack.bridge_state(("docker-compose.yml",))
+    assert status == "unknown"
+    assert "OSError" in headline, "and it names what failed rather than shrugging"

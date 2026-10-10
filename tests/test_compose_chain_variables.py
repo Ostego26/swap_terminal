@@ -69,6 +69,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PY = REPO_ROOT / "swap_terminal" / "config.py"
 WEB_COMPOSE = REPO_ROOT / "docker-compose.web.yml"
+BASE_COMPOSE = REPO_ROOT / "docker-compose.yml"
 
 #: config.py's own accessors. Matched by name so a new `_env_*` helper is included
 #: without this pattern being touched.
@@ -313,4 +314,121 @@ def test_the_HOSTNET_overlay_points_ICP_at_LOOPBACK_not_at_the_service_name():
     assert "127.0.0.1" in icp_line, f"the override must be loopback, not a service name: {icp_line.strip()}"
     assert "icp-replica" not in icp_line, (
         f"the overlay still names the compose service, which does not resolve here: {icp_line.strip()}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# THE PUBLISH COUPLING, added 2026-10-10 with the /admin controls loosening.
+#
+# kill_switch.publish_verdict() reads SWAP_TERMINAL_PUBLISH_HOST and, inside a
+# container, lets a loopback value turn off a security refusal. That is only
+# defensible because the variable IS the publish rather than a promise about it:
+# compose interpolates ONE token into both the host side of `ports:` and the
+# environment entry, so the declaration cannot drift from the mapping.
+#
+# NOTHING IN PYTHON WOULD CATCH THE DECOUPLING. Edit the ports line and leave the
+# environment entry, and the guard goes on being satisfied by a value that no
+# longer describes anything -- a security control reading a stale fact, with no
+# test failing and nothing on the page to say so. This file is where a compose
+# invariant can be asserted, and these are the two halves of that one.
+# ---------------------------------------------------------------------------
+
+#: The host side of the web service's publish: `- "<host>:<port>:5000"`.
+_PUBLISH_LINE = re.compile(
+    r'^\s+-\s+"(?P<host>\$\{SWAP_TERMINAL_PUBLISH_HOST:-[^}]*\}):'
+    r'\$\{SWAP_TERMINAL_HOST_PORT:-\d+\}:5000"\s*$',
+    re.MULTILINE,
+)
+#: The environment entry that tells the container what that host side was.
+_PUBLISH_ENV = re.compile(
+    r'^\s+SWAP_TERMINAL_PUBLISH_HOST:\s+"(?P<host>\$\{SWAP_TERMINAL_PUBLISH_HOST:-[^}]*\})"\s*$',
+    re.MULTILINE,
+)
+
+
+def test_the_publish_host_is_ONE_TOKEN_in_both_the_ports_line_and_the_environment():
+    """The invariant the /admin loosening rests on, asserted where it can actually break.
+
+    Both halves must be the SAME `${...}` expression -- not merely both loopback, not
+    merely both present. Two expressions that happen to agree are two copies of one
+    fact (rule 8), and the whole argument for reading a declaration instead of
+    measuring the publish is that there is only one fact here.
+    """
+    text = WEB_COMPOSE.read_text(encoding="utf-8")
+    ports = _PUBLISH_LINE.search(text)
+    env = _PUBLISH_ENV.search(text)
+    assert ports, (
+        f"no publish line matching {_PUBLISH_LINE.pattern!r} in {WEB_COMPOSE.name}. The host side "
+        f"of the publish must be the SWAP_TERMINAL_PUBLISH_HOST token, because "
+        f"kill_switch.publish_verdict() reads that variable to decide whether /admin's controls "
+        f"may be used at all"
+    )
+    assert env, (
+        f"{WEB_COMPOSE.name} publishes a port but passes no SWAP_TERMINAL_PUBLISH_HOST, so the "
+        f"container cannot tell a loopback publish from a wide-open one and /admin's controls "
+        f"will refuse -- which is the state this coupling exists to get out of"
+    )
+    assert ports.group("host") == env.group("host"), (
+        f"the ports line says {ports.group('host')!r} and the environment says "
+        f"{env.group('host')!r}. These must be the same token: a security control reads the "
+        f"environment one and treats it as the publish"
+    )
+
+
+def test_the_publish_DEFAULTS_to_loopback_so_an_unset_shell_is_private():
+    """The default decides what an operator who sets nothing gets, and it must be private.
+
+    `swapterm up` in a shell with no SWAP_TERMINAL_PUBLISH_HOST exported is the
+    ordinary case. Defaulting to anything but loopback would publish the desk's
+    unauthenticated admin page on every interface for anybody who did not know to set
+    a variable -- and would ALSO satisfy the guard that reads it, because the two are
+    one token. The coupling is what makes this default load-bearing rather than tidy.
+    """
+    # LOCAL, and the reason is this file's own header: it reads config.py and the
+    # compose files AS TEXT and imports no application module, so the gate runs even
+    # when swap_terminal/ will not import. One assertion needs the authority on what
+    # counts as loopback, and hand-writing a second list of loopback hosts beside
+    # loopback.LOOPBACK_HOSTS is the duplication rule 8 is about -- so the import is
+    # here, where it costs that one test and not the file.
+    from loopback import is_loopback_host  # noqa: PLC0415 -- checked: see the comment above
+
+    ports = _PUBLISH_LINE.search(WEB_COMPOSE.read_text(encoding="utf-8"))
+    assert ports
+    default = ports.group("host").split(":-", 1)[1].rstrip("}")
+    assert is_loopback_host(default), (
+        f"the publish defaults to {default!r}, which loopback.is_loopback_host() does not accept. "
+        f"An operator who exports nothing would publish /admin off-box"
+    )
+
+
+#: The bridge subnet, declared once in the base file so the firewall rule that names
+#: it cannot be outlived by a docker reassignment.
+_SUBNET = re.compile(
+    r'^\s+-\s+subnet:\s+"\$\{SWAP_TERMINAL_BRIDGE_SUBNET:-(?P<default>[0-9./]+)\}"\s*$',
+    re.MULTILINE,
+)
+
+
+def test_the_compose_bridge_SUBNET_IS_PINNED_and_not_left_to_docker():
+    """A subnet docker chooses is a subnet a hand-written firewall rule outlives.
+
+    The operator's ufw rule names 172.18.0.0/16 by hand -- the rule that lets this
+    bridge reach the chain daemons' RPC on the host. Before this was pinned there was
+    no `networks:` block at all, so docker picked from its pool and the two facts
+    agreed only by luck.
+
+    HOW IT FAILS IS WHY IT IS PINNED: a reassignment does not error. The rule stops
+    matching and every chain reads NOT CONFIGURED in a container whose environment is
+    perfectly correct, which is a diagnosis this repository has already paid for once
+    from the other direction (C45, a host gunicorn that reads no .env).
+    """
+    found = _SUBNET.search(BASE_COMPOSE.read_text(encoding="utf-8"))
+    assert found, (
+        f"{BASE_COMPOSE.name} does not pin the default network's subnet. Without it docker "
+        f"assigns one from its pool, and the operator's firewall rule names a subnet by hand"
+    )
+    assert found.group("default") == "172.18.0.0/16", (
+        f"the pinned default is {found.group('default')!r}. It is the value the operator's ufw "
+        f"rule already names, deliberately: pinning it to anything else silently requires a "
+        f"second change in a second system to stay correct, which is the coupling this removes"
     )

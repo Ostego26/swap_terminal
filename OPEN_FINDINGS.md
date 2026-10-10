@@ -199,13 +199,36 @@ went in together — `host.docker.internal` resolves to `172.17.0.1` (the DEFAUL
 bridge's gateway, which the container is not attached to) while the container is
 `172.18.0.3`. Narrowing it costs one restart and bears directly on finding 3.
 
-### 3. The ufw rule names a subnet docker can reassign
+### 3. The ufw rule names a subnet docker can reassign — PINNED 2026-10-10 (C52)
 `172.18.0.0/16` was read from `docker network inspect` on 2026-10-09. Docker
 assigns compose network subnets when it creates them, so a `down` + `up` can hand
 out a different one and the rule goes **silently** stale — straight back to
 dropped packets and 30s hangs, with no new symptom to explain it.
 **Remedy**: pin the subnet in `docker-compose.yml`. Not done: it recreates the
 network and both containers. Say the word.
+
+**THE WORD WAS SAID, 2026-10-10.** `docker-compose.yml` now carries a `networks:`
+block — there was none in any of the three `-f` files, which is why docker was
+choosing — pinning the default network to
+`${SWAP_TERMINAL_BRIDGE_SUBNET:-172.18.0.0/16}`. The default is **the value rule 20
+already names**, deliberately: pinning it to anything else would silently require a
+ufw edit to stay correct, and a change that needs a second change in a second system
+is what this entry is about.
+
+**AND IT IS READ BACK, which is the half that was missing from the remedy as
+written.** A pin nobody verifies is rule 13's deploy-not-the-artifact defect wearing
+different clothes, so `swap_stack.py status` now prints the live subnet beside the
+declared one: `OK`, `DRIFTED` (naming both, and naming the silent symptom — every
+chain reads NOT CONFIGURED in a container whose environment is correct), `ABSENT`
+(no network yet; `up` will create it from the pin) or `UNKNOWN`, which never reads as
+a match. The read asks the **container** which network it is on rather than guessing
+`<project>_default`, because under `COMPOSE_PROJECT_NAME` a hardcoded name inspects
+nothing and reports `ABSENT` on a running stack — the quietest possible false
+all-clear, and the same hazard `replica_state()` already records for volume names.
+
+**IT TAKES A `down` + `up` TO APPLY.** Docker will not move an existing network onto
+a new subnet; until then `status` reports DRIFTED and says so. Nothing on that
+network is durable state.
 
 **THE SOURCE ADDRESS IS SETTLED, 2026-10-10, AND I HAD IT RIGHT THEN TALKED
 MYSELF OUT OF IT.** The container sends from **172.18.0.3** — its own address, as
@@ -236,6 +259,15 @@ operator calls — one recreates containers, the other edits `.env`.
 `docker-compose.yml` also defines `abstergo` and `harness`, and `up`'s own banner
 warns a bare `docker compose up` starts the test harness. On that bridge the
 harness would reach the hot wallets exactly as the web container does.
+
+**AND SINCE 2026-10-10 IT IS ALSO THE RESIDUAL EXPOSURE OF THE /admin CONTROLS
+(C53), which is why it is now printed on the page rather than only written here.**
+The controls accept a container whose publish is declared loopback — but the publish
+is only the HOST path to port 5000. Every other container on this bridge reaches that
+port **directly**, without going through the publish at all. `bind_evidence()` says
+so in the line that explains why the buttons are enabled, and names this finding.
+Unchanged by pinning the subnet: that fixes which addresses the firewall admits from
+outside, not who is already inside.
 
 ### 5. `/admin` and `/` share one port
 The links between the two surfaces are gone (`125cacd`) and typing `/admin` still
@@ -787,6 +819,9 @@ by grepping for the NAME rather than the import graph (rule 2).
 
 | | what | commit |
 |---|---|---|
+| C52 | **The compose bridge had no `networks:` block at all, so docker chose the subnet — and the operator's firewall rule names one by hand.** Two copies of one fact in two systems that cannot see each other (rule 8), and the failure mode is silent: a reassignment does not error, the rule simply stops matching, and every chain reads NOT CONFIGURED in a container whose environment is perfectly correct. Pinned to `${SWAP_TERMINAL_BRIDGE_SUBNET:-172.18.0.0/16}` — **the value ufw rule 20 already names**, because pinning it to anything else silently requires a second edit in a second system. **And read back, which the remedy as written omitted**: `swap_stack.py status` prints the live subnet beside the declared one via `bridge_subnet_verdict()` (matches / drifted / absent / unknown, and unknown never reads as a match). The read asks the CONTAINER which network it is on rather than guessing `<project>_default`, because under `COMPOSE_PROJECT_NAME` a hardcoded name inspects nothing and reports ABSENT on a running stack — the quietest false all-clear, and the hazard `replica_state()` already records for volume names | `this commit` |
+| C53 | **/admin's controls refused on the operator's only deployment, and the operator decided it.** Inside a container `SWAP_TERMINAL_HOST` must be 0.0.0.0 — 127.0.0.1 binds the container's own loopback and the published port reaches nothing (measured 2026-10-05) — so the socket scan saw 0.0.0.0 and `refuse_off_box()` refused, on a stack whose publish is `127.0.0.1:5100:5000` and is therefore private. **The design is the COUPLING, not the variable**: compose interpolates ONE `${}` token into both the host side of `ports:` and `SWAP_TERMINAL_PUBLISH_HOST`, so the declaration cannot drift from the publish — a separate `PUBLISH_IS_LOOPBACK=1` flag would have been two copies of one fact, agreeing the day it was written. Fails closed on absent, empty and non-loopback; reads the variable **only behind a container marker**, so a host cannot declare its own privacy; does NOT relax either not-established branch, because a declared publish says who can reach the port and nothing about what this process is bound to. Seven mutations, seven caught. A compose gate asserts the two halves are the same token — nothing in Python would catch the decoupling, and a security control reading a stale fact fails silently | `this commit` |
+| C54 | **And the remedy I first wrote for it dropped three sentences the old one carried.** Two tests I wrote yesterday failed, pinning `do NOT set SWAP_TERMINAL_HOST=127.0.0.1`, `the UI came up empty` and `docker compose port web 5000` — the measurement, the instruction and the check. My replacement had all the new information and none of the old, which is a message regression a reader would only notice while standing in front of the refusal. Fixed by keeping the container facts as a shared preamble and splitting only the TAIL per verdict, so the two remedies cannot drift. **The tests were the only thing that noticed**, which is the argument for having written them before the change they now constrain | `this commit` |
 | C49 | **Three character-identical console recorders in three files, and a fourth pair nobody had counted.** `ast.unparse` with docstrings stripped, over every base-less class in `tests/`: 22 console-stub definitions, 19 distinct bodies, 2 bodies at more than one site — the `_Recorder`/`_Recorder`/`_PricingRecorder` triple (whose third docstring read *"Same shape as the other recorders here"*, rule 8's finding written down and left in place), and `_QuietRun` TWICE in `test_grc_htlc_verify.py`, eleven lines below a module-level `_SilentRun` that is a strict superset of both. Now `conftest.TranscriptConsole`, instantiated 18 times across the three files it absorbed (13 / 1 / 4, counted) plus twice in its own tests, and both `_QuietRun`s are `_SilentRun()` — the **stricter** stub, because its `node()` raises and that is exactly the guard the copies lacked. **17 definitions, 17 distinct bodies, 0 duplicated**, held by a clean gate with no allowlist plus a non-vacuity floor, since a gate asserting an absence is loudest when its scanner has stopped working. Also merged: the closest non-identical pair in the whole tree, two 15-line `_Run` stubs at **0.99 similarity** differing in one token (the name of the enclosing test's local) | `this commit` |
 | C50 | **And I created the defect I was removing: a second class named `RecordingConsole`.** `tests/test_swap_runners_report_completion.py:96` already had one, whose `check()` records `(label, ok)` into `results` and puts NO check line in `lines`. Two console stubs, one name, disagreeing about what `check()` does — which is `OPEN_FINDINGS`' own "two classes are named `Console`" entry, one layer down, written inside the commit consolidating duplicates. Caught by scanning for stub classes rather than by anything failing. Renamed to `TranscriptConsole` (a transcript: every say and check in one ordered list) against the other's SESSION shape (`step_console.StepSession`, the five-member surface a runner drives); both docstrings name the other, and a test asserts the difference so a later merge cannot flatten them quietly | `this commit` |
 | C51 | **A claim that lived only in a comment, in two of the three copies: "a recorder with fewer arguments would silently accept a call the real Console rejects."** It is now four tests (five cases) in `test_step_console.py`, which is the file whose whole subject is two Consoles that look identical — 8 cases there before this commit, 15 after, the other six being the gate and its floor. Signatures are compared as (name, kind, is-required) per parameter against the real `Console` — names because a checker matches them for anything not positional-only, kinds because a keyword call reaches one and raises in the other, and **is-required because its absence SURVIVED a mutation**: the first version compared names and kinds only, and `def check(self, label, got, expected, ok=None)` passed clean, which is word for word the hazard the comment described. Annotations are deliberately NOT compared and a negative control proves it. Six mutations of the recorder, six caught; two of the gate, two caught | `this commit` |

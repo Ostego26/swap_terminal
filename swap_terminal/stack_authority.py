@@ -2410,3 +2410,90 @@ def surface_map(
         f"{_MAP_CONTINUATION}broken page. CANDID/DEBUG = a developer surface and not a page at all.",
     ]
     return header + web_surface_lines(serving_port) + canister_surface_lines(canister_ids, absent, ui_canister_id)
+
+
+# =============================================================================
+# THE BRIDGE SUBNET, READ BACK. Added 2026-10-10 with the pin that declares it.
+#
+# docker-compose.yml pins the default network's subnet, because the operator's
+# firewall has a rule naming 172.18.0.0/16 by hand -- the rule that lets this
+# bridge reach the chain daemons' RPC on the host. Two copies of one fact, in two
+# systems that cannot see each other.
+#
+# PINNING IT IS HALF THE FIX. The other half is rule 13's: verify the artifact,
+# not the deploy. A declaration nobody reads back is exactly the shape that failed
+# twelve times in a row printing exit_code=0, and a subnet that silently drifted
+# would present as every chain reading NOT CONFIGURED in a container whose
+# environment is perfectly correct -- a diagnosis this repository has already paid
+# for once from the other direction (C45).
+#
+# FAIL CLOSED. `unknown` never reads as `matches`: a false "your firewall rule is
+# still right" is worse than no line, because the operator stops looking.
+#
+# WHAT THIS CANNOT DO, said rather than implied: it cannot read ufw. It reports
+# the live subnet and says that the rule has to name it. Comparing them would need
+# root on the host and is not this file's business.
+# =============================================================================
+
+#: What docker-compose.yml pins, and the ONE place this file spells it. A second
+#: spelling that drifted would report drift where there is none, or the reverse --
+#: the same hazard REPLICA_STATE_PATH's comment names. The compose file is the
+#: authority; this is the reader, and tests/test_compose_chain_variables.py asserts
+#: the compose default is this value rather than trusting this line.
+DECLARED_BRIDGE_SUBNET = "172.18.0.0/16"
+
+
+def bridge_subnet_verdict(observed: str, reason: str = "") -> tuple[str, str, list[str]]:
+    """Is the live compose bridge on the subnet the firewall rule names?
+
+    Pure. Takes the subnet docker reports (empty if the network does not exist yet)
+    and returns (status, headline, detail) in the shape _say_* prints.
+
+      matches    the live subnet IS the declared one. The firewall rule that names
+                 it is still correct.
+      drifted    the network exists on a DIFFERENT subnet. The rule no longer
+                 matches it, and the symptom is silent: chains read NOT CONFIGURED.
+      absent     no network yet. `up` will create it from the pin, so nothing is
+                 wrong -- and the line says so rather than printing nothing, because
+                 "(none) is a result" and a blank region is ambiguous (rule 14).
+      unknown    could not be read. Never reads as `matches`.
+
+    THE SUBNET IS COMPARED AS A STRING AND THAT IS DELIBERATE rather than lazy. The
+    question is not "does this address range overlap the rule's" -- it is "does the
+    live network carry the exact CIDR a human typed into a firewall rule". A /17
+    inside the declared /16 would overlap and the rule would still admit it, but it
+    is also not what was declared, and reporting it as a match would hide a compose
+    file that is no longer describing the network. An equal-or-not answer is the one
+    an operator can act on without a subnet calculator.
+    """
+    if reason:
+        return (
+            "unknown",
+            f"COULD NOT READ the compose bridge's subnet: {reason}",
+            ["so this does NOT say the firewall rule still matches -- it says nobody checked.",
+             "the read, by hand, is: docker compose ps -q web  ->  docker inspect <id> --format",
+             "'{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}'  ->  docker network",
+             "inspect <name> --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'."],
+        )
+    if not observed:
+        return (
+            "absent",
+            "the compose bridge does not exist yet",
+            [f"`up` will create it on {DECLARED_BRIDGE_SUBNET}, which docker-compose.yml pins,",
+             "so the firewall rule that names that subnet will match it."],
+        )
+    if observed == DECLARED_BRIDGE_SUBNET:
+        return (
+            "matches",
+            f"the bridge is on {observed}, which is what docker-compose.yml pins",
+            ["a firewall rule admitting this subnet to the daemons' RPC is still correct.",
+             "this does NOT read the firewall: it says which subnet the rule has to name."],
+        )
+    return (
+        "drifted",
+        f"the bridge is on {observed}, NOT the pinned {DECLARED_BRIDGE_SUBNET}",
+        ["a firewall rule naming the pinned subnet does NOT match this one, and the symptom is",
+         "silent -- every chain reads NOT CONFIGURED in a container whose environment is correct.",
+         "the network was created before the pin existed, or by a compose file without it.",
+         "`down` then `up` recreates it from the pin; nothing in it is durable state."],
+    )

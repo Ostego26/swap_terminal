@@ -1151,19 +1151,37 @@ def test_the_operator_page_LINKS_to_the_controls_and_says_what_they_do(client):
 _ALL_INTERFACES = "0.0.0.0"  # noqa: S104 -- checked: a test fixture value, never a bind. See above.
 
 
-def _exposed(*, in_container: bool) -> kill_switch.RequestFacts:
+def _exposed(*, in_container: bool, publish: str | None = None) -> kill_switch.RequestFacts:
+    """A 0.0.0.0 bind, with the publish declaration as an argument rather than a second fixture.
+
+    `publish=None` is "the variable is absent", which is what every caller written
+    before 2026-10-10 means and is why the default is None rather than loopback: a
+    fixture whose default RELAXED the guard would have quietly turned every existing
+    test in this file into a test of the permitted path.
+    """
+    env = {"SWAP_TERMINAL_HOST": _ALL_INTERFACES}
+    if publish is not None:
+        env[kill_switch.PUBLISH_HOST_VARIABLE] = publish
     return kill_switch.RequestFacts(
-        env={"SWAP_TERMINAL_HOST": _ALL_INTERFACES},
+        env=env,
         listening={_ALL_INTERFACES},
         in_container=in_container,
     )
 
 
 def test_a_container_is_STILL_REFUSED_exactly_as_a_host_is():
-    """THE MOST IMPORTANT ASSERTION HERE. The wording changed; the verdict did not.
+    """An UNDECLARED container refuses exactly as a host does. Still the default.
 
-    If this ever passes with zero refusals, a security control has been loosened
-    by a commit whose stated purpose was to fix a sentence.
+    WHAT THIS TEST USED TO CLAIM, AND WHY THE CLAIM NARROWED. It said: "If this ever
+    passes with zero refusals, a security control has been loosened by a commit whose
+    stated purpose was to fix a sentence." On 2026-10-10 the operator decided the
+    loosening -- see publish_verdict() -- so that sentence would now be read by a
+    future reader as "nobody ever loosened this", which is the wrong-comment bug
+    (rule 16) on the test that exists to notice a loosening.
+
+    The claim that survives is narrower and is the one worth holding: a container that
+    DECLARED NOTHING is indistinguishable from an exposed host, and refuses as one.
+    The permitted case is its own test below and names the declaration it requires.
     """
     assert kill_switch.refuse_off_box(_exposed(in_container=True)), (
         "a container with a 0.0.0.0 bind must still refuse -- the publish mapping is "
@@ -1254,3 +1272,212 @@ def test_in_a_container_reads_a_marker_FILE_and_not_a_cgroup_parse(tmp_path, mon
     present.write_text("")
     monkeypatch.setattr(kill_switch, "_CONTAINER_MARKERS", (tmp_path / "nope", present))
     assert kill_switch.in_a_container() is True
+
+
+# ---------------------------------------------------------------------------
+# THE LOOSENING, 2026-10-10, AT THE OPERATOR'S INSTRUCTION.
+#
+# /admin's controls refused on the only deployment they have: a container, where
+# SWAP_TERMINAL_HOST must be 0.0.0.0 because 127.0.0.1 binds the container's own
+# loopback and the published port then reaches nothing (measured 2026-10-05). The
+# publish mapping is what makes that private and it is not visible from inside.
+#
+# So this is a security control being relaxed on purpose, and these tests exist to
+# pin the EXACT condition under which it relaxes and the several under which it
+# does not. Rule 16 put the decision with the operator; it did not move the
+# obligation to show which way each case goes.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("in_container", "publish", "expected"),
+    [
+        (False, None, kill_switch.PUBLISH_NO_MAPPING),
+        (False, "127.0.0.1", kill_switch.PUBLISH_NO_MAPPING),
+        (True, None, kill_switch.PUBLISH_NOT_DECLARED),
+        (True, "", kill_switch.PUBLISH_NOT_DECLARED),
+        (True, "   ", kill_switch.PUBLISH_NOT_DECLARED),
+        (True, "127.0.0.1", kill_switch.PUBLISH_LOOPBACK),
+        (True, "localhost", kill_switch.PUBLISH_LOOPBACK),
+        (True, _ALL_INTERFACES, kill_switch.PUBLISH_EXPOSED),
+        (True, "192.168.1.10", kill_switch.PUBLISH_EXPOSED),
+    ],
+)
+def test_the_publish_verdict_on_every_shape_of_declaration(in_container, publish, expected):
+    """Nine seeded cases, and the two rows that matter most are the ones that look dull.
+
+    `(False, "127.0.0.1")` is a HOST that exported the variable. It must read
+    NO_MAPPING, not LOOPBACK: on a host there is no publish mapping, the bind IS the
+    reachability, and a process that could declare its own privacy would be handing
+    itself the pass. That is the whole reason publish_verdict() checks the container
+    marker FIRST rather than reading the variable and then qualifying it.
+
+    `(True, "")` is the os.getenv hazard this file already carries a measurement for
+    in the other direction: a variable that is set and empty returns "" rather than
+    the default, and "" is not a host. Empty and absent both fail closed.
+    """
+    facts = _exposed(in_container=in_container, publish=publish)
+    assert kill_switch.publish_verdict(facts) == expected
+
+
+def test_a_container_with_a_DECLARED_LOOPBACK_publish_is_PERMITTED():
+    """The loosening itself. One condition, and this is it.
+
+    MUTATION CHECKED BOTH WAYS. Removing the `publish != PUBLISH_LOOPBACK` guard from
+    either branch leaves refusals here (the change does nothing); removing the
+    container check from publish_verdict() makes the host test above pass this too.
+    """
+    assert kill_switch.refuse_off_box(_exposed(in_container=True, publish="127.0.0.1")) == [], (
+        "a container whose publish is declared loopback has nothing left to refuse on: the "
+        "0.0.0.0 bind is the only one that works in there, and the publish is what restricts it"
+    )
+
+
+@pytest.mark.parametrize("publish", [None, "", _ALL_INTERFACES, "192.168.1.10"])
+def test_every_OTHER_container_declaration_still_refuses(publish):
+    """Four ways to be a container and not be permitted. All four still refuse.
+
+    The permitted case is one value of one variable. Everything else -- absent, empty,
+    and any non-loopback host -- lands where it did before this existed.
+    """
+    assert kill_switch.refuse_off_box(_exposed(in_container=True, publish=publish)), (
+        f"a container declaring {publish!r} was permitted, which is not the condition the "
+        f"operator authorized"
+    )
+
+
+def test_a_HOST_cannot_declare_its_own_privacy():
+    """The variable relaxes nothing on a host, and a host is where the bind IS the answer.
+
+    This is the hole an "operator asserts it is fine" flag would have had, and it is
+    why the declaration is read only behind a container marker. A host process with a
+    0.0.0.0 bind is reachable off-box; no environment variable changes that, and
+    nothing here lets one pretend otherwise.
+    """
+    assert kill_switch.refuse_off_box(_exposed(in_container=False, publish="127.0.0.1")), (
+        "a host exported the publish variable and was permitted -- on a host there is no "
+        "publish mapping to declare, so this would be a process authorizing itself"
+    )
+
+
+@pytest.mark.parametrize(
+    ("listening", "why"),
+    [
+        (None, "/proc could not be read, so the bind was never established"),
+        (set(), "no listening socket, so the bind was never established"),
+    ],
+)
+def test_a_declared_publish_does_NOT_relax_an_UNESTABLISHED_bind(listening, why):
+    """The two NOT-ESTABLISHED branches are untouched, and the distinction is the point.
+
+    A declared publish says WHO CAN REACH the port. It says nothing about what this
+    process is bound to, and these two refusals are about not knowing that at all. A
+    control surface that cannot establish its own bind must refuse whatever anyone
+    declares about the host -- which is the same "None means could not look, and that
+    is not the same as an empty set" that loopback.listening_addresses() returns None
+    to express in the first place.
+    """
+    facts = kill_switch.RequestFacts(
+        env={"SWAP_TERMINAL_HOST": "127.0.0.1", kill_switch.PUBLISH_HOST_VARIABLE: "127.0.0.1"},
+        listening=listening,
+        in_container=True,
+    )
+    assert kill_switch.refuse_off_box(facts), why
+
+
+def test_a_declared_publish_does_not_make_the_controls_simply_ON():
+    """Permitted by the bind check is not permitted, full stop. The browser hole is separate.
+
+    refuse_cross_origin() exists because binding loopback keeps the network out and
+    does not keep out a page the operator merely VISITS -- a cross-origin form POST
+    needs no preflight and the ACTION HAPPENS. A publish declaration is about the
+    network and must not reach that check, so this asserts the two are still
+    independent on the one deployment where the bind check now passes.
+    """
+    facts = kill_switch.RequestFacts(
+        headers={"Origin": "https://evil.example", "Host": "127.0.0.1:5000"},
+        remote_addr="127.0.0.1",
+        env={"SWAP_TERMINAL_HOST": _ALL_INTERFACES, kill_switch.PUBLISH_HOST_VARIABLE: "127.0.0.1"},
+        listening={_ALL_INTERFACES},
+        in_container=True,
+    )
+    assert kill_switch.refuse_off_box(facts) == [], "precondition: the bind check passes here"
+    assert kill_switch.control_refusals(facts), "and the cross-origin POST is still refused"
+
+
+def test_the_remedy_map_is_TOTAL_over_the_verdicts_that_reach_it():
+    """Completeness asserted, not trusted -- and PUBLISH_LOOPBACK deliberately absent.
+
+    THE SHAPE THIS COPIES IS daemon_network.bech32_prefix_status(), and the reason it
+    is copied is that the alternative shipped a defect this session: a renderer that
+    branched on a bare None and INVENTED a fact about XRP for a case nobody had
+    enumerated. A map with a completeness test cannot do that; a map with a plausible
+    default can.
+
+    PUBLISH_LOOPBACK is absent because it never reaches _remedy_for() -- it is the
+    permitted verdict, and a remedy for a refusal that did not happen is a sentence
+    with no reader. Asserting its absence is what stops someone "completing" the map
+    and leaving a dead sentence behind.
+    """
+    reaching = [v for v in kill_switch.PUBLISH_VERDICTS if v != kill_switch.PUBLISH_LOOPBACK]
+    assert sorted(kill_switch._REMEDY_FOR) == sorted(reaching), (
+        "every verdict that can reach _remedy_for() needs its own remedy, and no others"
+    )
+    assert kill_switch.PUBLISH_LOOPBACK not in kill_switch._REMEDY_FOR
+    for verdict in reaching:
+        assert kill_switch._remedy_for(verdict).strip(), f"{verdict} got an empty remedy"
+
+
+def test_the_two_container_remedies_DIFFER_and_share_the_facts():
+    """One preamble, two tails. A reader of either gets the measurement and the right action.
+
+    They were one string until the verdict stopped being the same for every container.
+    Two full copies would have agreed on the day they were written (rule 8); the shared
+    preamble is what makes the drift impossible, and this asserts both halves of that.
+    """
+    undeclared = kill_switch._remedy_for(kill_switch.PUBLISH_NOT_DECLARED)
+    exposed = kill_switch._remedy_for(kill_switch.PUBLISH_EXPOSED)
+    for shared in ("do NOT set SWAP_TERMINAL_HOST=127.0.0.1", "the UI came up empty",
+                   "docker compose port web 5000"):
+        assert shared in undeclared and shared in exposed, f"{shared!r} is in one remedy only"
+    assert "NOTHING HERE DECLARED IT" in undeclared
+    assert "DECLARES A NON-LOOPBACK PUBLISH" in exposed
+    assert undeclared != exposed, "two verdicts, two instructions"
+
+
+def test_the_permitted_page_SAYS_what_it_accepted_and_what_it_did_not_prove():
+    """Rule 14: a page that permits an action names what it accepted, not only what it checked.
+
+    This is the one that keeps the loosening honest on screen. The operator reading an
+    ENABLED panel has to be able to see that the buttons are on because of a
+    declaration rather than a measurement, and has to see the thing the declaration
+    does NOT cover -- every other container on the compose bridge reaches this port
+    directly, without going through the publish at all. That is OPEN_FINDINGS finding
+    4, it is unaffected by a loopback publish, and a docstring is not where an
+    operator reads it.
+    """
+    evidence = "\n".join(kill_switch.bind_evidence(_exposed(in_container=True, publish="127.0.0.1")))
+    assert kill_switch.PUBLISH_HOST_VARIABLE in evidence
+    assert "DECLARATION and not a measurement" in evidence
+    assert "reaches this port DIRECTLY" in evidence, "the residual exposure, on the page"
+    assert "finding 4" in evidence, "and where the rest of it is written down"
+
+
+def test_the_publish_line_is_ABSENT_on_a_plain_host_and_present_when_it_is_IGNORED():
+    """Silence where it would be noise, a sentence where somebody has a wrong expectation.
+
+    PUBLISH_NO_MAPPING is every non-compose deployment, and a line reading "not
+    applicable" on every render is the noise rule 14 warns trains a reader to skip the
+    block that matters -- the same argument trust_note() makes for not printing GNOME
+    advice at an LXQt operator (C43).
+
+    BUT A HOST THAT SET THE VARIABLE GETS TOLD IT IS IGNORED, because that operator
+    believes they changed something and did not. A silently ignored setting is the
+    quietest kind of wrong.
+    """
+    bare = "\n".join(kill_switch.bind_evidence(_exposed(in_container=False)))
+    assert kill_switch.PUBLISH_HOST_VARIABLE not in bare, "no publish line on a plain host"
+
+    confused = "\n".join(kill_switch.bind_evidence(_exposed(in_container=False, publish="127.0.0.1")))
+    assert "SET BUT IGNORED" in confused
+    assert "no publish to declare" in confused
