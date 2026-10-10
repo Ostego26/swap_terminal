@@ -184,6 +184,7 @@ def plan(src, dst) -> dict:
 
     moving_ids = [row["id"] for row in moving]
     children: dict[str, list[dict]] = {}
+    skipped: list[str] = []
     for table in TABLE_ORDER:
         if table in ("quotes", "swaps") or not columns_of(src, table):
             continue
@@ -196,9 +197,128 @@ def plan(src, dst) -> dict:
                     f"SELECT * FROM {table} WHERE {SWAP_COLUMN} = ?", (swap_id,)  # noqa: S608 -- `table` is a literal from TABLE_ORDER in this module; the value is bound
                 ).fetchall()
             ]
-        if rows:
-            children[table] = rows
-    return {"quotes": quotes, "swaps": moving, "children": children, "colliding": colliding}
+        if not rows:
+            continue
+        # FILTERED HERE, IN THE PLAN, so the dry run prints exactly what --apply will do.
+        # Computing the skips at write time would let the two disagree, which is the one
+        # thing a dry run exists to rule out.
+        keeping, blocked = clashing_rows(dst, table, rows, dropped_column(dst, table))
+        skipped.extend(blocked)
+        if keeping:
+            children[table] = keeping
+    return {"quotes": quotes, "swaps": moving, "children": children,
+            "colliding": colliding, "skipped": skipped}
+
+
+def unique_keys_of(conn, table: str) -> list[tuple[str, ...]]:
+    """Every UNIQUE key on this table, as column tuples. Reads the database, not SCHEMA.
+
+    THE SAME QUESTION db.unique_keys() ANSWERS, and it is NOT imported from there on
+    purpose: that one takes a connection this module opens with sqlite3.Row rather than
+    db.dict_factory, and the two read PRAGMA rows differently. Rather than launder the
+    row factory, this asks the same two PRAGMAs with this module's own factory and says
+    so here -- rule 8's "the difference belongs in a comment at BOTH sites" is satisfied
+    by naming the other one, because merging them would mean one of the two callers
+    converting its connection to suit the other.
+
+    A table-level UNIQUE(...) becomes an implicit `sqlite_autoindex_*`, so both named and
+    implicit indexes are read and nothing filters on the name.
+    """
+    found = []
+    for index in conn.execute(f"PRAGMA index_list({table})").fetchall():
+        if not index["unique"]:
+            continue
+        columns = conn.execute(f"PRAGMA index_info({index['name']})").fetchall()
+        found.append(tuple(column["name"] for column in columns))
+    return found
+
+
+def clashing_rows(dst, table: str, rows: list[dict], dropped: str | None) -> tuple[list[dict], list[str]]:
+    """Split these rows into the ones that will insert and the ones already spoken for.
+
+    =========================================================================
+    WHY THIS EXISTS: THE FIRST REAL MERGE WOULD HAVE ABORTED ON A CONSTRAINT
+    =========================================================================
+
+    Measured on the operator's host 2026-10-10, pre-checking before --apply:
+
+        orphan tag rows: [('CUBnQ5QBfYkL71TCqSdecAQ9xjfGmAdu6Hs3fjQeLorp', 1,
+                           's_b8daedd5ef8101fe')]
+          -> CLASHES with s_aaa81fa6e8538163
+
+    xrp_destination_tags is PRIMARY KEY (account, destination_tag), so that insert
+    raises IntegrityError. The whole merge is one transaction, so it would have rolled
+    back cleanly -- nothing damaged -- and the operator would have got a traceback
+    instead of a sentence, for a row whose absence costs nothing.
+
+    refuse_before_touching_anything() checked swap ids and schema shape and NOT the
+    unique constraints inside child tables. That was the gap: the swap itself was
+    free to move, and one of its dependent rows was not.
+
+    =========================================================================
+    SKIPPING IS CORRECT HERE, AND IT IS A JUDGMENT WORTH WRITING DOWN
+    =========================================================================
+
+    A discriminator allocation RESERVES an integer on a shared deposit account for one
+    swap. The orphan's swap is `failed`, which is terminal -- services/deposit_service.
+    ACTIVE_STATUSES does not contain it, so it is never refreshed and can never be
+    credited again. Its reservation is dead, and the live swap that now holds that
+    integer is the one the allocator must keep answering for.
+
+    WHAT WOULD BE WRONG IS REMAPPING IT. Giving the orphan's row a free integer would
+    falsify the record: the deposit that arrived carried discriminator 1, and
+    deposit_events keeps that in its `vout` column (chains/xrp_payments._classify()
+    puts it there). So the attribution survives in deposit_events and in the five
+    swap_audit_log rows; only the reservation is dropped, and a reservation for a swap
+    that can never be credited is not a record of money.
+
+    THE `dropped` COLUMN IS EXCLUDED FROM THE KEYS, because insert_rows() drops it: a
+    unique key that is just the AUTOINCREMENT `id` is satisfied by whatever the
+    destination assigns, so comparing on it would report every row as free and then
+    rely on the insert.
+    """
+    inserting, skipped = [], []
+    keys = [key for key in unique_keys_of(dst, table) if key != (dropped,)]
+    for row in rows:
+        blocked = False
+        for key in keys:
+            if any(column not in row for column in key):
+                continue
+            where = " AND ".join(f"{column} = ?" for column in key)
+            existing = dst.execute(
+                f"SELECT * FROM {table} WHERE {where}",  # noqa: S608 -- identifiers from PRAGMA index_info on this table; every value is bound
+                tuple(row[column] for column in key),
+            ).fetchone()
+            if existing:
+                held = dict(existing).get(SWAP_COLUMN, "(no swap_id column)")
+                values = ", ".join(f"{column}={row[column]!r}" for column in key)
+                skipped.append(
+                    f"{table}: {values} is already held by {held}, so this row is SKIPPED rather "
+                    f"than overwritten. Everything else still moves."
+                )
+                blocked = True
+                break
+        if not blocked:
+            inserting.append(row)
+    return inserting, skipped
+
+
+def dropped_column(dst, table: str) -> str | None:
+    """The AUTOINCREMENT key this table's rows must NOT carry across, or None.
+
+    ONE ANSWER, TWO CALLERS, which is why it is a function: insert_rows() drops it and
+    clashing_rows() has to exclude it from the unique keys it compares on. Two spellings
+    of "is this table rowid-keyed" would be rule 8's duplicate on the one decision that
+    decides whether a row is reported free and then fails to insert.
+
+    swaps and quotes are keyed on a TEXT id that IS the identity -- s_… and q_… are
+    generated once and mean the same thing in any database -- so theirs is carried.
+    Everything else keys on INTEGER PRIMARY KEY AUTOINCREMENT, where the orphan's row 1
+    and the authority's row 1 are different records.
+    """
+    if table in ("swaps", "quotes"):
+        return None
+    return "id" if "id" in columns_of(dst, table) else None
 
 
 def insert_rows(dst, table: str, rows: list[dict]) -> int:
@@ -213,10 +333,10 @@ def insert_rows(dst, table: str, rows: list[dict]) -> int:
     """
     if not rows:
         return 0
-    autoincrement = "id" in columns_of(dst, table) and table not in ("swaps", "quotes")
+    autoincrement = dropped_column(dst, table)
     written = 0
     for row in rows:
-        payload = {k: v for k, v in row.items() if not (autoincrement and k == "id")}
+        payload = {k: v for k, v in row.items() if k != autoincrement}
         names = ", ".join(payload)
         marks = ", ".join("?" for _ in payload)
         dst.execute(
@@ -277,6 +397,9 @@ def report(found: dict) -> list[str]:
             continue
         rows = found["children"].get(table, [])
         lines.append(f"  {table:28} {len(rows)}" + ("" if rows else "  <- (none)"))
+    if found.get("skipped"):
+        lines.append(f"  SKIPPED      {len(found['skipped'])} dependent row(s), each already spoken for:")
+        lines.extend(f"                 - {why}" for why in found["skipped"])
     if found["colliding"]:
         lines.append(
             f"  COLLIDING    {len(found['colliding'])} swap id(s) already exist in the destination and "
@@ -324,6 +447,8 @@ def main(argv: list[str] | None = None) -> int:
         print(line, flush=True)
 
     if not found["swaps"] and not found["quotes"] and not found["children"]:
+        # A merge whose every row was SKIPPED is reported above, not here -- "nothing to
+        # do" and "everything was already spoken for" are different answers (rule 14).
         print("\n  NOTHING TO DO: the destination already has every swap the source holds.", flush=True)
         print("  The source file is redundant. Deleting it is YOURS to do -- this tool never does.", flush=True)
         return 0
