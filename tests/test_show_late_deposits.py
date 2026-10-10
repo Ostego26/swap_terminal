@@ -75,7 +75,7 @@ def _seed(db_path: Path, late_rows):
     rather than a hand-made table: a tool that only works where constraints are
     off is not tested.
     """
-    db = connect_db(str(db_path))
+    db = connect_db(str(db_path), create=True)
     db.executescript(SCHEMA)
     rate, fee_bps, reserve, estimate = 1000.0, 150, 0.0, 98.5
     when = "2026-10-04T00:00:00+00:00"
