@@ -515,7 +515,7 @@ def _announce(args, db_path: str) -> None:
     """Everything that decides the answer, before anything is read (rule 14)."""
     print(f"{SELF}: {'APPLY -- transactions WILL BE BROADCAST and cannot be unsent' if args.apply else 'REPORT ONLY -- nothing is sent and no row is written'}",
           flush=True)
-    print(labeled("database", f"{db_path}  <- {db_path_source(db_path, args.db)}. A fee earned in any "
+    print(labeled("database", f"{db_path}  <- {db_path_source(args.db)}. A fee earned in any "
                               f"other database is invisible to this run, and a sweep recorded in "
                               f"another one would not stop this one re-sending it"), flush=True)
     print(labeled("accrued from", "fee_ledger.py over `swaps` JOIN `payouts`, counting only a payout "

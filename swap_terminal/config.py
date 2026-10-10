@@ -72,11 +72,85 @@ BASE_DIR = Path(__file__).resolve().parent
 # .strip() as well as the emptiness test, because `export GRC_RPC_PORT=" "` is the
 # same mistake with a space in it, and int(" ") raises identically.
 def _env(name: str, default: str = "") -> str:
-    """os.getenv, except that a set-but-empty value falls back to `default`."""
+    """os.getenv, except that a set-but-empty value falls back to `default`.
+
+    WHAT IT DOES NOT TELL ITS CALLER is which of those happened, and a caller that
+    has to REPORT the provenance needs to know -- see env_variable_state() below,
+    added 2026-10-10 because workers/common.db_path_source() was telling operators
+    "SWAP_DB_PATH IS NOT SET in this shell" for a variable that was set to "".
+    """
     value = os.getenv(name)
     if value is None or not value.strip():
         return default
     return value
+
+
+#: THE THREE STATES AN ENVIRONMENT VARIABLE CAN BE IN, as far as this project is
+#: concerned. `os.getenv` collapses the middle one into the first by returning ""
+#: for both an absent variable and `export FOO=`, which is the whole subject of the
+#: comment block above _env() -- and a report that collapses them tells an operator
+#: something their own `env` output contradicts.
+ENV_UNSET = "unset"
+ENV_SET_BUT_EMPTY = "set-but-empty"
+ENV_SET = "set"
+
+#: TOTAL OVER THE THREE, so a caller can assert it handled all of them rather than
+#: discovering a fourth state at runtime. The same construction stack_authority.py
+#: uses for LISTENER_VERDICTS and services/kill_switch.py for _REMEDY_FOR.
+ENV_VARIABLE_STATES = (ENV_UNSET, ENV_SET_BUT_EMPTY, ENV_SET)
+
+
+def env_variable_state(name: str) -> str:
+    """Which of ENV_VARIABLE_STATES `name` is in, read from os.environ right now.
+
+    THREE ANSWERS BECAUSE THE MIDDLE ONE IS AN ORDINARY MISTAKE AND READS AS THE
+    FIRST. The comment block above _env() has the measured version: an `export FOO=`
+    in a shell script, a CI template with a blank field, a .env line with nothing
+    after the `=` -- and `os.getenv` hands all of those back as "", identical to a
+    variable nobody ever mentioned.
+
+    WHY A SHARED FUNCTION AND NOT A FOURTH `if`. Four places in this tree already
+    encode "set-but-empty is not the same as unset", each in its own spelling, and
+    the fourth was about to be written inline inside a report sentence:
+
+        config._env                       falls back to `default`. Correct, and the
+                                          reason every entry point stopped dying on
+                                          `int("")`.
+        chains/xrp_payout_seed.py:183     treats it as absent, naming a trailing
+                                          newline from a `read` or a heredoc.
+        gunicorn.conf.py (on_starting)    counts "" as LOOPBACK, which is the one
+                                          that is WRONG: `SWAP_TERMINAL_HOST=` makes
+                                          bind ":5000", gunicorn binds all
+                                          interfaces, and the banner whose entire
+                                          job is to say whether the deployment is
+                                          exposed printed `warnings  (none)`.
+                                          loopback.py's header records it; fixing it
+                                          changes what a live banner says and is the
+                                          operator's call (rule 16), so it is named
+                                          here and not changed.
+        workers/common.db_path_source     said "IS NOT SET in this shell" for a
+                                          variable that was set to "". The caller
+                                          this function was added for.
+
+    Rule 19: "a fourth copy written today is the defect, not a backlog item" --
+    which is the sentence loopback.py uses about its own founding, for the same
+    vocabulary one layer up.
+
+    IT RETURNS A STATE, NOT A VALUE, deliberately. A caller that wants the value
+    already has `_env`; this answers the question `_env` destroys on the way past,
+    and keeping them separate is what lets _env stay the single place the fallback
+    rule lives.
+
+    `.strip()` is part of the test, exactly as in _env: `export FOO=" "` is the same
+    mistake with a space in it, and a report that called that "set" would send an
+    operator looking for a path in a variable that holds a space.
+    """
+    value = os.getenv(name)
+    if value is None:
+        return ENV_UNSET
+    if not value.strip():
+        return ENV_SET_BUT_EMPTY
+    return ENV_SET
 
 
 def _env_int(name: str, default: str) -> int:

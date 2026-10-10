@@ -186,7 +186,7 @@ def header_lines(db_path: str, config: dict, explicit_db: str = "") -> list[str]
     tolerance = float(config["AMOUNT_TOLERANCE_PCT"])
     return [
         "show swap -- READ-ONLY. It changes no status, resolves nothing, writes no row and creates no file.",
-        labeled("database", f"{db_path}  <- {db_path_source(db_path, explicit_db)}. A swap in any other "
+        labeled("database", f"{db_path}  <- {db_path_source(explicit_db)}. A swap in any other "
                             f"database is invisible to both the workers and this"),
         labeled("halted means", f"{', '.join(HALTED_STATUSES)}  <- exactly what deposit_watcher's "
                                 f"HALTED_for_review counts, from services/swap_view.HALTED_STATUSES"),

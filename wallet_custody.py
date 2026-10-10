@@ -333,7 +333,7 @@ def swap_row(args) -> tuple[dict | None, str]:
         )
     config = get_config_dict()
     db_path = Path(args.db) if args.db else Path(config["DB_PATH"])
-    source = db_path_source(str(db_path), explicit_db=args.db)
+    source = db_path_source(explicit_db=args.db)
     if not db_path.exists():
         raise Refused(
             f"no database at {db_path} ({source}). Nothing was created and no chain was contacted. "

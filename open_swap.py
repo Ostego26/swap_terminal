@@ -831,7 +831,7 @@ def report_lines(swap: dict, quote: dict, db_path: str, config: dict, explicit_d
         # claim about ANOTHER PROCESS's environment, which this one cannot see: the
         # workers inherit the shell that started them, which may not be this one.
         # Rule 17's line between a reason to believe something and having checked it.
-        labeled("database", f"{db_path}  <- {db_path_source(db_path, explicit_db)}. A swap in any other "
+        labeled("database", f"{db_path}  <- {db_path_source(explicit_db)}. A swap in any other "
                             f"database is invisible to the workers"),
         labeled("swap id", f"{swap['id']}  <- names this swap to every command below, and to /swap/{swap['id']}"),
         labeled("quote id", f"{quote['id']}  <- the rate this swap was created against"),

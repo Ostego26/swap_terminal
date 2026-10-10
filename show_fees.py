@@ -123,7 +123,7 @@ def header_lines(db_path: str, config: dict, explicit_db: str = "") -> list[str]
     scheduled = float(config["DEFAULT_FEE_BPS"])
     return [
         "swap fees -- READ-ONLY. It changes no fee, collects nothing, writes no row and creates no file.",
-        labeled("database", f"{db_path}  <- {db_path_source(db_path, explicit_db)}. Fees earned in any "
+        labeled("database", f"{db_path}  <- {db_path_source(explicit_db)}. Fees earned in any "
                             f"other database are invisible to this run"),
         labeled("schedule now", f"DEFAULT_FEE_BPS={scheduled:.0f}bps  <- what a swap created RIGHT NOW would "
                                 f"be quoted. Each row below carries the fee_bps IT was quoted, which may "

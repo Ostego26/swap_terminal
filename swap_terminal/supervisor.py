@@ -1412,7 +1412,7 @@ def endpoint_summary() -> list[str]:
     # stores credentials and computes a URL.
     configured = build_adapters(Config.RPC).keys()
     return [
-        f"  database          {Config.DB_PATH}  <- {db_path_source(str(Config.DB_PATH))}",
+        f"  database          {Config.DB_PATH}  <- {db_path_source()}",
         # WHAT IS IN THAT FILE, by the same function each worker's own banner uses.
         #
         # THE SAME GAP, ONE FILE OVER. workers/common.database_census() was added

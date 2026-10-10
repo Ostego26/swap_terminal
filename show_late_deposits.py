@@ -258,11 +258,7 @@ def total_lines(rows, args) -> list[str]:
 def run(args) -> int:
     config = get_config_dict()
     db_path = Path(args.db) if args.db else Path(config["DB_PATH"])
-    # str() BECAUSE THAT IS THE SHARED CALL'S OWN SPELLING. workers/common.db_path_source()
-    # declares `db_path: str`, and wallet_custody.py, supervisor.py and workers/common.py all
-    # hand it one; these two reports were the only callers passing a Path. One spelling for one
-    # call (rule 8) -- and the local stays a Path, because the .exists() check below needs it.
-    source = db_path_source(str(db_path), explicit_db=args.db)
+    source = db_path_source(explicit_db=args.db)
     # Path.exists() BEFORE connect(), because sqlite3.connect() creates the file. A
     # read-only tool that leaves a new empty database on disk has written something,
     # and the next reader finds a database with no tables and no explanation.

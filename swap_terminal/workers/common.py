@@ -58,7 +58,14 @@ from pathlib import Path
 from chains.registry import build_adapters, missing_settings
 from chains.solana import SolanaAdapter
 from chains.xrp import XRPAdapter
-from config import Config, bitcoin_family_rpc
+from config import (
+    ENV_SET,
+    ENV_SET_BUT_EMPTY,
+    ENV_UNSET,
+    Config,
+    bitcoin_family_rpc,
+    env_variable_state,
+)
 from db import db_session
 from log_setup import configure_logging
 from microfortnights import format_duration
@@ -309,7 +316,7 @@ def announce_start(worker_name: str, poll_seconds: float, pid: int) -> None:
     configure_logging()
     print(f"{worker_name}: starting", flush=True)
     print(f"  pid             {pid}  <- supervisor.py stop reads this from runtime/{worker_name}.pid", flush=True)
-    print(f"  database        {Config.DB_PATH}  <- {db_path_source(str(Config.DB_PATH))}", flush=True)
+    print(f"  database        {Config.DB_PATH}  <- {db_path_source()}", flush=True)
     print(f"  it holds        {database_census(str(Config.DB_PATH))}", flush=True)
     print(f"  poll interval   {format_duration(poll_seconds)}", flush=True)
     print("  chains:", flush=True)
@@ -628,8 +635,8 @@ def sleep_until_next_cycle(poll_seconds: float, should_stop: Callable[[], bool])
 DB_PATH_VARIABLE = "SWAP_DB_PATH"
 
 
-def db_path_source(db_path: str, explicit_db: str = "") -> str:
-    """Where a reported database path actually came from. Three answers, not two.
+def db_path_source(explicit_db: str = "") -> str:
+    """Where a reported database path actually came from. FOUR answers, not two.
 
     WHY THIS IS A SHARED FUNCTION AND WHY IT HAS A THIRD CASE, both measured on
     the operator's host 2026-10-01.
@@ -666,12 +673,71 @@ def db_path_source(db_path: str, explicit_db: str = "") -> str:
     case is OBSERVED instead of inferred. It reads os.environ, which is why this
     lives here next to get_config_dict() rather than in report_block.py, whose
     header says it reads nothing and would have been made false by this.
+
+    THE FOURTH ANSWER, 2026-10-10, AND IT IS THIS FUNCTION'S OWN FOUNDING DEFECT
+    ONE CASE FURTHER IN. Measured by running it against all four shell states:
+
+        SWAP_DB_PATH in the shell       path reported   this said
+        unset entirely                  the default     "IS NOT SET in this shell"
+        set to /data/real.db            /data/real.db   "SWAP_DB_PATH"
+        SET BUT EMPTY (SWAP_DB_PATH=)   the default     "IS NOT SET in this shell"
+        set to whitespace               the default     "IS NOT SET in this shell"
+
+    The PATH is right in all four -- config._env falls back to the default for an
+    empty or whitespace value, which is correct and is why no entry point dies. The
+    PROVENANCE is a fabrication in two of them: the variable IS set, and the
+    sentence says it is not. That is word for word the failure the paragraph at the
+    top of this docstring opens with -- "The path was right. The provenance was a
+    fabrication... an operator checking that claim against their own `env` finds it
+    disagreeing and has no way to tell which half is wrong." A two-case function
+    became three and still collapsed two states into one sentence.
+
+    An `export SWAP_DB_PATH=` is not an exotic input. config.py's own comment block
+    above _env() lists where empty values come from -- a shell script, a CI template
+    with a blank field, a .env line with nothing after the `=` -- and that block
+    exists because a single empty variable used to take down every entry point in
+    this project.
+
+    THE STATE TEST IS config.env_variable_state() AND NOT AN `if` HERE, because
+    four places in this tree already spell "set-but-empty is not unset" their own
+    way and one of them (gunicorn.conf.py) spells it wrongly. That function names
+    all four. Rule 19: the fourth copy is the defect, not a backlog item.
+
+    `db_path` WAS THE FIRST PARAMETER AND WAS NEVER READ. Removed in the same pass,
+    nine call sites updated. It was the vestige of the two-case version this
+    docstring describes, which DID compare the path (`db_path != Config.DB_PATH`) --
+    and that comparison is the inference recorded above as the bug. Leaving the
+    parameter in the signature invited exactly that reading back: a reader sees
+    `db_path_source(db_path, explicit_db)` and concludes the path participates in
+    the answer. It did not. Worse, nothing stopped a caller passing a path this
+    function never looks at and getting a confident provenance claim about it.
+
+    PROVEN UNREAD RATHER THAN ASSUMED (rule 17): an ast.walk over this function
+    reported `loaded: ['explicit_db']`, `NEVER READ: ['db_path']`. Ruff cannot catch
+    it -- ARG is not in pyproject's selected set, which is rule 12's "two things the
+    linter cannot check" arriving by a third route. And no caller could have been
+    relying on a comparison: all nine derive the path as `args.db or Config.DB_PATH`
+    within two lines of the call, so the value passed was always either
+    `explicit_db` itself or the config default.
     """
     if explicit_db:
         return "--db"
-    if os.environ.get(DB_PATH_VARIABLE, "").strip():
+    state = env_variable_state(DB_PATH_VARIABLE)
+    if state == ENV_SET:
         return DB_PATH_VARIABLE
+    # BOTH REMAINING STATES GET THE DEFAULT PATH and they must not get the same
+    # sentence: one tells the operator to export the variable, the other tells them
+    # the export they already wrote did nothing. `env | grep SWAP_DB_PATH` answers
+    # differently for the two, and the report has to agree with it.
+    why = {
+        ENV_UNSET: f"{DB_PATH_VARIABLE} IS NOT SET in this shell",
+        ENV_SET_BUT_EMPTY: (
+            f"{DB_PATH_VARIABLE} IS SET BUT EMPTY in this shell -- `export {DB_PATH_VARIABLE}=` is "
+            f"not the same as not exporting it, and config._env falls back to the built-in default "
+            f"for a value that is empty or whitespace"
+        ),
+    }[state]
     return (
-        f"the built-in default, because {DB_PATH_VARIABLE} IS NOT SET in this shell. The workers read "
+        f"the built-in default, because {why}. The workers read "
         f"whatever {DB_PATH_VARIABLE} named in the shell that STARTED them, which may be a different file"
     )
