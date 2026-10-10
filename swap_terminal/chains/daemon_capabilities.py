@@ -171,6 +171,22 @@ class Capability:
     evidence: str
     instead: str
     recorded_at: str
+    #: WHAT TO DO ON A CHAIN THAT **HAS** THIS AND IS NOT USING IT. Empty for most rows,
+    #: and the distinction from `instead` is not a nicety -- it was a wrong remedy on the
+    #: operator's screen during an outage on 2026-10-10.
+    #:
+    #: `instead` answers "this chain LACKS the capability; what do you do without it",
+    #: so the rpcbind row's instead is written from GRC's point of view and opens
+    #: "nothing is needed". refusal_remedy() mapped an LTC `Connection refused` to that
+    #: row and printed it verbatim, so an operator whose litecoind had just failed to
+    #: bind read "nothing is needed" as their remedy. The row was right; the field
+    #: answered a different question than the one being asked.
+    #:
+    #: So the question is now explicit in the field name. A chain in `present_on` that is
+    #: nonetheless failing needs to know how to USE the thing it has; a chain in
+    #: `absent_on` needs `instead`. One home for each sentence (rule 8), and the mapping
+    #: picks by whether the asset is listed as having it.
+    when_unused: str = ""
 
 
 #: THE MAP. Ordered by what it costs to get wrong rather than alphabetically.
@@ -294,6 +310,19 @@ CAPABILITIES: tuple[Capability, ...] = (
             "the connection and declined the caller by IP) while BTC and LTC gave [Errno 111] "
             "Connection refused (nothing was accepting, because modern Core defaults to "
             "loopback only). GRC wants rpcallowip alone; BTC and LTC want rpcbind as well"
+        ),
+        when_unused=(
+            "modern Core binds its RPC port to LOOPBACK ONLY until `rpcbind` says otherwise, "
+            "so `Connection refused` from the container means nothing was accepting -- not that "
+            "the caller was declined. Put BOTH under the running network's section, which is "
+            "`[regtest]` on regtest, `[test]` on Litecoin testnet, and `[testnet4]` on Bitcoin "
+            "Core 28+ testnet4: rpcbind=127.0.0.1 and rpcbind=172.17.0.1 (the address "
+            "host.docker.internal resolves to), plus rpcallowip=127.0.0.1 and "
+            "rpcallowip=172.18.0.0/16 (the container's own subnet). Core ERRORS OUT if rpcbind "
+            "is given without rpcallowip, so the two go in together. THE SECTION IS THE HALF "
+            "THAT GOES WRONG SILENTLY: a header that does not match the running network means "
+            "every line under it is skipped, the daemon starts cleanly, and nothing anywhere "
+            "says so -- which cost five rounds on GRC on 2026-10-09 for the same reason."
         ),
         recorded_at=(
             "2026-10-09. THE OPEN QUESTION ON THIS ROW IS NOW CLOSED and the answer is "
@@ -825,6 +854,28 @@ _REFUSAL_REMEDIES: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 
+def _remedy_for(asset: str, name: str) -> str:
+    """Which of a row's two remedy fields answers THIS asset's failure.
+
+    A chain listed in `present_on` HAS the capability, so a failure means it is not
+    being used and `when_unused` is the sentence. A chain that lacks it needs `instead`.
+
+    THIS DISTINCTION WAS A WRONG REMEDY ON SCREEN. refusal_remedy() printed `instead`
+    for every match, so an LTC `Connection refused` rendered the rpcbind row's
+    GRC-facing sentence -- which opens "nothing is needed" -- to an operator whose
+    litecoind had just failed to come up. The row carried the right knowledge and the
+    lookup asked it the wrong question.
+
+    Falls back to `instead` when `when_unused` is empty, because most rows have only
+    one remedy and for those the question does not arise: GRC's two 403 rows are both
+    about capabilities GRC genuinely lacks.
+    """
+    capability = _capability(name)
+    if asset in capability.present_on and capability.when_unused:
+        return capability.when_unused
+    return capability.instead
+
+
 def refusal_shape(detail: str) -> str | None:
     """Classify a probe failure string. None when it is neither shape we know.
 
@@ -866,11 +917,11 @@ def refusal_remedy(asset: str, detail: str) -> str:
     shape = refusal_shape(detail)
     if shape is None:
         return ""
-    matched = [
-        _capability(name).instead
+    matched = [note for note in (
+        _remedy_for(asset, name)
         for recorded_shape, name in _REFUSAL_REMEDIES.get(asset, ())
         if recorded_shape == shape
-    ]
+    ) if note]
     # NUMBERED ONLY WHEN THERE IS MORE THAN ONE, because "1." in front of a lone
     # paragraph implies a second step the reader goes looking for (rule 14: state what
     # the thing means, and do not imply what it does not).

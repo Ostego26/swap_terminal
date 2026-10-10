@@ -541,3 +541,76 @@ def test_every_capability_named_in_the_remedy_table_actually_exists():
         for shape, name in entries:
             assert shape in ("403", "refused"), f"{asset}: unknown shape {shape!r}"
             assert _capability(name).instead.strip(), f"{asset}/{name}: empty remedy"
+
+
+# ---------------------------------------------------------------------------
+# WHICH OF A ROW'S TWO REMEDIES ANSWERS THIS ASSET'S FAILURE.
+#
+# Measured on the operator's screen 2026-10-10, mid-outage. Their litecoind failed
+# to come up on testnet and `swapterm chains` printed, under the LTC refusal:
+#
+#   RECORDED REMEDY (LTC): nothing is needed: a pre-0.12 daemon binds its RPC port
+#   on all interfaces and `rpcallowip` is the only control...
+#
+# That is the rpcbind row's `instead`, which answers "this chain LACKS the
+# capability, what do you do without it" -- GRC's question. LTC HAS rpcbind and was
+# not using it. The row carried the right knowledge and the lookup asked it the
+# wrong question, so an operator whose daemon had just failed read "nothing is
+# needed" as their remedy.
+# ---------------------------------------------------------------------------
+
+_LTC_REFUSED = (
+    "did not answer: HTTPConnectionPool(host='host.docker.internal', port=19443): "
+    "Failed to establish a new connection: [Errno 111] Connection refused"
+)
+
+
+def test_a_chain_that_HAS_rpcbind_is_told_how_to_USE_it():
+    """MUTATION CHECKED: reverting _remedy_for() to always return `instead` fails here.
+
+    And it fails on the exact string an operator read during an outage.
+    """
+    remedy = refusal_remedy("LTC", _LTC_REFUSED)
+    assert "nothing is needed" not in remedy, (
+        "that is the GRC-facing sentence and it is the opposite of LTC's remedy"
+    )
+    assert "rpcbind" in remedy
+    assert "LOOPBACK ONLY" in remedy, "it must say WHY nothing was accepting"
+
+
+def test_the_rpcbind_remedy_names_THE_SECTION_for_every_network_in_play():
+    """The half that goes wrong silently, and it cost five rounds on GRC.
+
+    A section header that does not match the running network means every line under
+    it is skipped, the daemon starts cleanly, and nothing says so. BTC Core 28 wants
+    [testnet4]; Litecoin 0.21 wants [test]; regtest wants [regtest]. They are not
+    interchangeable.
+    """
+    remedy = refusal_remedy("BTC", _LTC_REFUSED.replace("19443", "18443"))
+    for section in ("[regtest]", "[test]", "[testnet4]"):
+        assert section in remedy, f"{section} is not named"
+    assert "ERRORS OUT if rpcbind is given without rpcallowip" in remedy, (
+        "the two have to go in together and Core refuses to start otherwise"
+    )
+
+
+def test_a_chain_that_LACKS_a_capability_still_gets_instead():
+    """GRC's two 403 rows are about capabilities it genuinely does not have.
+
+    `when_unused` must not displace `instead` for the case `instead` was written for.
+    """
+    remedy = refusal_remedy("GRC", "did not answer: 403 Client Error: Forbidden")
+    assert "testnet/gridcoinresearch.conf" in remedy
+    assert "172.18.*" in remedy
+
+
+def test_when_unused_is_empty_on_rows_that_have_only_one_remedy():
+    """Most rows describe a capability a chain lacks; a second sentence would be noise.
+
+    Asserted so the field does not get filled in reflexively on every new row -- an
+    empty one is the honest default and the fallback handles it.
+    """
+    filled = [c.name for c in CAPABILITIES if c.when_unused]
+    assert filled == ["rpcbind"], (
+        f"only rpcbind has a use-it-properly remedy today; {filled} claim one"
+    )

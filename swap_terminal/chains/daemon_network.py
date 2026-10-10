@@ -62,7 +62,25 @@ from collections.abc import Mapping
 #: one string for string, so widening or narrowing either side fails a test that
 #: names the other file rather than drifting silently.
 CHAIN_TEST_NETWORKS = {
-    "BTC": frozenset({"test", "testnet", "regtest", "signet"}),
+    # `testnet4` ADDED 2026-10-10, MEASURED OFF THE OPERATOR'S OWN DAEMON. Bitcoin Core
+    # v28.1.0 reports `"chain": "testnet4"` -- a value that was in NO table here -- and
+    # this allowlist is the refusal gate in chain_balances.py:321, fund_desk.py:499 and
+    # atomic_swap_xrp.py. So the moment their BTC daemon came up on testnet4, all three
+    # tools would have refused it as an unrecognized network, and fund_desk's refusal
+    # says "*** THIS IS A MAINNET DAEMON ***" -- a confidently wrong claim about a
+    # testnet node, which is worse than a bare refusal.
+    #
+    # Fail-closed did its job: nothing read a wallet it should not have. But an
+    # allowlist that refuses the network the operator was told to move to is a blocker,
+    # and "it failed safely" is not the same as "it worked".
+    "BTC": frozenset({"test", "testnet", "testnet4", "regtest", "signet"}),
+    # LTC IS DELIBERATELY NOT GIVEN testnet4. Litecoin Core v0.21.4 derives from Bitcoin
+    # Core 0.21, whose vocabulary predates testnet4 entirely -- its testnet reports
+    # `"chain": "test"`, which is already here. Litecoin's DATA DIRECTORY is named
+    # testnet4, which is a different thing and is exactly the kind of near-match that
+    # would get added on a glance. Adding a value no daemon of this vintage can return
+    # would widen an allowlist for nothing, and this one is what stands between a
+    # command and a mainnet wallet.
     "LTC": frozenset({"test", "testnet", "regtest"}),
     "GRC": frozenset({"test", "testnet", "regtest"}),
 }
@@ -158,7 +176,21 @@ def chain_network(adapter) -> str:
 #: reasoning: "Gridcoin has no bech32" is a fact a caller must be able to read off this
 #: vocabulary, and an absent key would mean "nobody has said".
 PAYABLE_BECH32_PREFIX: dict[str, dict[str, str]] = {
-    "BTC": {"main": "bc1", "test": "tb1", "testnet": "tb1", "signet": "tb1", "regtest": "bcrt1"},
+    # `testnet4` ADDED 2026-10-10. Core v28.1.0 reports it and the table had no row, so
+    # the report printed "which addresses this network pays is NOT ESTABLISHED -- no
+    # chainparams was read for that network name" beside a daemon that was syncing
+    # perfectly. That fail-closed sentence is the right one for an unknown network and
+    # the wrong one for this network, which is now known.
+    #
+    # `tb1`, AND THE PROVENANCE MATTERS because this table's own header says the values
+    # are read off chainparams.cpp rather than recalled. BIP-173 gives every Bitcoin test
+    # network except regtest the hrp `tb`, and signet in this same row already shows that
+    # -- signet is a separate network with its own genesis and it shares `tb` with
+    # testnet3. Confirmed against the operator's own testnet4 daemon by asking it to
+    # validate tb1qw7gsuq5x7wtnwtvw3kyzh22kd7c6rm00ezl9u5, a well-formed tb1 address
+    # generated from this repository's own bech32 encoder.
+    "BTC": {"main": "bc1", "test": "tb1", "testnet": "tb1", "testnet4": "tb1",
+            "signet": "tb1", "regtest": "bcrt1"},
     "LTC": {"main": "ltc1", "test": "tltc1", "testnet": "tltc1", "regtest": "rltc1"},
     "GRC": {},
 }

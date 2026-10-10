@@ -447,3 +447,55 @@ def test_the_classifier_and_the_accessor_never_disagree():
         accessor = daemon_network.payable_bech32_prefix(asset, network)
         assert prefix == accessor, f"{asset}/{network}: {prefix!r} vs {accessor!r}"
         assert (status == daemon_network.PREFIX_KNOWN) == (accessor is not None)
+
+
+# ---------------------------------------------------------------------------
+# testnet4, MEASURED OFF THE OPERATOR'S OWN DAEMON 2026-10-10. Bitcoin Core
+# v28.1.0 reports `"chain": "testnet4"`, a value that was in NO table here.
+# ---------------------------------------------------------------------------
+
+
+def test_BTC_testnet4_is_an_ALLOWED_test_network():
+    """CHAIN_TEST_NETWORKS is the refusal gate in three root tools.
+
+    chain_balances.py:321, fund_desk.py:499 and atomic_swap_xrp.py all compare
+    against it, and fund_desk's refusal says "*** THIS IS A MAINNET DAEMON ***" --
+    a confidently wrong claim about a testnet4 node, which is worse than a bare
+    refusal. Fail-closed did its job; an allowlist that refuses the network the
+    operator was told to move to is still a blocker.
+    """
+    assert "testnet4" in daemon_network.CHAIN_TEST_NETWORKS["BTC"]
+
+
+def test_LTC_is_deliberately_NOT_given_testnet4():
+    """Litecoin Core v0.21.4 derives from Bitcoin 0.21 and reports `"chain": "test"`.
+
+    Its DATA DIRECTORY is named testnet4, which is a different thing and exactly the
+    near-match that gets added on a glance. This allowlist stands between a command
+    and a mainnet wallet, so it does not gain a value no daemon of that vintage can
+    return.
+    """
+    assert "testnet4" not in daemon_network.CHAIN_TEST_NETWORKS["LTC"]
+    assert "test" in daemon_network.CHAIN_TEST_NETWORKS["LTC"]
+
+
+def test_BTC_testnet4_pays_tb1_like_every_other_bitcoin_test_network_but_regtest():
+    """BIP-173 gives every Bitcoin test network except regtest the hrp `tb`.
+
+    signet in the same row already demonstrates it: a separate network with its own
+    genesis, sharing `tb` with testnet3.
+    """
+    assert daemon_network.payable_bech32_prefix("BTC", "testnet4") == "tb1"
+    assert daemon_network.payable_bech32_prefix("BTC", "regtest") == "bcrt1"
+    assert daemon_network.bech32_prefix_status("BTC", "testnet4") == (
+        daemon_network.PREFIX_KNOWN, "tb1",
+    )
+
+
+def test_a_testnet4_daemon_no_longer_reads_as_NOT_ESTABLISHED():
+    """The report printed "no chainparams was read for that network name" beside a
+    daemon that was syncing perfectly. Right sentence for an unknown network, wrong
+    one for this network."""
+    status, prefix = daemon_network.bech32_prefix_status("BTC", "testnet4")
+    assert status != daemon_network.NETWORK_NOT_IN_TABLE
+    assert prefix == "tb1"
