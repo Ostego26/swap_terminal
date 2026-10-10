@@ -1115,6 +1115,63 @@ def _ask(config: Mapping, adapter, asset: str, kind: str, deadline: Deadline) ->
     return icp_live(adapter, deadline)
 
 
+def endpoint_summary(text: str) -> str:
+    """Just the asset and where it points. Everything after the address is dropped.
+
+    THE OPERATOR READ THESE OFF THREE PAGES AND CALLED THEM CLUTTER, 2026-10-10. Each
+    adapter's own endpoint_line() answers a different question than a wallet panel asks:
+
+        XRP rpc=https://s.altnet.rippletest.net:51234 payouts=PREVIEW-ONLY
+        (XRP_PAYOUT_SECRET_SEED is NOT set, so every payout refuses before signing and no
+        XRP swap can be created; mainnet refused by server network_id, not by url)
+        min_confirmations=1 validated ledger <- NOT a block depth; the XRP Ledger does not
+        reorganize
+
+        ICP rpc=?:? wallet=(default -- ICP_RPC_WALLET unset, so this is the wallet a bare
+        CLI call reaches)
+
+    Those lines are RIGHT for the place they were written for -- a worker's startup banner
+    and the /admin overview, where an operator is auditing posture and every clause earns
+    its space. On a wallet panel the question is "which node am I looking at", and the
+    answer is the first twelve characters of a two-hundred-character string.
+
+    SO THIS TRIMS, IT DOES NOT REWRITE. The adapters keep their full lines, every other
+    caller keeps seeing them, and no explanation is deleted anywhere -- this is one
+    consumer asking for less. That matters because `wallet=(default ...)` on the ICP line
+    is a real custody fact; it is still on /admin, which is the page that is about posture.
+
+    KEPT: the asset, and the first whitespace-delimited token of each `key=value` pair up
+    to and including the endpoint itself. DROPPED: every parenthetical, every `<-` note,
+    and every later key.
+
+    Rule 14's one hard requirement survives, which is why the network is not at risk here:
+    the host and port ARE the network -- 18443 is regtest, 19443 is Litecoin regtest,
+    s.altnet.rippletest.net is the XRP testnet -- and the page's own probe region names
+    what the daemon reports. A trim that removed the address would be the line that
+    "will eventually be read as the wrong one"; this keeps it and drops the essay after it.
+    """
+    text = str(text or "").strip()
+    if not text:
+        return "(not configured)"
+    # Cut at the first explanatory marker, whichever comes first. `  <-` is this tree's
+    # note convention (rule 14's "state what the number means, next to the number") and
+    # `(` opens every parenthetical in these lines.
+    for marker in ("  <-", " <-", " ("):
+        found = text.find(marker)
+        if found > 0:
+            text = text[:found]
+    # Then keep only up to the end of the endpoint itself: the asset, then the first
+    # key=value, which every adapter puts first. A later `payouts=` or `wallet=` is a
+    # posture fact and belongs on /admin, not here.
+    parts = text.split()
+    kept = []
+    for part in parts:
+        kept.append(part)
+        if "=" in part:
+            break
+    return " ".join(kept).strip() or "(not configured)"
+
+
 def _chain_row(config: Mapping, adapters: Mapping, asset: str) -> dict:
     """This chain's row out of services/admin_view.chain_rows(). No socket.
 
@@ -1139,5 +1196,9 @@ def _chain_row(config: Mapping, adapters: Mapping, asset: str) -> dict:
     """
     for row in chain_rows(config, adapters):
         if row["asset"] == asset:
-            return row
+            # TRIMMED HERE, AT THE ONE CONSUMER THAT WANTS LESS. admin_view.chain_rows()
+            # is shared with /admin, which is a posture audit and wants every clause; see
+            # endpoint_summary() above for what each adapter's full line carries and why
+            # this page is the wrong place for it.
+            return {**row, "endpoint": endpoint_summary(row.get("endpoint", ""))}
     return {}

@@ -522,3 +522,194 @@
   font-size: var(--t-sm);
   color: var(--ink-soft);
 }
+
+/* =============================================================================
+   THE RAIL SWITCHES PANES. Added 2026-10-10 on the operator's instruction:
+
+     "how about the the left pane makes it's information appear until another left
+      pane control is clicked instead of it being one long fucking stupid page that
+      maes zero sense. APPLY MODERN INDUSTRIAL HYGIENCE AND ERGNOMICS TO THIS
+      DISPLAY. AND KEEP THE THEME OF EACH CHAIN DAEMON SUBTAB CONTROL."
+
+   THIS OVERRIDES A STANDING CONSTRAINT, SO THE CONSTRAINT IS WRITTEN DOWN HERE
+   RATHER THAN SILENTLY DROPPED. templates/admin_chain.html's header recorded a
+   measurement: marking panes `display: none` the way a tab widget does made a
+   browser copy of this page return 923 of 12,502 characters and none of the
+   headings. That mattered because the operator diagnoses by pasting pages back.
+
+   It was never a design principle. It was a debugging workflow, and the operator
+   asked the obvious question -- "what's a no hiding rule? we're designing a
+   fucking UI" -- which settles it.
+
+   AND THE PASTE STILL WORKS, WHICH IS WHY THIS SHAPE WAS CHOSEN OVER JAVASCRIPT
+   TABS. The rule below hides panes ONLY when one of them is `:target` -- that is,
+   only once the operator has clicked a rail entry. A page opened at
+   /admin/wallets/BTC with no fragment renders EVERY pane, so a plain load, a
+   paste, a print and a screen reader's linear pass all get the whole thing. Click
+   a rail entry and it behaves as Qt does: one pane.
+
+   NO JAVASCRIPT AT ALL. The page carries no <script> and this needs none --
+   `:target` is the browser's own fragment state. That keeps the surface's one
+   security property intact: nothing executes here, so nothing on an
+   unauthenticated page can be made to act.
+
+   `:has()` IS THE LOAD-BEARING SELECTOR and it is worth naming: it is what lets a
+   pane's own `:target` state style its RAIL ENTRY, which sits earlier in the
+   document. Without it the active indicator would need JavaScript or a
+   hidden-input hack, and this page permits neither. Baseline in every current
+   engine since 2023.
+   ============================================================================= */
+
+/* ONE PANE AT A TIME, FROM THE FIRST LOAD. The first version of this block rendered
+   every pane in the no-fragment state and switched only after a click, to keep a paste
+   complete. The operator read the result and said: "the the goddamn subtab controls
+   should be subtabbed further. it's too schlong and stupid."
+
+   They are right, and it is the same answer twice now. A wallet that opens showing
+   eleven stacked panes is not a wallet, whatever happens after the first click. Qt opens
+   on Overview. So does this.
+
+   :first-of-type IS THE DEFAULT SELECTION, which is how a tab strip is built without
+   JavaScript and without a hidden input. The first .cw-pane in document order is
+   Overview on every kind -- services/chain_wallet_layout.rail_entries() emits it first
+   and the template renders in rail order, which tests/test_chain_wallet_layout.py pins. */
+.cw-panes > .cw-pane { display: none; }
+.cw-panes > .cw-pane:first-of-type { display: block; }
+
+/* ONCE ANY PANE IS TARGETED, that one replaces the default. */
+.cw-panes:has(> .cw-pane:target) > .cw-pane:first-of-type { display: none; }
+.cw-panes:has(> .cw-pane:target) > .cw-pane:target { display: block; }
+
+/* THE FIRST PANE'S RAIL ENTRY IS ACTIVE WHEN NOTHING IS TARGETED, so the rail is never
+   showing no selection while a pane is visible -- which would read as a broken tab strip
+   rather than as a default. */
+.cw-shell:not(:has(.cw-pane:target)) .cw-rail a:first-of-type {
+  background: var(--cw-accent-weak, rgba(127, 127, 127, 0.18));
+  font-weight: 600;
+}
+
+/* A TARGETED PANE WEARS THE CHAIN'S OWN ACCENT, which is the "keep the theme of
+   each chain daemon subtab" half. --cw-accent is set per chain from the coin-<asset>
+   class the page already carries (styles.css defines --coin-btc and its five
+   siblings), so this rule is written once and every chain looks like itself. */
+.cw-pane:target { border-left: 3px solid var(--cw-accent, currentColor); }
+
+/* PRINT GETS EVERYTHING, whatever is targeted on screen. A printed or
+   PDF-exported panel that silently omitted five of six panes is the 923-of-12,502
+   failure in a second medium. */
+@media print {
+  .cw-panes > .cw-pane,
+  .cw-panes:has(> .cw-pane:target) > .cw-pane { display: block; }
+  .cw-pane:target { border-left: 0; }
+}
+
+/* THE ACTIVE RAIL ENTRY, one rule per anchor. Spelled out rather than generated
+   because CSS cannot read the fragment: each rule asks "is THIS pane targeted?"
+   and, if so, styles the rail link whose href names it. The anchor list comes from
+   services/chain_wallet_layout.pane_anchor() and rail_entries(); if an anchor is
+   added there without a rule here the pane still switches, it just loses its
+   highlight -- tests/test_chain_wallet_layout.py pins the two lists against each
+   other so that degradation is reported rather than discovered. */
+.cw-rail a[aria-current="true"],
+.cw-shell:has(#cw-overview:target)          .cw-rail a[href="#cw-overview"],
+.cw-shell:has(#cw-transactions:target)      .cw-rail a[href="#cw-transactions"],
+.cw-shell:has(#cw-lock:target)              .cw-rail a[href="#cw-lock"],
+.cw-shell:has(#cw-peers:target)             .cw-rail a[href="#cw-peers"],
+.cw-shell:has(#cw-information:target)       .cw-rail a[href="#cw-information"],
+.cw-shell:has(#cw-send:target)              .cw-rail a[href="#cw-send"],
+.cw-shell:has(#cw-receive:target)           .cw-rail a[href="#cw-receive"],
+.cw-shell:has(#cw-status:target)            .cw-rail a[href="#cw-status"],
+.cw-shell:has(#cw-ledger:target)            .cw-rail a[href="#cw-ledger"],
+.cw-shell:has(#cw-blockindex:target)        .cw-rail a[href="#cw-blockindex"],
+.cw-shell:has(#cw-voting:target)            .cw-rail a[href="#cw-voting"],
+.cw-shell:has(#cw-researcher:target)        .cw-rail a[href="#cw-researcher"],
+.cw-shell:has(#cw-magnitude:target)         .cw-rail a[href="#cw-magnitude"],
+.cw-shell:has(#cw-pane-overview:target)     .cw-rail a[href="#cw-pane-overview"],
+.cw-shell:has(#cw-pane-spendable:target)    .cw-rail a[href="#cw-pane-spendable"],
+.cw-shell:has(#cw-pane-transactions:target) .cw-rail a[href="#cw-pane-transactions"],
+.cw-shell:has(#cw-pane-peers:target)        .cw-rail a[href="#cw-pane-peers"],
+.cw-shell:has(#cw-pane-connections:target)  .cw-rail a[href="#cw-pane-connections"],
+.cw-shell:has(#cw-pane-information:target)  .cw-rail a[href="#cw-pane-information"] {
+  background: var(--cw-accent-weak, rgba(127, 127, 127, 0.18));
+  border-left-color: var(--cw-accent, currentColor);
+  font-weight: 600;
+}
+
+/* SHOW ALL, so a targeted page can get back to the complete one in a click. The
+   rail's own link to the bare URL -- no fragment -- which is the default state. */
+.cw-rail .cw-show-all { font-style: italic; opacity: 0.85; }
+
+/* PER-CHAIN ACCENTS. The page already carries coin-<asset> on its shell; these bind
+   that to the one variable every rule above reads. styles.css owns the hex values
+   (--coin-btc and friends), so there is one place a chain's color is defined. */
+/* THE WEAK TINT IS DERIVED FROM THE REAL HEX, NOT GUESSED. The first version of these
+   six lines carried rgba values I wrote from memory and four of the six were wrong --
+   Litecoin as a blue (#345d9d) when styles.css defines it as the silver #a6a9aa, Solana
+   as purple (#9945ff) when it is the green #14f195, XRP as near-black when it is #23b4e8.
+   styles.css:215-220 is the authority and these read it. Measured, not recalled (rule 17). */
+.coin-btc  { --cw-accent: var(--coin-btc);  --cw-accent-weak: rgba(247, 147,  26, 0.16); }  /* #f7931a */
+.coin-ltc  { --cw-accent: var(--coin-ltc);  --cw-accent-weak: rgba(166, 169, 170, 0.22); }  /* #a6a9aa */
+.coin-icp  { --cw-accent: var(--coin-icp);  --cw-accent-weak: rgba(236,  30, 121, 0.16); }  /* #ec1e79 */
+.coin-sol  { --cw-accent: var(--coin-sol);  --cw-accent-weak: rgba( 20, 241, 149, 0.20); }  /* #14f195 */
+.coin-xrp  { --cw-accent: var(--coin-xrp);  --cw-accent-weak: rgba( 35, 180, 232, 0.16); }  /* #23b4e8 */
+/* GRC's accent is --ink, the page's own text color, because Gridcoin has no brand hex in
+   styles.css. A tint derived from the ink reads as a neutral highlight rather than as a
+   color this repository invented for somebody else's chain. */
+.coin-grc  { --cw-accent: var(--coin-grc);  --cw-accent-weak: rgba(127, 127, 127, 0.18); }
+
+/* =============================================================================
+   CONTROLS THAT LOOK LIKE CONTROLS. Added 2026-10-10:
+
+     "i asked for just a fucking control panel and i got a dumbass verbose pile of
+      shit that doesn't control anything or tell me anything useful really."
+     "no controls. no buttons. nothing."
+
+   The page's one action -- ask this chain -- was an underlined text link sitting
+   under a paragraph. A control panel's controls have to read as pressable, which
+   is the ergonomics half of the instruction.
+
+   A LINK STYLED AS A BUTTON, NOT A <button>. This surface registers no write verb
+   (routes/admin.py is GET only, asserted over the real url_map by
+   tests/test_web_surfaces.py), so asking is a GET and the correct element is an
+   anchor. A real <button> would need a form and a POST, and that is a separate
+   change with its own safety argument -- not something to smuggle in as styling.
+   Qt's push button is what this copies: a raised 1px border, a slight gradient, a
+   pressed state.
+   ============================================================================= */
+
+.cw-button {
+  display: inline-block;
+  padding: 0.35em 1.1em;
+  border: 1px solid var(--cw-accent, #8a8a8a);
+  border-radius: 3px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.10), rgba(0, 0, 0, 0.10));
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.cw-button:hover,
+.cw-button:focus-visible {
+  background: var(--cw-accent-weak, rgba(127, 127, 127, 0.18));
+  outline: 2px solid var(--cw-accent, currentColor);
+  outline-offset: 1px;
+}
+
+/* PRESSED, which Qt shows by inverting the bevel. One pixel of movement is what makes
+   a control feel like it took the click rather than like the page reloaded on its own. */
+.cw-button:active {
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.14), rgba(255, 255, 255, 0.06));
+  transform: translateY(1px);
+}
+
+/* The rail's footer row, which holds the way back to every pane. Separated from the
+   entries above it so it does not read as a seventh pane. */
+.cw-rail-foot {
+  margin: 0.6em 0 0;
+  padding-top: 0.5em;
+  border-top: 1px solid rgba(127, 127, 127, 0.35);
+  font-size: 0.85em;
+}

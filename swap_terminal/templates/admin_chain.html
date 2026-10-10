@@ -115,15 +115,22 @@
    <span class="empty-params">asset={{ asset }} &#183; adapter=absent &#183; would have shown: {{ what }}</span></p>
 {%- else %}
 <p class="empty"><span class="empty-mark">(not asked)</span>
-   {#- "{{ what }} &#8212; NOT SHOWN" RATHER THAN "{{ what }} is not shown", because
-       `what` is sometimes plural ("The balance card and the recent transactions") and
-       sometimes singular ("This answer"), and one macro cannot conjugate for both. It
-       read "...and the recent transactions is not shown", which is the kind of sentence
-       a reader starts discounting the rest of the page for. -#}
-   <span class="empty-what">{{ what }} &#8212; <strong>NOT SHOWN</strong>, because nobody has asked
-   {{ asset }} yet. This is not a figure of zero and not an outage &#8212; it is a page that contacts
-   nothing until told to. Use <em>Ask {{ asset }} now</em> above.</span>
-   <span class="empty-params">asset={{ asset }} &#183; asked=no</span></p>
+   {#- ONE PHRASE, 2026-10-10. This used to be three sentences per pane, repeated on six
+       panes, and the operator read the whole page back and said "too clutter, and long
+       and verbose and bullshit."
+
+       IT SAID: "<what> -- NOT SHOWN, because nobody has asked GRC yet. This is not a
+       figure of zero and not an outage -- it is a page that contacts nothing until told
+       to. Use Ask GRC now above." Plus a parameter echo line. Six times.
+
+       Every clause was defending against a misreading: that an empty pane means a
+       balance of zero, or a daemon that is down. That is rule 14's real concern and it
+       is satisfied by the two words Qt itself uses -- "not asked" is not "0.00000000"
+       and is not "No block source available". A reader who sees `not asked` and an
+       `Ask GRC now` button one screen up does not need the paragraph; the button IS the
+       sentence.
+   -#}
+   <span class="empty-what">not asked</span>
 {%- endif %}
 {%- endmacro %}
 
@@ -136,17 +143,29 @@
     this repository reads the data -- a gap that would be closed by code. A reader
     deciding whether to go and do something about it needs to be able to tell. -#}
 {% macro absence(entry) -%}
+{#- THE `why` PARAGRAPH AND THE TRAILING CLAUSE CAME OFF ON 2026-10-10. Each inert or
+    unreadable entry rendered three paragraphs; there are up to eight such entries on the
+    Gridcoin page, which made this macro alone most of that page's text.
+
+    WHAT WENT: `entry.why` (a full paragraph per entry, e.g. "a Receive tab is
+    getnewaddress, which DERIVES AND STORES A KEY in wallet.dat...") and a fixed closing
+    sentence per state ("There is no control here, and there is no disabled one
+    either..." / "This is a gap rather than a boundary...").
+
+    WHAT STAYS: the mark and the one-line subject. `[inert]` and `[unreadable]` are
+    different marks on purpose and that distinction is the thing worth keeping -- inert
+    means the capability lives elsewhere deliberately, unreadable means nothing in this
+    tree reads it, and a reader deciding whether to go and build something needs to tell
+    them apart. Two characters of difference carries that; three paragraphs was not
+    carrying it better.
+
+    EVERY `why` IS STILL IN THE SOURCE, in services/chain_wallet_layout.py's RAIL_INERT
+    and RAIL_UNREADABLE tables, still tested, still the authority (rule 1 -- next to the
+    code). It is simply not printed.
+-#}
 <div class="{{ 'cw-inert' if entry.state == 'inert' else 'cw-unreadable' }}">
   <p class="panel-note"><span class="cw-absence-mark">{{ '[inert]' if entry.state == 'inert' else '[unreadable]' }}</span>
-     <strong>{{ entry.what }}.</strong></p>
-  <p class="panel-note">{{ entry.why }}.</p>
-  {%- if entry.state == 'inert' %}
-  <p class="panel-note">There is no control here, and there is no disabled one either. Nothing on this
-     page would collect an amount, an address or a passphrase.</p>
-  {%- else %}
-  <p class="panel-note">This is a gap rather than a boundary: it would be closed by a reader in
-     <code>chains/</code> and an entry on that module's read-only allowlist, not by a setting.</p>
-  {%- endif %}
+     {{ entry.what }}</p>
 </div>
 {%- endmacro %}
 
@@ -238,13 +257,22 @@
       rule 14's one hard requirement: "ALWAYS print the network. A line that does not say
       mainnet or testnet is a line that will eventually be read as the wrong one."
   -#}
-  {%- if data.qt.borrowed and not data.qt.is_core %}
-  {#- ONLY WHERE IT IS A DISCLAIMER. On SOL, XRP and ICP there is no Core wallet and never
-      has been, so a page arranged like Bitcoin Core under an XRP heading would eventually
-      be read as a claim that one exists. On BTC, LTC and GRC it was describing the
-      obvious. -#}
-  <p class="panel-note">{{ data.qt.borrowed }}</p>
-  {%- endif %}
+  {#- THE BORROWED-LAYOUT NOTICE IS GONE, 2026-10-10. It was ~460 characters on SOL, XRP
+      and ICP, at the very top, above the asset's own figures. The operator read it off
+      three separate pages and said "stupid bullshit. remove", "more stupid bullshit",
+      "clutter bulshit verbose word salad".
+
+      WHAT IT SAID, and the argument for it was not stupid: those three chains have no
+      Bitcoin Core wallet and never have, so a page arranged like Core under an XRP
+      heading could be read as a claim that one exists. The notice disclaimed that.
+
+      WHY IT STILL GOES: nobody arrives at /admin/wallets/XRP wondering whether XRP ships
+      a Qt wallet. The reader is the operator of this desk, on their own machine, looking
+      for a balance. A disclaimer written for a hypothetical confused reader, placed above
+      the thing the actual reader came for, is the definition of clutter. The reasoning is
+      kept here and in services/chain_wallet_layout.BORROWED_LAYOUT_NOTICE, which is
+      still defined and still tested -- it is simply not rendered.
+  -#}
   <table class="kvt">
     <tbody>
       <tr><th scope="row">Endpoint</th>
@@ -276,27 +304,22 @@
   <p><a class="admin-tab" href="{{ url_for('admin.chain_wallet_page', asset=data.asset) }}?ask">Ask again</a>
      <a class="admin-tab" href="{{ url_for('admin.chain_wallet_page', asset=data.asset) }}">Stop asking</a></p>
   {%- else %}
-  <p class="panel-note"><strong>Nothing on this page has contacted {{ data.asset }}.</strong> Everything above and
-     below was read from the configuration and from tables in this repository, so this page cannot be slow
-     because a daemon is slow. Asking is a separate, deliberate act.</p>
-  <p><a class="admin-tab" href="{{ url_for('admin.chain_wallet_page', asset=data.asset) }}?ask">Ask {{ data.asset }} now</a></p>
+  {#- THE BUDGET TABLE AND THE "has contacted nothing" PARAGRAPH CAME OFF ON 2026-10-10.
+
+      The table was three rows -- Request budget, One call, Worst case -- each with a
+      clause explaining what the number meant and which variable raises it. Rule 14 asks
+      for exactly that ("announce before, not only after", "echo the parameters that
+      decide the answer") and on a terminal diagnostic it is right. On a button it is
+      three rows of arithmetic between the operator and the click.
+
+      THE BUDGET IS STILL ENFORCED and the figures are still computed -- see
+      services/chain_panel.per_call_seconds() and worst_case_seconds(), both tested. The
+      ask reports what it ACTUALLY cost afterwards, in calls and elapsed time, counted
+      rather than claimed, which is the number that turned out to matter. A ceiling
+      printed before the fact is a prediction; the count after it is a measurement.
+  -#}
+  <p><a class="cw-button" href="{{ url_for('admin.chain_wallet_page', asset=data.asset) }}?ask">Ask {{ data.asset }}</a></p>
   {%- endif %}
-  <table class="kvt">
-    <tbody>
-      <tr><th scope="row">Request budget</th>
-          <td>{{ data.budget_display }} &#8212; the whole ask, not one call.
-              <code>{{ data.budget_variable }}</code> raises it</td></tr>
-      <tr><th scope="row">One call</th>
-          <td>{% if data.per_call_display %}{{ data.per_call_display }} &#8212; this adapter's own timeout
-              {% else %}<strong>NOT ESTABLISHED</strong> &#8212; this adapter carries no <code>timeout</code>, so
-              what one call may cost is not known from here and is not assumed{% endif %}</td></tr>
-      <tr><th scope="row">Worst case</th>
-          <td>{% if data.worst_case_display %}{{ data.worst_case_display }} &#8212; the budget plus ONE call,
-              because the deadline is checked before a call starts and cannot interrupt one already running
-              {% else %}<strong>NOT ESTABLISHED</strong> &#8212; without a per-call timeout there is no ceiling to add
-              {% endif %}</td></tr>
-    </tbody>
-  </table>
 </section>
 
 {#- ===================== THE CONFIGURATION ROW =====================
@@ -312,17 +335,31 @@
       {%- if data.chain.why_unconfigured %}
       <tr><th scope="row">Why not</th><td class="breakable">{{ data.chain.why_unconfigured }}</td></tr>
       {%- endif %}
+      {#- THE TRAILING CLAUSE ON EVERY ROW CAME OFF ON 2026-10-10. Each value carried its
+          own explanation: `attribution_model_note` ("a fresh address per swap, and the
+          address IS the attribution"), `attribution_detail` ("Derived by the daemon's
+          getnewaddress -- an independent address whose key the Gridcoin wallet stores in
+          wallet.dat"), `threshold_note` ("6 blocks must be mined on top of the deposit
+          before a payout is released"), and a sentence each for a pair that is not
+          enabled, a chain that cannot pay out and one that cannot take deposits.
+
+          THE VALUES STAY. `address`, `6`, `yes`, `no` -- those are the facts, and a
+          key/value table is the shape Qt's own Information pane uses.
+
+          THE EXCEPTION IS A REFUSAL, AND IT IS KEPT IN FULL: when a chain CANNOT pay out
+          or CANNOT take deposits, the reason is the whole content of the row. "NO" on its
+          own sends the operator to read source; "NO -- XRP_PAYOUT_SECRET_SEED is not set
+          in this process's environment" is actionable, and that message was written after
+          a measured incident where a desk took a deposit it could not pay (see
+          chains/xrp_payout_seed.py). A `yes` needs no sentence; a `no` is the one place on
+          this table where the sentence IS the value.
+      -#}
       <tr><th scope="row">Deposit attribution</th>
-          <td class="breakable">{{ data.chain.attribution }} &#8212; {{ data.chain.attribution_model_note }}</td></tr>
-      {%- if data.chain.attribution_detail %}
-      <tr><th scope="row">On this chain</th><td class="breakable">{{ data.chain.attribution_detail }}</td></tr>
-      {%- endif %}
+          <td>{{ data.chain.attribution }}</td></tr>
       <tr><th scope="row">Confirmations</th>
-          <td>{{ data.chain.threshold if data.chain.threshold is not none else '(not set)' }}
-              &#8212; {{ data.chain.threshold_note }}</td></tr>
+          <td>{{ data.chain.threshold if data.chain.threshold is not none else '(not set)' }}</td></tr>
       <tr><th scope="row">Enabled in a pair</th>
-          <td>{% if data.chain.tradeable %}yes{% else %}no &#8212; no entry in ALLOWED_PAIRS names this chain,
-              so no swap can be created on it whatever the daemon says{% endif %}</td></tr>
+          <td>{% if data.chain.tradeable %}yes{% else %}no{% endif %}</td></tr>
       <tr><th scope="row">Can pay out</th>
           <td class="breakable">{% if data.chain.cannot_pay %}<strong>NO</strong> &#8212; {{ data.chain.cannot_pay }}
               {% else %}yes{% endif %}</td></tr>
@@ -386,8 +423,23 @@
       {%- endfor %}
     </ul>
     {%- endfor %}
-    <p class="panel-note">Every pane is on this page below; these jump to one. Copying the page copies all
-       of it &#8212; nothing here is hidden, which is why these are links and not tabs.</p>
+    {#- THE RAIL NOTE BECAME A CONTROL, 2026-10-10. It was a paragraph -- "Every pane is on
+        this page below; these jump to one. Copying the page copies all of it -- nothing
+        here is hidden, which is why these are links and not tabs." -- and every clause of
+        it is now either false or unnecessary: the rail DOES switch panes (see
+        static/chain_wallet.css), so a reader does not need telling that it jumps.
+
+        WHAT A READER DOES NEED is the way back to all of them, because once a fragment is
+        set the page shows one pane and a browser gives you no obvious way to clear a hash.
+        This link is the bare URL. It is the default state, so it is also the state a paste
+        or a print should be taken in.
+
+        I BRIEFLY RENDERED THE OLD PARAGRAPH WITH `hidden` instead of deleting it, which is
+        `display: none` spelled another way -- the exact mechanism the constraint above it
+        forbade, used to satisfy that constraint. Noted because it is the kind of thing that
+        reads as compliance.
+    -#}
+    <p class="cw-rail-foot"><a class="cw-show-all" href="{{ url_for('admin.chain_wallet_page', asset=data.asset) }}{{ '?ask' if data.asked else '' }}">show all panes</a></p>
   </nav>
 
   <div class="cw-panes">

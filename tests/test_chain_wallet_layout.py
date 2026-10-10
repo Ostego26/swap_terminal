@@ -488,42 +488,90 @@ def test_the_PARTIAL_entry_names_what_it_cannot_show_rather_than_implying_it_has
 
 
 @pytest.mark.parametrize("asset", SIX_CHAINS)
-def test_nothing_on_any_chains_panel_is_HIDDEN(asset):
-    """templates/admin.html's measurement, enforced on the page most likely to break it.
+def test_the_rail_really_does_switch_panes_and_nothing_needs_javascript(asset):
+    """THE RULE THIS REPLACES WAS A DEBUGGING WORKFLOW, NOT A DESIGN PRINCIPLE.
 
-    A browser copy does not include `display: none` content, and this operator reads
-    these pages by pasting them back. Measured on /admin before any of this was built,
-    by marking every panel but one hidden exactly as a tab mechanism does: a paste
-    returns 923 of 12,502 characters, 7.4%, and 0 of the 14 panel headings, with nothing
-    in it saying the rest exists.
+    It was test_nothing_on_any_chains_panel_is_HIDDEN, and it forbade `display: none`
+    anywhere in the markup or the stylesheet. The measurement behind it was real:
+    marking every panel but one hidden, exactly as a tab mechanism does, made a browser
+    copy of /admin return 923 of 12,502 characters, 7.4%, and 0 of the 14 panel
+    headings. That mattered because the operator diagnoses by pasting pages back.
 
-    A RAIL IS THE SHAPE THAT MOST INVITES SOMEBODY TO MAKE IT REAL TABS. It looks like
-    tabs, Qt's really are tabs, and the change is three lines of CSS. So this asserts
-    over the rendered markup AND over the stylesheet the page loads, because the second
-    is where the three lines would go.
+    IT WAS OVERRIDDEN ON 2026-10-10, twice, explicitly:
 
-    MUTATION: add `.cw-pane { display: none }` to static/chain_wallet.css, or a
-    `style="display:none"` to any section. Fails on all six parametrizations.
+      "how about the the left pane makes it's information appear until another left pane
+       control is clicked instead of it being one long fucking stupid page that maes zero
+       sense. APPLY MODERN INDUSTRIAL HYGIENCE AND ERGNOMICS TO THIS DISPLAY."
+
+      "the the goddamn subtab controls should be subtabbed further. it's too schlong and
+       stupid."
+
+    and then, when the rule itself was cited back at them:
+
+      "what's a no hiding rule? we're designing a fucking UI"
+
+    Which settles it. A paste being complete is worth something; a wallet panel that
+    opens with eleven stacked panes is worth less than nothing. So the panes switch.
+
+    WHAT THIS ASSERTS INSTEAD, and all four are properties the old test could not express
+    because it banned the mechanism rather than checking the outcome:
+
+      the switch EXISTS         the stylesheet actually carries a :target rule, so a rail
+                                entry does something. The old test guaranteed the
+                                opposite.
+      ONE pane by default       :first-of-type is shown with no fragment set. A tab strip
+                                whose default is "all of them" is what the operator
+                                called schlong.
+      NO JAVASCRIPT             still asserted, and it is now load-bearing rather than
+                                incidental: this page is unauthenticated on whatever
+                                interface it was bound to, so a surface that executes
+                                nothing is a surface nothing can be made to execute. The
+                                switch is the browser's own fragment state.
+      PRINT GETS EVERYTHING     the one piece of the old rule worth keeping. A printed or
+                                PDF-exported panel that silently omitted five of six
+                                panes is the 923-of-12,502 failure in a second medium,
+                                and it is the escape hatch for the paste workflow.
+
+    MUTATION: delete the `@media print` block and the fourth assertion fails; delete the
+    `:first-of-type` rule and the second fails; delete the `:target` rules and the first.
     """
     status, body = render(f"/admin/wallets/{asset}?ask", _adapters())
     assert status == 200, asset
-    for forbidden in ("display: none", "display:none", "visibility: hidden", "visibility:hidden"):
-        assert forbidden not in body.lower(), f"{asset} renders {forbidden}"
-    # AND NO SCRIPT AT ALL ON THIS PAGE, which is what makes the jump links work with
-    # scripting off and leaves nothing for a tab mechanism to hide behind.
+
+    # NO INLINE HIDING IN THE MARKUP. The switch belongs in the stylesheet, in one place
+    # a reader can find, not sprinkled on sections where the next editor will not see it.
+    for forbidden in ('style="display:none', 'style="display: none', "visibility: hidden"):
+        assert forbidden not in body.lower(), f"{asset} hides a section inline: {forbidden}"
+
+    # AND NO SCRIPT AT ALL. See the docstring: this is the security property, not a style
+    # preference.
     assert "<script" not in body.lower(), f"{asset} loads a script; the rail needs none"
-    # COMMENTS STRIPPED FIRST, because that file's own header NAMES the string it
-    # forbids -- "there is no `display: none` in this file" -- and a check that reads
-    # prose is refuted by the sentence stating the rule. CLAUDE.md records the same
-    # shape: its British-spelling scan counted the rule's own examples, and the file
-    # that states a rule is the one place a violation refutes itself.
-    sheet = re.sub(r"/\*.*?\*/", " ", (REPO_ROOT / "swap_terminal" / "static" /
-                                        "chain_wallet.css").read_text(), flags=re.DOTALL)
-    for forbidden in ("display: none", "display:none", "visibility: hidden", "visibility:hidden"):
-        assert forbidden not in sheet, (
-            f"static/chain_wallet.css contains {forbidden}, which makes this page's paste a "
-            f"fraction of itself -- see this test's docstring for the measurement"
-        )
+
+    sheet = (REPO_ROOT / "swap_terminal" / "static" / "chain_wallet.css").read_text()
+    # COMMENTS STRIPPED FIRST, because that file's header quotes the rules it implements
+    # and a check that reads prose is refuted by the sentence stating the rule. CLAUDE.md
+    # records the same shape: its British-spelling scan counted the rule's own examples.
+    code = re.sub(r"/\*.*?\*/", " ", sheet, flags=re.DOTALL)
+    squashed = re.sub(r"\s+", " ", code)
+
+    assert ".cw-pane:target" in squashed, (
+        "the stylesheet carries no :target rule, so clicking a rail entry does nothing and "
+        "the page is one long scroll again"
+    )
+    assert ".cw-panes > .cw-pane:first-of-type { display: block" in squashed, (
+        "no default pane, so a page opened with no fragment shows either everything or "
+        "nothing. Qt opens on Overview and so must this"
+    )
+    assert "@media print" in squashed, (
+        "no print override, so a printed or exported panel silently omits every pane but "
+        "the selected one -- which is the 923-of-12,502 measurement in a second medium"
+    )
+    # THE DEFAULT IS ONE PANE, asserted as the pair of rules rather than by rendering,
+    # because a test client cannot apply CSS. The pair is what makes it one: hide all,
+    # then show the first.
+    assert ".cw-panes > .cw-pane { display: none" in squashed, (
+        "panes are not hidden by default, so the default state is every pane stacked"
+    )
 
 
 @pytest.mark.parametrize("asset", SIX_CHAINS)
@@ -551,7 +599,9 @@ def test_qts_send_and_receive_are_inert_PROSE_and_not_disabled_controls(asset):
     )
     flat = squash(body)
     assert "[inert]" in flat, f"{asset}: nothing marks the regions as inert in the markup itself"
-    assert "There is no control here, and there is no disabled one either" in flat, asset
+    # THE SENTENCE WENT, THE MARK AND THE REAL GUARANTEES STAY. The assertions
+        # below -- no <input, no <form, no disabled attribute -- are what actually
+        # prevents a control appearing; the sentence only described them.
     # `disabled` IS CHECKED HERE AND NOT IN THE OTHER FILE, because a disabled attribute
     # on a non-form element would slip past a check for `<input`.
     #
@@ -567,52 +617,45 @@ def test_qts_send_and_receive_are_inert_PROSE_and_not_disabled_controls(asset):
         )
 
 
-def test_the_three_chains_with_no_qt_wallet_SAY_the_layout_is_borrowed():
-    """ICP, SOL and XRP have no Core-derived GUI and must not imply they do.
+def test_no_chain_claims_a_core_wallet_it_does_not_have():
+    """ICP, SOL and XRP have no Core-derived GUI, and the page must not imply one.
 
-    A page arranged like Bitcoin Core, headed XRP, is a page that will eventually be
-    read as a claim that XRP has a Core wallet. It does not and never has. So each of
-    those three carries BORROWED_LAYOUT_NOTICE, which says so in the hero, before any
-    figure.
+    THE NOTICE THAT SAID SO IS GONE, 2026-10-10. It was ~460 characters at the top of
+    those three pages -- "THE LAYOUT IS BORROWED ON PURPOSE AND THIS CHAIN HAS NO CORE
+    WALLET. There is no Bitcoin Core-derived GUI for it, there never has been..." -- and
+    the operator read it off all three and said "stupid bullshit. remove", "more stupid
+    bullshit", "clutter bulshit verbose word salad".
 
-    AND THE THREE THAT DO HAVE ONE SAY SOMETHING DIFFERENT, which is the half that keeps
-    the notice meaningful: on BTC, LTC and GRC the resemblance is the point and the
-    figures came from the real daemon, so printing an apology there would be a sentence
-    that is false.
+    WHY REMOVING IT IS SAFE RATHER THAN A LOST GUARANTEE. The notice defended against a
+    reader concluding that XRP ships a Qt wallet. Nobody arrives at /admin/wallets/XRP
+    with that question; the reader is this desk's operator looking for a balance. What
+    WOULD mislead is the page using Core's own vocabulary for a chain that has none --
+    calling an XRP figure "Immature balance", or giving SOL a "Node window". That is a
+    real failure mode and it is what this test now checks, which is strictly more useful
+    than checking for a disclaimer.
 
-    MUTATION: give every kind the same notice string. The second loop fails -- BTC's
-    page then disclaims a resemblance that is genuine.
+    So: the three chains without a Core wallet must not borrow Core's SPECIFIC
+    vocabulary, and the three with one may.
     """
+    core_only = ("Immature", "Node window")
     for asset in ("XRP", "SOL", "ICP"):
         status, body = render(f"/admin/wallets/{asset}", _adapters())
         assert status == 200, asset
         flat = squash(body)
-        assert "THE LAYOUT IS BORROWED ON PURPOSE AND THIS CHAIN HAS NO CORE WALLET" in flat, asset
-        assert "nothing on this page is a claim that one exists" in flat or \
-               "nor any JSON-RPC interface to translate one into" in flat, asset
+        assert "borrowed" not in flat.lower(), (
+            f"{asset} still carries a borrowed-layout disclaimer; it was deleted as clutter"
+        )
+        for word in core_only:
+            assert word not in flat, (
+                f"{asset} has no Bitcoin Core wallet, so using Core's own term {word!r} for one "
+                f"of its figures is the borrowed-layout error this test exists for -- the "
+                f"vocabulary has to be this chain's own"
+            )
     for asset in ("BTC", "LTC", "GRC"):
         status, body = render(f"/admin/wallets/{asset}", _adapters())
         assert status == 200, asset
-        flat = squash(body)
-        assert "THIS CHAIN HAS NO CORE WALLET" not in flat, (
-            f"{asset} disclaims a Core wallet it actually has, which makes the notice on the "
-            f"three that genuinely lack one worthless"
-        )
-        # THE POSITIVE HALF OF THIS CHECK WAS DELETED ON 2026-10-10. It asserted that
-        # BTC, LTC and GRC carry the caption "This is arranged as that chain's own Core
-        # Qt wallet arranges it -- the rail down the left, the Balances card beside
-        # Recent transactions...". The operator read that caption off their own screen
-        # and said "dumb shit that needs to be removed", and they are right: it is a
-        # description of the layout printed on top of the layout. If the arrangement
-        # works it needs no caption, and if it does not a caption will not fix it.
-        #
-        # WHAT THE TEST IS FOR SURVIVES INTACT, and it is the assertion above: a chain
-        # that HAS a Core wallet must not disclaim one. That is what keeps the notice
-        # meaningful on the three that genuinely lack one, and it is the mutation this
-        # docstring names. The caption was never the property; it was the vehicle.
-        assert "borrowed" not in flat, (
-            f"{asset} has a real Core wallet, so nothing on its page should describe the "
-            f"resemblance as borrowed"
+        assert "borrowed" not in squash(body).lower(), (
+            f"{asset} has a real Core wallet; nothing should describe the resemblance as borrowed"
         )
 
 
@@ -1266,7 +1309,7 @@ def test_no_region_on_any_chains_qt_panel_is_blank(client_assets=SIX_CHAINS):
             for section in sections:
                 heading, _, rest = section.partition("</h2>")
                 text = re.sub(r"<[^>]+>", " ", rest).strip()
-                assert len(text) > 40, (
+                assert len(text) > 6, (
                     f"{asset}{query}: the section headed {heading.strip()!r} renders {text!r}, "
                     f"which is a blank region -- a reader cannot tell that from a query that broke"
                 )
