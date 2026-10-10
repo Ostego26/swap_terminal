@@ -29,6 +29,7 @@ import sqlite3
 import pytest
 from db import SCHEMA, dict_factory
 from services.helpers import iso_to_epoch_nanos
+from valid_addresses import GRC_PAYOUT
 
 import pay_icp_deposit as subject
 
@@ -40,7 +41,13 @@ GOOD = {
     "from_asset": "ICP",
     "to_asset": "GRC",
     "deposit_address": "d220b5a9955e7667fb429419a2eca19a82c84c1fef034789b4d5930db19b601d",
-    "payout_address": "mg3gJAmhADxf2ScRuXu7HXM2oixxiQG2Ap",
+    # GRC_PAYOUT, NOT A PASTED STRING. tests/test_address_literals_are_valid.py
+    # caps address literals in the tree and names the remedy: "use
+    # tests/valid_addresses.py rather than writing one -- a derived address
+    # cannot be mistyped and says what it is for". My first draft pasted a real
+    # testnet address from HANDOFF.md and pushed that ceiling over its limit,
+    # which is the gate working.
+    "payout_address": GRC_PAYOUT,
     "expected_input_amount": 2.42621078,
     "status": "awaiting_deposit",
     "created_at": "2026-10-10T17:00:00+00:00",

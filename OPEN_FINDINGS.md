@@ -336,6 +336,34 @@ lives under that path or elsewhere in the container.** A reason to believe it
 survives is not a reading of it (rule 17), and this was not measurable from the
 container the change was written in: no replica, and `docker` was forbidden.
 
+**MEASURED 2026-10-10, BY THE OPERATOR, AND THE LEDGER HALF IS NOW SETTLED.** A
+`docker compose down` (which removed `swap-web`, `swap-icp-replica` and the
+network) followed by `docker compose up`, then a read-only dry run:
+
+```
+python3 fund_desk.py --asset ICP --target 1200
+  balances   desk 1200.0 LICP
+  done in         2.2µfn (2.7s)
+```
+
+1200.0 LICP is the exact balance minted BEFORE the `down`, read back from the
+same desk account `a0263999...c12042`, through the same
+`ICP_LEDGER_CANISTER_ID`. So the named volume `icp-replica-data:/root/.local/share/dfx`
+does what `28de99c` added it to do: **the ledger, its canister id and its
+balances survive `docker compose down` without `-v`.** The replica entrypoint's
+stale-pid clear also fired and the replica came back healthy.
+
+**WHAT IS STILL NOT MEASURED, and it is a different claim.** Whether the tECDSA
+key for `dfx_test_key` specifically survives. The ledger surviving is strong
+evidence that the state directory persisted and that the key lives in it -- but
+that is an inference from one artifact to another, not the before/after
+comparison. The direct check is still the two `public_key` calls below, and until
+somebody runs them this stays open.
+
+Treat the 2026-10-07 key-loss measurement as explained rather than refuted: it
+predates the volume by four hours and forty minutes, and the topology it
+describes no longer exists.
+
 **The check, read-only, with the replica up. Run it with NOTHING at a
 canister-derived address:**
 

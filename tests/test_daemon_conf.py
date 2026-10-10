@@ -403,6 +403,23 @@ SERVICE_SIDE = frozenset({
     # service-side rule and the mainnet refusal are the same requirement -- ask
     # exactly the daemon the terminal asks, and only when its port says test chain.
     "wallet_custody.py",
+    # pay_icp_deposit.py, added 2026-10-10. SERVICE SIDE, and the reasoning is
+    # fund_desk.py's above word for word with the direction reversed.
+    #
+    # It pays the CUSTOMER side of a swap, to the deposit address recorded in
+    # swap_terminal.db, and that address only means anything to the watcher that
+    # is polling it. A conf fallback resolving some other ICP ledger would do the
+    # worst available thing: move real tokens, print a block index, and leave the
+    # swap at awaiting_deposit forever -- money gone, the screen saying it
+    # arrived, and the deposit sitting on a ledger nothing in this terminal
+    # reads. So it must reach EXACTLY what build_adapters(Config.RPC) reaches,
+    # which is what the deposit watcher reaches.
+    #
+    # It takes its SENDING identity outside the resolver (dfx_transport's
+    # `identity` argument), which is not a conf fallback: the identity decides
+    # who signs, not which ledger is reached, and chains/icp.py's adapter cannot
+    # supply one because it is --identity anonymous by construction.
+    "pay_icp_deposit.py",
 })
 # show_swap.py was in this set for one commit and the register's own completeness
 # check removed it: it reads swap_terminal.db and resolves no chain at all, so a

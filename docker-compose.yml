@@ -184,7 +184,17 @@
 # answers a question nobody asked -- "is the container gone" -- where the question
 # an operator means is "is anything of this stack running".
 #
-# THE ONE COMMAND THAT SETTLES IT, read-only, on a host with the replica up.
+# MEASURED 2026-10-10 BY THE OPERATOR, AND THE LEDGER HALF IS SETTLED: a
+# `docker compose down` followed by `up`, then `fund_desk.py --asset ICP` read
+# back `desk 1200.0 LICP` -- the exact balance minted before the down, from the
+# same account, through the same ledger canister id. The named volume above does
+# what it was added to do, so a `down` does NOT cost the ledger.
+#
+# STILL NOT MEASURED: whether the tECDSA key survives specifically. The ledger
+# surviving is evidence the state directory persisted and nothing more; one
+# artifact is not the other. OPEN_FINDINGS finding 19 keeps it open.
+#
+# THE ONE COMMAND THAT SETTLES THAT HALF, read-only, on a host with the replica up.
 #
 # IT GOES THROUGH `docker compose exec`, NOT HOST dfx, and that is not a style
 # preference. HANDOFF.md section 1: host dfx run with icp/dfx.json in scope saw a
