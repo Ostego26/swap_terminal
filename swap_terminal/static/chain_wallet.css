@@ -47,7 +47,7 @@
  * THE INERT REGIONS. Qt's Send and Receive, as prose rather than as controls.
  * =========================================================================
  *
- * `.cw-inert` is styled to read as a NOTICE and explicitly NOT as a greyed-out button.
+ * `.cw-inert` is styled to read as a NOTICE and explicitly NOT as a grayed-out button.
  * That is a deliberate inversion of the obvious choice, and the reason is that a
  * disabled control is a promise: it says the capability is one permission away. Here it
  * is not -- there is no POST route to enable, no signing path wired to a browser, and

@@ -500,7 +500,7 @@ def test_nothing_on_any_chains_panel_is_HIDDEN(asset):
 
 @pytest.mark.parametrize("asset", SIX_CHAINS)
 def test_qts_send_and_receive_are_inert_PROSE_and_not_disabled_controls(asset):
-    """A greyed-out Send button is a promise. There is nothing here to enable.
+    """A grayed-out Send button is a promise. There is nothing here to enable.
 
     tests/test_chain_panel.py already asserts the rendered page carries no `<form`, no
     `<input`, no `<textarea`, no `<button` and no `type="password"`, on all six chains.
@@ -534,7 +534,7 @@ def test_qts_send_and_receive_are_inert_PROSE_and_not_disabled_controls(asset):
     # takes in markup.
     for shape in ('disabled>', 'disabled ', 'disabled=', "disabled/"):
         assert shape not in body.lower().replace("no disabled ", ""), (
-            f"{asset} renders a disabled attribute ({shape!r}), which is the greyed-out control "
+            f"{asset} renders a disabled attribute ({shape!r}), which is the grayed-out control "
             f"this layout deliberately does not have"
         )
 

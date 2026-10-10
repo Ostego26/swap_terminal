@@ -67,7 +67,7 @@ THE THREE CONSTRAINTS THAT SHAPED EVERY CHOICE BELOW, AND NONE OF THEM BENT.
    separate reasons that happen to agree. The mechanical one: a `<input disabled>` is
    still an `<input>`, so it fails the test, and weakening the test to fit a layout
    would be trading the structural guarantee for a picture of a control. The real
-   one: a greyed-out Send button is a promise that the capability is one setting away,
+   one: a grayed-out Send button is a promise that the capability is one setting away,
    and on this surface it is not -- there is no POST route to enable, no signing path
    wired to a browser, and the operator's standing instruction is that a passphrase
    must never appear in a command this repository emits.
@@ -351,7 +351,7 @@ _RAIL_CORE: tuple[Rail, ...] = (
          "Qt's Send tab builds, signs and broadcasts a transaction",
          RAIL_INERT,
          "this surface registers no write method of any kind, so there is no form here and "
-         "there is no disabled one either -- a greyed-out button would promise that spending is "
+         "there is no disabled one either -- a grayed-out button would promise that spending is "
          "one setting away, and it is not. Sending is a named entry point at the repository "
          "root, run by the operator in their own shell",
          "rail", "", True),
