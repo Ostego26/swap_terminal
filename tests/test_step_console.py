@@ -440,3 +440,163 @@ def test_a_FAILED_check_is_named_in_failures_which_is_what_a_bool_lost():
     console.check("a real failure", 1, 2, FAIL)
     assert console.counts[FAIL] == 1
     assert console.failures and "a real failure" in console.failures[0]
+
+
+# ---------------------------------------------------------------------------
+# THE CONFORMANCE GATE, 2026-10-10, after the SECOND crossing in one file.
+#
+# The two classes named Console differ in THREE methods, not one:
+#
+#     step_console          regtest.console
+#     check(..., ok: bool)  check(..., outcome: str)      -> different TYPE
+#     step(number, title)   step(number, chain, title)    -> different ARITY
+#     summary() -> int      summary() -> None             -> different RETURN
+#
+# C16 closed the first for one direction. C57 closed it for the other. Then I
+# wrote the SECOND crossing into testnet_wallets.py and it reached the operator's
+# terminal as `TypeError: Console.step() missing 1 required positional argument`,
+# because every test in that file called a decision function directly and nothing
+# ran main(). Fixing the line would leave the third trap armed -- and the third is
+# the worst of them: `return console.summary()` against regtest.console returns
+# None, so SystemExit(None) exits 0 and a failing run reports success. That is
+# C16's incident a third time.
+#
+# So this checks CALLS against the class the file actually imports, for both
+# populations, rather than closing one method at a time.
+# ---------------------------------------------------------------------------
+
+_CONSOLE_CLASSES = {"step_console": Console, "regtest.console": RegtestConsole}
+
+
+def _console_module_of(tree: ast.Module) -> str | None:
+    """Which Console a file IMPORTS, read from its import statements. None if neither.
+
+    THE IMPORT STATEMENTS, NOT THE TEXT, AND THE FIRST VERSION GOT THAT WRONG -- one
+    minute after I fixed the identical defect in test_daemon_conf.py's two gates. It
+    substring-matched "from step_console import" anywhere in the file, so
+    testnet_wallets.py -- which NAMES step_console in a comment explaining that its
+    step() has a different arity -- was classified as a step_console file and the gate
+    reported its correct 3-argument call as wrong.
+
+    That is the third time today a check of mine matched prose adjacent to its claim
+    rather than the thing claimed (C44 was the first, test_daemon_conf's gates the
+    second), and the second time I wrote the defect into the fix for it. An AST read of
+    the import nodes cannot be fooled by a comment, a docstring, or a string literal.
+
+    STILL NOT AN IMPORT OF THE FILE ITSELF: this runs over every .py in the tree and
+    importing them all would execute module-level code in forty of them.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module == "step_console":
+                return "step_console"
+            if node.module == "regtest.console":
+                return "regtest.console"
+            if node.module == "regtest" and any(a.name == "console" for a in node.names):
+                return "regtest.console"
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "step_console":
+                    return "step_console"
+                if alias.name in ("regtest.console", "swap_terminal.regtest.console"):
+                    return "regtest.console"
+    return None
+
+
+def _console_calls(tree: ast.Module) -> list[tuple[int, str, int, tuple[str, ...]]]:
+    """Every `console.<method>(...)` call in a file, as (line, method, positionals, keywords)."""
+    calls = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "console"):
+            continue
+        keywords = tuple(k.arg for k in node.keywords if k.arg)
+        calls.append((node.lineno, node.func.attr, len(node.args), keywords))
+    return calls
+
+
+def test_every_console_call_MATCHES_THE_CLASS_ITS_FILE_IMPORTS():
+    """The gate. Arity and keyword names, against the real signature, tree-wide.
+
+    WHAT IT WOULD HAVE CAUGHT, and did not exist to: `console.step(number, title)`
+    in a file importing regtest.console, whose step() takes (number, chain, title).
+    It reached the operator as a TypeError on the first line of real work.
+
+    IT DOES NOT CHECK TYPES, only shapes, and that boundary is deliberate: check()'s
+    bool-versus-string crossing is a TYPE error, it is not visible in an AST, and it
+    is already refused at RUNTIME by both classes (C16 and C57). Arity and keyword
+    names are what a static read can establish, so that is what this claims.
+
+    FILES THAT IMPORT NEITHER ARE SKIPPED rather than guessed at. A `console`
+    parameter in a file importing no Console is a stub or a protocol, and asserting
+    against a class it never names would be this test inventing a fact.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    wrong, checked, files = [], 0, 0
+    for path in sorted(root.rglob("*.py")):
+        if ".git" in path.parts or "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        module = _console_module_of(tree)
+        if module is None:
+            continue
+        cls = _CONSOLE_CLASSES[module]
+        files += 1
+        for line, method, positional, keywords in _console_calls(tree):
+            member = getattr(cls, method, None)
+            if member is None or not callable(member):
+                wrong.append(f"{path.relative_to(root)}:{line} console.{method}() "
+                             f"does not exist on {module}.Console")
+                continue
+            try:
+                inspect.signature(member).bind(None, *range(positional),
+                                               **dict.fromkeys(keywords))
+            except TypeError as error:
+                wrong.append(
+                    f"{path.relative_to(root)}:{line} console.{method}("
+                    f"{positional} positional{', ' + ', '.join(keywords) if keywords else ''}) "
+                    f"does not fit {module}.Console.{method}{inspect.signature(member)} -- {error}")
+            checked += 1
+    assert files >= 10, (
+        f"only {files} files import a Console; 14 did when this was written, so the scan has "
+        f"stopped finding them and this gate is asserting an absence it can no longer see"
+    )
+    assert checked >= 100, f"only {checked} console calls were checked; 200+ existed when written"
+    assert not wrong, (
+        f"{len(wrong)} console call(s) do not fit the Console their own file imports. The two "
+        f"classes named Console differ in check()'s verdict TYPE, step()'s ARITY and summary()'s "
+        f"RETURN, and they are one copy-paste apart:\n  " + "\n  ".join(wrong))
+
+
+def test_NOTHING_returns_regtest_consoles_summary_as_an_exit_code():
+    """The third trap, and the only one of the three that is silent.
+
+    step_console.summary() returns 1 if anything failed, so `return console.summary()`
+    is an exit code. regtest.console.summary() returns None, so the same line gives
+    SystemExit(None) -- which exits 0. A run with failures reporting success, which is
+    C16's incident in a third costume.
+
+    Checked as a SHAPE rather than left to the arity gate above, because both
+    summary() methods take no arguments and bind identically: nothing about the call
+    is wrong, only what is done with the answer.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        if ".git" in path.parts or "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if _console_module_of(tree) != "regtest.console":
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Return) or node.value is None:
+                continue
+            if (isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute)
+                    and node.value.func.attr == "summary"
+                    and isinstance(node.value.func.value, ast.Name)
+                    and node.value.func.value.id == "console"):
+                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert not offenders, (
+        "these return regtest.console.Console.summary() as a value, and it returns None -- so a "
+        "`raise SystemExit(main())` built on it EXITS 0 on a run that failed. step_console's "
+        "summary() returns an int and is the one that may be returned:\n  " + "\n  ".join(offenders))

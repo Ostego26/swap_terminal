@@ -540,9 +540,24 @@ class XRPAdapter:
                 f"before signing and no XRP swap can be created; mainnet refused by server network_id, "
                 f"not by url)"
             )
+        # THE POSTURE COMES BEFORE THE CONFIRMATION GLOSS, AND IT USED TO COME AFTER.
+        # describe_min_confirmations() ends in a trailing `<- NOT a block depth; the XRP
+        # Ledger does not reorganize` -- an annotation designed to END a line -- so
+        # appending the posture behind it rendered, on the operator's screen 2026-10-10:
+        #
+        #     min_confirmations=1 validated ledger  <- NOT a block depth; the XRP
+        #     Ledger does not reorganize payouts=*** ARMED, THIS PROCESS CAN SPEND XRP ***
+        #
+        # with no separator. The single most important fact on the line -- that this
+        # process can spend XRP -- read as the tail of a sentence about reorganization.
+        # Rule 14's "state what the number means, NEXT TO the number" cuts both ways: a
+        # gloss that is trailing by design has to stay trailing, and anything appended
+        # after one is swallowed by it. GRC's unlock posture is already its own line for
+        # the same reason; XRP's is the only other armed one, which is why only this
+        # line showed it.
         return (
-            f"  XRP  rpc={self.url} min_confirmations={describe_min_confirmations(self.min_confirmations)} "
-            f"{posture}"
+            f"  XRP  rpc={self.url} {posture} "
+            f"min_confirmations={describe_min_confirmations(self.min_confirmations)}"
         )
 
     def call(self, method: str, params: dict | None = None):

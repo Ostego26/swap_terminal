@@ -473,6 +473,23 @@ def test_the_banner_says_which_payout_posture_this_process_is_actually_in(monkey
     assert "*** ARMED, THIS PROCESS CAN SPEND XRP ***" in armed, (
         "the armed state must be findable by an operator scanning a banner for it"
     )
+    # AND IT MUST NOT BE SWALLOWED BY THE TRAILING GLOSS, measured on the operator's
+    # screen 2026-10-10. describe_min_confirmations() ends in `<- NOT a block depth;
+    # the XRP Ledger does not reorganize` -- an annotation designed to END a line -- and
+    # the posture used to be appended AFTER it with no separator, so the line read
+    # "...does not reorganize payouts=*** ARMED, THIS PROCESS CAN SPEND XRP ***" and the
+    # most important fact on it became the tail of a sentence about reorganization.
+    #
+    # The assertion is POSITIONAL because that is the defect: both strings were present
+    # the whole time. `in` could not see it and cannot see it coming back.
+    assert armed.index("payouts=") < armed.index("<-"), (
+        "the arming posture must come BEFORE the `<-` confirmation gloss. A trailing "
+        "annotation swallows anything appended after it, and what was being swallowed "
+        "is the sentence saying this process can spend money"
+    )
+    assert armed.rstrip().endswith("does not reorganize"), (
+        "and the gloss is still the LAST thing on the line, which is what makes it a gloss"
+    )
     assert "PREVIEW-ONLY" not in armed, "a process that can spend must not describe itself as preview-only"
     # The one promise neither state may drop, because no variable turns it off.
     # Case-folded because the two lines start the sentence differently -- "mainnet

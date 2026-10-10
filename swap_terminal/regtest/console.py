@@ -148,9 +148,28 @@ class ConsoleLike(Protocol):
 class Console:
     """Printer for a run. Holds the step counter and the outcome tallies."""
 
-    def __init__(self, total_steps: int, stream=sys.stdout) -> None:
+    def __init__(self, total_steps: int, stream=None) -> None:
         self.total_steps = total_steps
-        self.stream = stream
+        # RESOLVED AT CONSTRUCTION, NOT AT IMPORT, and that is a fix rather than a
+        # style change. `stream=sys.stdout` as a DEFAULT ARGUMENT is evaluated once,
+        # when this `def` executes -- so every Console built without an explicit stream
+        # held the stdout object that existed when this module was first imported, not
+        # the one in place when it was constructed.
+        #
+        # WHAT THAT COST, 2026-10-10: a test of testnet_wallets.main() could not read
+        # its own output. main() builds its own Console, pytest installs its capture
+        # before importing the test modules, and the captured object therefore belonged
+        # to pytest's SESSION-level capture rather than the test's -- so capsys AND
+        # capfd both returned '' while the output sat plainly visible in pytest's
+        # "captured stdout" dump. Present on the screen, absent from readouterr().
+        #
+        # Every existing caller either passes a stream explicitly or wants whatever
+        # stdout is current, so this changes nothing for them: the two can only differ
+        # when something replaced sys.stdout after import, and in that case the new
+        # behavior is the correct one. It is also why no test had hit this -- every
+        # other test in this repo passes stream=io.StringIO(), and a main() test
+        # cannot.
+        self.stream = sys.stdout if stream is None else stream
         self.counts = {OK: 0, FAIL: 0, XFAIL: 0, SKIP: 0}
         self.failures: list[str] = []
         self._step_started = time.monotonic()

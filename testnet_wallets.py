@@ -408,7 +408,16 @@ def main(argv: list[str] | None = None) -> int:
 
     rows: list[dict] = []
     for number, asset in enumerate(chosen, start=1):
-        console.step(number, f"{asset} testnet wallet")
+        # THREE ARGUMENTS, because this is regtest.console.Console. The two classes
+        # named Console differ in THREE methods and I have now written the wrong one
+        # twice in this file: step_console's is `step(number, title)` and this one is
+        # `step(number, chain, title)`. The first crossing was check()'s verdict type
+        # and a test caught it; this one crashed on the operator's host, because every
+        # test in tests/test_testnet_wallets.py called prepare_chain() or report()
+        # directly and NOTHING ran main(). The gate in test_step_console.py now
+        # compares every console call in both populations against the class the file
+        # actually imports.
+        console.step(number, asset, "testnet wallet")
         try:
             rows.append(prepare_chain(console, asset))
         except (RegtestSetupError, OSError) as error:

@@ -343,3 +343,152 @@ def test_one_chain_FAILING_does_not_cost_the_other_its_address():
     out = stream.getvalue()
     assert valid_addresses.LTC_PARTICIPANT in out
     assert "cypherfaucet.com/ltc-testnet" in out, "with a faucet to paste it into"
+
+
+# ---------------------------------------------------------------------------
+# main(), WHICH NOTHING RAN -- and that is why a TypeError reached the operator's
+# terminal on the first line of real work. Every test above calls prepare_chain()
+# or report() directly, which is rule 10's layering working for the DECISIONS and
+# leaving the ORCHESTRATION untested. The orchestration is the part an operator
+# runs.
+#
+# The specific crash: `console.step(number, title)` against regtest.console.Console,
+# whose step() is `(number, chain, title)`. The two classes named Console differ in
+# THREE methods and this was my second crossing in one file.
+#
+# AND THESE TESTS FOUND A SECOND DEFECT, IN A SHIPPED CLASS. They could not read
+# their own output: capsys returned '' and so did capfd, while the output sat plainly
+# visible in pytest's "captured stdout" dump. The cause was that
+# regtest.console.Console was declared `__init__(self, total_steps, stream=sys.stdout)`
+# -- and a DEFAULT ARGUMENT IS EVALUATED AT DEF TIME, so every Console built without
+# an explicit stream held the stdout object from when that module was imported, which
+# under pytest is the session-level capture rather than the test's. It resolves
+# sys.stdout at CONSTRUCTION now, and capsys works.
+#
+# Nothing had hit it because every other test in this repo passes
+# stream=io.StringIO(). A main() test cannot: main() builds its own Console. So the
+# gap that let the TypeError ship was also hiding the thing that made the gap hard
+# to close.
+# ---------------------------------------------------------------------------
+
+
+def test_main_RUNS_END_TO_END_which_is_the_test_that_was_missing(monkeypatch, capsys):
+    """One chain, seeded daemon, through main(). No decision function called directly.
+
+    It asserts the EXIT CODE and the closing block, because those are what an operator
+    sees -- but the real value is that it executes every line main() touches:
+    Console(), console.step(), the per-chain loop, the exception handler and report().
+    A TypeError in any of them fails here instead of on the operator's host.
+    """
+    daemon = _Daemon(_HEALTHY_BTC)
+    monkeypatch.setattr(tw, "build_adapters", lambda rpc: {"BTC": daemon})
+    monkeypatch.setattr(tw.Config, "RPC", {"BTC": {"wallet": "desk_hot"}}, raising=False)
+
+    assert tw.main(["--btc"]) == 0
+    out = capsys.readouterr().out
+    assert "preparing 1 chain(s): BTC" in out, "the announcement comes BEFORE the work (rule 14)"
+    # THE RENDERED SHAPE, READ OFF A REAL RUN rather than guessed. regtest.console
+    # prints `step 1/1  [BTC]  testnet wallet` -- the chain in brackets, which is the
+    # whole reason its step() takes a `chain` argument that step_console's does not.
+    # My first version asserted "BTC testnet wallet" and failed on the formatting:
+    # a test wrong about the very thing it had just been written to fix.
+    assert "step 1/1" in out and "[BTC]" in out and "testnet wallet" in out, (
+        "console.step() rendered -- this is the call that crashed on the operator's host"
+    )
+    assert "PASTE THESE INTO A FAUCET" in out
+    assert valid_addresses.BTC_PARTICIPANT in out
+    assert "cypherfaucet.com/btc-testnet4" in out
+    assert ("createwallet", "desk_hot") in daemon.asked
+
+
+def test_main_RETURNS_NONZERO_when_a_chain_refuses(monkeypatch, capsys):
+    """The exit code is a result, and a refusing run must not report success.
+
+    `raise SystemExit(main())` is the entry point, so this IS the shell's answer.
+    Returning 0 on a run where no wallet was prepared is the shape C16 keeps
+    recurring as -- a failure that exits clean.
+    """
+    monkeypatch.setattr(tw, "build_adapters",
+                        lambda rpc: {"BTC": _Daemon({"getblockchaininfo": {"chain": "main"}})})
+    monkeypatch.setattr(tw.Config, "RPC", {"BTC": {"wallet": "desk_hot"}}, raising=False)
+    assert tw.main(["--btc"]) == 1
+    assert "NO CHAIN IS READY" in capsys.readouterr().out
+
+
+def test_main_runs_BOTH_chains_and_one_failure_does_not_stop_the_other(monkeypatch, capsys):
+    """A daemon that cannot be reached must not cost the other chain its address.
+
+    The mirror of the operator's situation on 2026-10-10, which is why it is the pair
+    worth seeding: one chain answering and mid-sync, one not answering at all.
+    """
+    good = _Daemon({
+        "getblockchaininfo": {"chain": "test", "blocks": 2470883, "headers": 4912201,
+                              "initialblockdownload": True},
+        "getwalletinfo": {"descriptors": False, "balance": 0},
+        "getnewaddress": valid_addresses.LTC_PARTICIPANT,
+    })
+
+    class _Unreachable:
+        url = "http://127.0.0.1:18443/"
+
+        def call(self, method, *params):
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(tw, "build_adapters", lambda rpc: {"BTC": _Unreachable(), "LTC": good})
+    monkeypatch.setattr(tw.Config, "RPC",
+                        {"BTC": {"wallet": "desk_hot"}, "LTC": {"wallet": "desk_hot"}},
+                        raising=False)
+    assert tw.main(["--all"]) == 1, "one chain failed, so the run did not fully succeed"
+    out = capsys.readouterr().out
+    # IT LANDS IN THE NETWORK REFUSAL, NOT IN main()'s HANDLER, and that is better than
+    # what this test first asserted. chain_network() catches the transport error and
+    # returns its sentinel, so the verdict is NOT_ESTABLISHED and the operator gets the
+    # credential-first sentence naming BOTH RPCs that were tried -- rather than the bare
+    # `FAILED: OSError` I expected. main()'s handler needs a failure AFTER the network is
+    # established, which is its own test below.
+    assert "did not name its network" in out and "OSError" in out, (
+        "the unreachable chain is named with what was tried, not swallowed"
+    )
+    assert "Check the RPC credentials first" in out, "and with the remedy for THAT refusal"
+    assert valid_addresses.LTC_PARTICIPANT in out, "and the chain that worked still gives its address"
+    assert "STILL SYNCING" in out
+    assert "SAFE to make now" in out
+
+
+def test_main_with_NO_CHAIN_SELECTED_prints_help_and_exits_2(capsys):
+    """Nothing selected is not an error and not a success. It is exit 2, with the help.
+
+    The same shape fund_testnets.main() uses, and the reason is rule 14: a bare run
+    that printed nothing would be ambiguous between "done" and "broken".
+    """
+    assert tw.main([]) == 2
+    out = capsys.readouterr().out
+    assert "Nothing selected, so nothing was done" in out
+    assert "--btc" in out and "--ltc" in out and "--all" in out
+
+
+def test_main_CATCHES_a_setup_error_and_still_reports(monkeypatch, capsys):
+    """main()'s own except handler, which the unreachable-daemon test does NOT reach.
+
+    A transport error is caught by chain_network() and becomes a network refusal, so
+    the only way into main()'s handler is a failure AFTER the network is established.
+    `listwallets` raising is that: ensure_wallet_on() turns it into RegtestSetupError,
+    naming a --disable-wallet build as the cause, and main() has to name and count it
+    rather than letting it end the run.
+    """
+    class _NoWalletSupport:
+        url = "http://127.0.0.1:18443/"
+
+        def call(self, method, *params):
+            if method == "getblockchaininfo":
+                return {"chain": "testnet4", "blocks": 1, "headers": 1,
+                        "initialblockdownload": False}
+            raise RPCError("Method not found")
+
+    monkeypatch.setattr(tw, "build_adapters", lambda rpc: {"BTC": _NoWalletSupport()})
+    monkeypatch.setattr(tw.Config, "RPC", {"BTC": {"wallet": "desk_hot"}}, raising=False)
+    assert tw.main(["--btc"]) == 1
+    out = capsys.readouterr().out
+    assert "FAILED: RegtestSetupError" in out, "named and counted, not raised through main()"
+    assert "disable-wallet" in out, "and it names the cause ensure_wallet_on() exists to name"
+    assert "NO CHAIN IS READY" in out, "and the closing block still prints"
