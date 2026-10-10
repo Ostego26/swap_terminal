@@ -53,6 +53,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from source_tree import NOT_SOURCE
 from stack_authority import readiness_verdict as port_readiness_verdict
 
 import swap_terminal_desktop as desktop
@@ -235,7 +236,13 @@ def test_NOTHING_ELSE_IN_THE_TREE_defines_a_THIRD_readiness_verdict():
     docstring, which is why it is the only correct form.
     """
     root = Path(__file__).resolve().parent.parent
-    skip = {".git", "__pycache__", ".ruff_cache", ".pytest_cache", "node_modules", "venv"}
+    # NOT_SOURCE RATHER THAN A SIXTH INLINE COPY OF THIS SET, 2026-10-10. This one listed
+    # six names and missed `.claude`, where Claude Code puts git worktrees -- and a worktree
+    # there is a COMPLETE second copy of the tree, so this sweep found the verdict tables
+    # twice and reported a THIRD definition that does not exist. A uniqueness assertion over
+    # a tree containing a copy of itself cannot hold. tests/source_tree.py has the
+    # measurement and is the one place to change it.
+    skip = set(NOT_SOURCE)
     found = []
     for path in root.rglob("*.py"):
         if skip & set(path.parts):

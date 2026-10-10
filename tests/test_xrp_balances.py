@@ -34,6 +34,7 @@ import sys
 
 import pytest
 from conftest import TranscriptConsole
+from source_tree import is_source
 
 SOURCE = pathlib.Path(__file__).resolve().parent.parent / "xrp_balances.py"
 TREE = ast.parse(SOURCE.read_text())
@@ -352,8 +353,12 @@ def test_the_epoch_offset_has_exactly_one_definition_in_the_tree():
             for node in ast.walk(ast.parse(path.read_text()))
         )
 
+    # `is_source` RATHER THAN THE TWO NAMES THIS TESTED, 2026-10-10: it did not exclude
+    # `.claude`, so a git worktree at .claude/worktrees/agent-<id>/ -- a complete second copy
+    # of the tree -- made this sweep find chains/xrp_units.py twice and report two
+    # definitions of the epoch offset. See tests/source_tree.py.
     defined = [str(path.relative_to(root)) for path in sorted(root.rglob("*.py"))
-               if "__pycache__" not in path.parts and ".venv" not in path.parts
+               if is_source(path)
                and _assigns_it(path)]
     assert defined == ["swap_terminal/chains/xrp_units.py"], (
         f"RIPPLE_EPOCH_OFFSET_SECONDS is assigned in {defined}. One definition, imported -- a second "

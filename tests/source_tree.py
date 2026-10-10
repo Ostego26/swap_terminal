@@ -52,6 +52,23 @@ luck: most of them look for a SPECIFIC named file and are indifferent to a secon
 it appearing elsewhere. That tolerance is not a guarantee -- any of them that grows a
 count or a uniqueness assertion will break the same way.
 
+AND TWO MORE BROKE WITHIN THE HOUR, which is why that paragraph is corrected here rather
+than overwritten (rule 1: the drift is the point). A second worktree was created for a
+different agent and the next suite run reported:
+
+    test_two_readiness_verdicts_answer_different_questions::
+        test_NOTHING_ELSE_IN_THE_TREE_defines_a_THIRD_readiness_verdict
+    test_xrp_balances::test_the_epoch_offset_has_exactly_one_definition_in_the_tree
+
+Both are uniqueness assertions, which is exactly the shape the paragraph above predicted
+would break -- and the prediction came true in the time it took to run the suite twice.
+The first had its own set of SIX excluded names and still missed `.claude`; the second
+tested two. Both now import from here.
+
+SO THE COUNT IS: 4 of 23 converted, 19 not. The denominator is stated because a bare
+"converted the broken ones" would read as done (rule 3). Every one of the 19 is tolerant
+TODAY for the reason above and none of them is guaranteed to stay that way.
+
 That is named work, not a baseline. There is no suppression here and no tolerated list:
 this module is the one place to import from, and the remaining files are a conversion
 nobody has done.
