@@ -1539,3 +1539,137 @@ def test_status_with_no_host_worker_does_not_claim_deposits_are_uncredited(tmp_p
         "the warning against resolving this line by starting the host workers must be on "
         "the screen, because that is the action the line invites"
     )
+
+
+# =============================================================================
+# endpoint_summary() ON A HOST THAT CANNOT IMPORT THE APPLICATION
+# =============================================================================
+#
+# Measured on the operator's host 2026-10-10, with the containerized stack UP and
+# serving and all three workers running under pid files:
+#
+#     workers           supervisor.py owns these; this is its own report
+#   swap_terminal supervisor: STATUS
+#     run directory     .../swap_terminal/runtime
+#   Traceback (most recent call last):
+#     [...] from services.payout_service import unlock_readiness_lines
+#   ModuleNotFoundError: No module named 'bech32'
+#
+# `python3 swap_stack.py status` printed six sections and died. The worker table,
+# the endpoint lines and the unlock readiness -- everything the operator ran the
+# command FOR -- never appeared, on the one command they run when something is
+# already wrong. The deployment is containerized, so requirements.txt is installed
+# in the web image and the host has no reason to carry the application's wheels.
+
+#: The block that fakes an absent dependency. A SUBPROCESS AND NOT monkeypatch,
+#: because bech32 IS installed in this suite's environment: inserting a meta_path
+#: blocker here and then importing would leave half-initialized modules in
+#: sys.modules for every test that ran afterwards, and the failure would land
+#: somewhere else entirely.
+_BLOCKED_IMPORT_PROBE = '''
+import os
+import sys
+
+sys.path.insert(0, "swap_terminal")
+
+
+class Blocker:
+    """Raise ModuleNotFoundError for one module, exactly as a missing wheel does."""
+
+    def find_spec(self, name, path=None, target=None):
+        if name == %(blocked)r:
+            raise ModuleNotFoundError("No module named %(blocked)r", name=%(blocked)r)
+        return None
+
+
+sys.meta_path.insert(0, Blocker())
+os.environ.setdefault("SWAP_DB_PATH", %(db)r)
+import supervisor
+
+for line in supervisor.endpoint_summary():
+    print(line)
+'''
+
+
+def _summary_with_module_missing(blocked: str, db_path: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-c", _BLOCKED_IMPORT_PROBE % {"blocked": blocked, "db": db_path}],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+
+
+def test_endpoint_summary_degrades_instead_of_killing_status(tmp_path):
+    """It RETURNS LINES on a host that cannot import the application. It never raises.
+
+    THE PROPERTY IS THE EXIT CODE AND THE ABSENCE OF A TRACEBACK, not the wording.
+    endpoint_summary()'s contract is to hand the banner a list of lines; the caller
+    prints the worker table after it, and that table -- pid files and /proc, nothing
+    from the application -- is what `status` exists for. A raise here throws away the
+    part that still worked.
+    """
+    run = _summary_with_module_missing("bech32", str(tmp_path / "x.db"))
+
+    assert run.returncode == 0, f"endpoint_summary() raised instead of degrading:\n{run.stderr[-2000:]}"
+    assert "Traceback" not in run.stderr, f"a traceback reached the operator:\n{run.stderr[-2000:]}"
+    assert run.stdout.strip(), "rule 14: a blank result is ambiguous between 'nothing' and 'this died'"
+
+
+def test_the_degraded_lines_name_the_module_the_remedy_and_what_is_unaffected(tmp_path):
+    """Three facts, because without all three the line invites the wrong action.
+
+      the module      the operator is holding a working stack and a broken command.
+                      Without the name they cannot fix it, and `absent.name` is the
+                      only place the name exists.
+      what still      the worker table below comes from pid files and /proc. If the
+      works           operator reads this as "status is broken" they will go looking
+                      at the containers, which are fine.
+      the remedy      one line they can run.
+
+    AND IT MUST SAY THE STACK IS NOT IMPLICATED. This is a report that could not be
+    produced, not a finding about the terminal -- and "unlock readiness could not be
+    read" is one careless sentence away from reading as "the wallet cannot unlock",
+    which is the opposite of the truth and would send them to re-enter a passphrase
+    that is already correct.
+    """
+    run = _summary_with_module_missing("bech32", str(tmp_path / "x.db"))
+    out = run.stdout
+
+    assert "bech32" in out, "the missing module is not named, so the operator cannot act"
+    assert "pip install" in out and "requirements.txt" in out, "no remedy on the screen"
+    assert "WORKER TABLE BELOW IS UNAFFECTED" in out
+    assert "says NOTHING about whether the stack works" in out, (
+        "a report that could not be produced must not read as a finding about the terminal"
+    )
+    # The database path is still echoed, because it is the one thing this can know
+    # without importing anything, and it is the question the census would have answered.
+    assert "SWAP_DB_PATH" in out
+
+
+def test_one_guard_covers_every_route_to_the_missing_module(tmp_path):
+    """MUTATION: guard only the payout_service import and this test fails.
+
+    THIS IS THE TEST FOR THE FIRST ATTEMPT BEING WRONG. Guarding
+    `from services.payout_service import unlock_readiness_lines` alone moved the
+    traceback rather than removing it, because workers.common reaches the same module
+    by an entirely different route:
+
+        workers.common -> services.deposit_service -> swap_service
+                       -> modules.address_authority -> modules.address_network -> bech32
+
+    So the assertion is made against a module that only the SECOND route reaches.
+    Patching imports one at a time is rule 19's symptom-chasing; the fact being
+    reported is "this host cannot import the application", and it is one fact.
+    """
+    # modules.address_network imports both; base58 is reached through swap_service's
+    # chain only, so blocking it exercises the route the first attempt missed.
+    for blocked in ("bech32", "base58"):
+        run = _summary_with_module_missing(blocked, str(tmp_path / "x.db"))
+        assert run.returncode == 0, (
+            f"blocking `{blocked}` still crashed endpoint_summary(), so the guard does not cover "
+            f"every route to it:\n{run.stderr[-1500:]}"
+        )
+        assert blocked in run.stdout, f"the degraded line does not name `{blocked}`"

@@ -1398,13 +1398,76 @@ def endpoint_summary() -> list[str]:
     # ~482) and `status` (line ~547) are the only two callers -- so on the one
     # subcommand an operator runs when something is already wrong it buys
     # nothing.
-    from chains.registry import build_adapters  # noqa: PLC0415 -- measured above
-    from services.payout_service import unlock_readiness_lines  # noqa: PLC0415 -- measured above
-    from workers.common import (  # noqa: PLC0415 -- measured above
-        database_census,
-        db_path_source,
-        endpoint_lines,
-    )
+    # =========================================================================
+    # EVERY IMPORT IN THIS FUNCTION IS GUARDED, BECAUSE THEY KILLED `status` ON
+    # THE OPERATOR'S HOST
+    # =========================================================================
+    #
+    # Measured on their machine 2026-10-10, with the containerized stack UP and
+    # serving and all three workers running under pid files:
+    #
+    #     workers           supervisor.py owns these; this is its own report
+    #   swap_terminal supervisor: STATUS
+    #     run directory     .../swap_terminal/runtime
+    #   Traceback (most recent call last):
+    #     [...] from services.payout_service import unlock_readiness_lines
+    #     [...] from modules.address_authority import check_address
+    #     [...] from modules.address_network import (
+    #   ModuleNotFoundError: No module named 'bech32'
+    #
+    # `python3 swap_stack.py status` printed its first six sections and then DIED,
+    # so the operator got no worker table, no endpoint lines and no unlock readiness
+    # -- on the one command they run when something is already wrong.
+    #
+    # ONE GUARD AROUND ALL THREE AND NOT ONE PER IMPORT, which was the first attempt
+    # and was wrong within a minute: guarding only payout_service moved the traceback
+    # to workers.common, which reaches the same module by a DIFFERENT route
+    # (workers.common -> services.deposit_service -> swap_service ->
+    # modules.address_authority -> modules.address_network -> bech32). Patching the
+    # imports one at a time is rule 19's symptom-chasing; the fact being reported is
+    # "this host cannot import the application", and it is one fact.
+    #
+    # WHY THE HOST LACKS IT AND WHY THAT IS NOT A MISCONFIGURATION. The deployment is
+    # containerized: requirements.txt is installed in the web IMAGE, and the host
+    # needs it only for the root tools. A host running `status` against a container
+    # stack has no reason to carry the application's wheels, and a diagnostic that
+    # demands them is a diagnostic refusing to diagnose.
+    #
+    # WHAT THIS MUST NOT DO, AND THE LINE IS MONEY (rule 16). It degrades a REPORT and
+    # nothing else. workers/payout_worker.py imports payout_service directly at
+    # startup, so a host missing bech32 still fails that worker loudly and
+    # immediately -- which is correct, because a payout worker that cannot validate an
+    # address must not run. Nothing here makes an unvalidated address reachable, and
+    # the only thing lost is a line SAYING whether a wallet can unlock.
+    #
+    # ModuleNotFoundError AND NOT Exception (rule 12's BLE001). The one thing that
+    # legitimately fails here is a dependency being absent. An ImportError raised by a
+    # syntax error or a circular import inside our OWN modules is a real defect and
+    # must still crash -- ModuleNotFoundError's `.name` is what distinguishes them, and
+    # it is printed, so the caller can tell this failure from a real answer.
+    try:
+        from chains.registry import build_adapters  # noqa: PLC0415 -- measured above
+        from services.payout_service import unlock_readiness_lines  # noqa: PLC0415 -- measured above
+        from workers.common import (  # noqa: PLC0415 -- measured above
+            database_census,
+            db_path_source,
+            endpoint_lines,
+        )
+    except ModuleNotFoundError as absent:
+        # RETURNS LINES, NEVER RAISES. This function's contract is to hand the banner
+        # a list; the caller prints the worker table after it, and that table is the
+        # thing `status` exists for.
+        return [
+            f"  database          {Config.DB_PATH}  <- SWAP_DB_PATH (echoed without opening it)",
+            f"  CANNOT REPORT     this host has no `{absent.name}` module, so the chain endpoints, "
+            f"the database census and the payout unlock readiness could not be read. The WORKER "
+            f"TABLE BELOW IS UNAFFECTED -- it comes from pid files and /proc, not from the "
+            f"application.",
+            "                    This says NOTHING about whether the stack works: the container has "
+            "the wheels (requirements.txt is installed in the web image) and is what actually runs "
+            "the workers. It is this process that could not ask.",
+            "                    To report it from here:  python3 -m pip install --user -r requirements.txt",
+        ]
 
     # WHICH CHAINS HAVE AN ADAPTER, from the one function that decides it, so the
     # unlock lines cannot name a chain the chain lines above call unconfigured
