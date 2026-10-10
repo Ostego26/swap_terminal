@@ -178,6 +178,130 @@ def test_every_compose_variable_is_in_the_template():
     )
 
 
+def refused_if_empty() -> dict[str, set[str]]:
+    """The variables compose declares `${NAME:?message}`, to the files declaring them.
+
+    SEPARATE FROM referenced_variables() BECAUSE THE TWO ASK DIFFERENT QUESTIONS, and
+    conflating them is what let .env.example ship broken. `${NAME:-default}` has an
+    answer when nobody sets it. `${NAME:?}` has none: compose REFUSES TO INTERPOLATE,
+    nothing starts, and -- the part that caught me -- it refuses an EMPTY value exactly
+    as it refuses an unset one.
+    """
+    found: dict[str, set[str]] = {}
+    for path in compose_files():
+        for line in path.read_text().splitlines():
+            if line.lstrip().startswith("#"):
+                continue
+            for match in COMPOSE_REFERENCE.finditer(line):
+                if (match.group(2) or "").startswith(":?"):
+                    found.setdefault(match.group(1), set()).add(path.name)
+    return found
+
+
+def live_example_assignments() -> dict[str, str]:
+    """Only the UNCOMMENTED assignments in .env.example, name -> value.
+
+    THE COMMENTED ONES ARE DELIBERATELY EXCLUDED HERE, which is the opposite of
+    example_variables() above, and the difference is the whole point of the gate
+    below: a commented line sets nothing and is a correct way to show a variable that
+    only one overlay needs. An UNCOMMENTED line with nothing after the `=` is the
+    broken state, because `cp .env.example .env` turns it into a value compose sees
+    and rejects.
+    """
+    live: dict[str, str] = {}
+    for line in ENV_EXAMPLE.read_text().splitlines():
+        if line.lstrip().startswith("#") or "=" not in line:
+            continue
+        match = re.match(r"^([A-Z_][A-Z0-9_]*)=(.*)$", line.strip())
+        if match:
+            live[match.group(1)] = match.group(2)
+    return live
+
+
+def test_the_template_is_USABLE_after_cp_and_not_merely_complete():
+    """THE GATE THAT WAS MISSING. MUTATION: empty any uncommented value in .env.example.
+
+    =========================================================================
+    WHAT PASSED WHILE THE STACK COULD NOT START
+    =========================================================================
+
+    Every other test in this file passed on 2026-10-10 with
+    `SWAP_DB_DIR=` -- uncommented, empty -- in the template. Coverage was complete:
+    the name was there, nothing was orphaned, no secret value had leaked, git tracked
+    it. And the operator ran `cp .env.example .env`, then `docker compose ps`, and got
+
+        error while interpolating services.web.volumes.[]: required variable
+        SWAP_DB_DIR is missing a value: [...1200 characters of refusal...]
+
+    after a host restart, twenty minutes into trying to bring the stack up. Their
+    words: "this is truly unfuckingbelievable".
+
+    THE GAP BETWEEN THE OLD GATE AND THIS ONE IS COVERAGE VERSUS SATISFACTION. The
+    tests above ask "is every variable MENTIONED". This asks "after the copy the
+    README tells you to make, does compose interpolate" -- and only the second is the
+    property an operator needs. That is this suite's recurring failure shape for the
+    fourth time in one day: a check that passes by looking at the wrong thing (a
+    route asserted at a path that 404s, a constraint checked on an error page, a
+    tracked-file claim checked against an untracked file, and now a completeness
+    check standing in for a usability one).
+
+    =========================================================================
+    WHY EMPTY AND COMMENTED ARE DIFFERENT, AND WHY ONLY ONE IS ALLOWED
+    =========================================================================
+
+      commented out    sets nothing. Compose falls back to its own `:-default`, or
+                       refuses with its `:?` message if there is none AND the overlay
+                       demanding it is in COMPOSE_FILE. Correct for every variable
+                       only an armed overlay needs.
+      uncommented
+      and empty        sets the variable TO THE EMPTY STRING. `${NAME:?}` rejects
+                       that identically to unset, and `${NAME:-default}` silently
+                       takes the default -- so the line is either fatal or inert, and
+                       never what the person writing it meant.
+
+    So the rule is narrow and absolute: a `:?` variable may be commented, or set to
+    something; it may not be present-and-empty.
+    """
+    required = refused_if_empty()
+    assert required, "no `${VAR:?}` reference was found; this gate would be inert"
+
+    live = live_example_assignments()
+    broken = sorted(name for name, value in live.items() if name in required and not value.strip())
+    assert not broken, (
+        f"{broken} are declared `${{NAME:?}}` by a compose file and appear UNCOMMENTED AND EMPTY "
+        f"in .env.example. `cp .env.example .env` then fails to interpolate and nothing starts. "
+        f"Either give each a working default, or comment the line out so it sets nothing."
+    )
+
+
+def test_the_required_variable_a_bare_up_needs_has_a_default_that_fits_this_repository():
+    """Non-empty is not enough: SWAP_DB_DIR has to point at the real database.
+
+    The authority is <repo>/swap_terminal/swap_terminal.db and has been since
+    config.py defined SWAP_DB_PATH, so `./swap_terminal` -- which compose resolves
+    against the project directory -- is where it already is on a fresh clone. A
+    template that interpolated cleanly and mounted the WRONG directory would start
+    the stack against an empty database, and that is strictly worse than refusing:
+    it is the 2026-10-01 two-database failure, shipped as a default.
+
+    ASSERTED AGAINST THE FILESYSTEM, not against the string. Checking that the value
+    equals "./swap_terminal" would pin my own typing; checking that it RESOLVES to the
+    directory holding the database this repository configures is the property.
+    """
+    value = live_example_assignments().get("SWAP_DB_DIR", "")
+    assert value.strip(), "SWAP_DB_DIR must be set in the template; see the gate above"
+
+    resolved = (REPOSITORY_ROOT / value).resolve() if value.startswith(".") else Path(value).resolve()
+    expected = (REPOSITORY_ROOT / "swap_terminal").resolve()
+    assert resolved == expected, (
+        f"SWAP_DB_DIR={value} resolves to {resolved}, and the database this repository "
+        f"configures lives in {expected}. compose mounts this directory at /data, so a "
+        f"wrong value starts the terminal against a different database than every root tool "
+        f"reads."
+    )
+    assert resolved.is_dir(), f"{resolved} is not a directory in this checkout"
+
+
 def test_the_template_names_nothing_the_compose_files_do_not_read():
     """The reverse direction: a template entry for a variable nothing reads is a lie.
 
