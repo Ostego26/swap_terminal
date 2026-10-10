@@ -248,10 +248,40 @@ FAUCET_SLUGS = {"BTC": "btc-testnet", "LTC": "ltc-testnet"}
 #: an unlisted one means it changed and nobody has looked.
 FAUCET_ERRORS = {
     400: "the faucet rejected the address or the network slug as invalid",
+    # 403 IS NOT IN THE README. It is Cloudflare's, in front of the faucet, and it was
+    # found by this client getting it on 2026-10-10 where `curl` had succeeded minutes
+    # earlier with the identical URL and body. Cloudflare's own documentation for 1010:
+    # access denied "based on the browser's signature", a Browser Integrity Check the
+    # SITE OWNER turns on. The only material difference between the two requests was
+    # the headers.
+    403: ("Cloudflare refused this client, not the faucet. `error code: 1010` is its "
+          "Browser Integrity Check, which the site owner controls -- it rejects a client "
+          "by signature before the faucet sees the request. Use the ?address= link printed "
+          "below, which goes through a browser and is one click"),
     409: "the faucet is EMPTY for this chain -- nothing was sent and this is not your fault",
     429: "rate limited: one claim per address and one per IP per window. Wait it out",
     503: "the faucet's own node is busy. Nothing was sent; try again shortly",
 }
+
+#: WHO THIS CLIENT SAYS IT IS, and it says it honestly.
+#:
+#: urllib's default is `Python-urllib/3.x`, which Cloudflare's Browser Integrity
+#: Check rejects with 403 / `error code: 1010` -- measured 2026-10-10, against a
+#: `curl` of the identical URL and body that had succeeded minutes before. The
+#: difference was the User-Agent and nothing else.
+#:
+#: IT DOES NOT PRETEND TO BE A BROWSER, and that is a decision rather than an
+#: oversight. A Chrome string would very likely pass; it would also be this tool
+#: circumventing an access control the site owner deliberately switched on, to take
+#: coins from a service somebody runs for free. The faucet's own README says "If you
+#: build the faucet into a tool or show it to your users, a credit is appreciated"
+#: and offers a contact for integrations -- so the honest move is to NAME the caller
+#: and let the owner decide. If the check still refuses it, the 403 above says what
+#: happened and points at the one-click browser link, which is a real answer.
+FAUCET_USER_AGENT = (
+    "swap_terminal/testnet_wallets (+https://github.com/Ostego26/swap_terminal; "
+    "testnet faucet claim for a development desk)"
+)
 
 #: Seconds for the one faucet request. A number rather than no timeout at all,
 #: because urllib's default is to block forever and rule 14's complaint about a
@@ -289,8 +319,15 @@ def claim_from_faucet(console: Console, asset: str, address: str) -> dict:
     # this file (the E402 block above records the first two). A suppression for a
     # finding that does not fire is rule 19's shape exactly -- a claim nobody checked.
     request = urllib.request.Request(
-        FAUCET_CLAIM_URL, data=body, headers={"Content-Type": "application/json"},
-        method="POST",
+        FAUCET_CLAIM_URL, data=body, method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            # NAMED, NOT DISGUISED. See FAUCET_USER_AGENT: urllib's default draws a
+            # Cloudflare 1010, and a browser string would pass by pretending to be
+            # something this is not.
+            "User-Agent": FAUCET_USER_AGENT,
+        },
     )
     console.say(f"    asking {FAUCET_CLAIM_URL} for {FAUCET_SLUGS[asset]} -> {address}")
     try:

@@ -809,3 +809,56 @@ def test_an_UNREADABLE_getbalances_says_so_and_never_renders_a_silent_zero(broke
     assert "NOT" in blob and "mempool" in blob.lower(), (
         "and it says the pending amount is not in that figure"
     )
+
+
+def test_the_client_NAMES_ITSELF_and_does_not_pretend_to_be_a_browser(monkeypatch):
+    """The 403 this fixes, and the fix it deliberately is not.
+
+    MEASURED 2026-10-10: this client got `403 / error code: 1010` where a `curl` of
+    the identical URL and body had succeeded minutes earlier. Cloudflare's own
+    documentation says 1010 is access denied "based on the browser's signature" -- a
+    Browser Integrity Check the SITE OWNER switches on -- and the only material
+    difference between the two requests was the User-Agent, since urllib defaults to
+    `Python-urllib/3.x`.
+
+    SO IT SENDS A TRUTHFUL ONE. A Chrome string would very likely pass, and that is
+    exactly why it is not here: it would be this tool circumventing an access control
+    somebody deliberately switched on, to take coins from a service they run for free.
+    The faucet's README asks for a credit and offers a contact for integrations, so
+    naming the caller is both the honest and the useful move -- the owner can then
+    decide.
+
+    ASSERTED IN BOTH DIRECTIONS, because only the negative half has teeth: a test that
+    checked for a UA at all would be satisfied by a spoofed one.
+    """
+    sent = _faucet(monkeypatch, _REAL_BTC_200)
+    tw.claim_from_faucet(Console(1, stream=io.StringIO()), "BTC", valid_addresses.BTC_PARTICIPANT)
+    agent = sent["headers"]["user-agent"]
+    assert "swap_terminal" in agent, "it names the caller, so the faucet's owner can see who it is"
+    assert "Python-urllib" not in agent, "urllib's default is what Cloudflare 1010s"
+    for browser in ("Mozilla/", "Chrome/", "Safari/", "AppleWebKit", "Gecko/", "Edg/"):
+        assert browser not in agent, (
+            f"the User-Agent claims to be {browser!r}. This tool must not pretend to be a "
+            f"browser to get past a Browser Integrity Check the site owner turned on"
+        )
+    assert sent["headers"]["accept"] == "application/json"
+
+
+def test_a_CLOUDFLARE_403_says_whose_refusal_it_is_and_points_at_the_browser_link(monkeypatch):
+    """403 is not the faucet refusing. Saying "the faucet refused" would send them wrong.
+
+    It is Cloudflare in front of the faucet, rejecting the CLIENT before the faucet
+    sees anything -- so the remedy is not "try again later" (429) and not "the faucet
+    is dry" (409), it is the one-click ?address= link, which goes through a browser.
+    403 is absent from the faucet's README, which is why the generic
+    "undocumented status" path printed first and let this be diagnosed at all.
+    """
+    error = tw.urllib.error.HTTPError(tw.FAUCET_CLAIM_URL, 403, "Forbidden", {}, None)
+    _faucet(monkeypatch, error)
+    stream = io.StringIO()
+    row = tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
+    out = stream.getvalue()
+    assert row["ok"] is False and row["why"] == "HTTP 403"
+    assert "Cloudflare refused this client, not the faucet" in out
+    assert "1010" in out and "Browser Integrity Check" in out
+    assert "?address=" in out, "and it points at the link that actually works"
