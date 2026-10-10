@@ -1117,3 +1117,140 @@ def test_the_operator_page_LINKS_to_the_controls_and_says_what_they_do(client):
     assert "proves each is gone" in body, "and says the stop is proven, not merely reported"
     assert "acknowledged" in body, "and that starting arms a broadcaster"
     assert "loopback" in body, "and that it refuses off-box"
+
+
+# =============================================================================
+# THE REFUSAL'S REMEDY WAS WRONG FOR A CONTAINER, AND ACTIVELY HARMFUL.
+#
+# Measured on the operator's host 2026-10-10. The controls panel refused with
+# "This server is listening on 0.0.0.0 ... Set SWAP_TERMINAL_HOST=127.0.0.1 and
+# restart the server." That deployment is a container, where 0.0.0.0 is the ONLY
+# bind that works -- and docker-compose.web.yml:102 carries the measurement in a
+# comment one line below the port it publishes:
+#
+#   127.0.0.1 INSIDE A CONTAINER IS THE CONTAINER, AND THAT IS WHY THE UI CAME
+#   UP EMPTY. Measured on the operator's host 2026-10-05
+#
+# So a security refusal printed, as its remedy, the exact change this repository
+# had already recorded as breaking the page.
+#
+# THE VERDICT DOES NOT CHANGE AND MUST NOT. From inside a container the publish
+# mapping is invisible: `ports: 127.0.0.1:5100:5000` restricts reachability at the
+# docker proxy on the HOST, and nothing the container can read says so. So a
+# loopback-published container and a LAN-exposed host are indistinguishable from
+# in here, and a surface that arms a payout worker refuses both.
+# =============================================================================
+
+
+#: The non-loopback bind these tests seed. A NAMED CONSTANT WITH ONE `noqa` rather
+#: than the literal in four places, and the reason is what rule 19 asks a suppression
+#: to carry: S104 exists to catch code that BINDS all interfaces, and this is a fixture
+#: STRING describing a bind that happened in another process entirely -- it is the
+#: input to a refusal, which is the opposite of the hazard the rule is about. Four
+#: literals would have meant four suppressions saying the same thing.
+_ALL_INTERFACES = "0.0.0.0"  # noqa: S104 -- checked: a test fixture value, never a bind. See above.
+
+
+def _exposed(*, in_container: bool) -> kill_switch.RequestFacts:
+    return kill_switch.RequestFacts(
+        env={"SWAP_TERMINAL_HOST": _ALL_INTERFACES},
+        listening={_ALL_INTERFACES},
+        in_container=in_container,
+    )
+
+
+def test_a_container_is_STILL_REFUSED_exactly_as_a_host_is():
+    """THE MOST IMPORTANT ASSERTION HERE. The wording changed; the verdict did not.
+
+    If this ever passes with zero refusals, a security control has been loosened
+    by a commit whose stated purpose was to fix a sentence.
+    """
+    assert kill_switch.refuse_off_box(_exposed(in_container=True)), (
+        "a container with a 0.0.0.0 bind must still refuse -- the publish mapping is "
+        "not visible from inside it, so private and exposed are indistinguishable"
+    )
+    assert len(kill_switch.refuse_off_box(_exposed(in_container=True))) == len(
+        kill_switch.refuse_off_box(_exposed(in_container=False))
+    ), "the same two refusals fire in both deployments"
+
+
+def test_a_container_is_NOT_told_to_set_the_loopback_bind():
+    """The harmful half, pinned.
+
+    MUTATION CHECKED: dropping the in_container branch restores the instruction
+    that empties the UI.
+    """
+    blob = "\n".join(kill_switch.refuse_off_box(_exposed(in_container=True)))
+    assert "do NOT set SWAP_TERMINAL_HOST=127.0.0.1" in blob
+    assert "0.0.0.0 is the correct bind here" in blob
+    assert "the UI came up empty" in blob, "and it cites the measurement, not an opinion"
+
+
+def test_a_HOST_still_gets_the_original_remedy_which_is_correct_there():
+    """gunicorn binds what SWAP_TERMINAL_HOST says, so on a host this IS the fix."""
+    blob = "\n".join(kill_switch.refuse_off_box(_exposed(in_container=False)))
+    assert "Set SWAP_TERMINAL_HOST=127.0.0.1 and restart the server." in blob
+    assert "do NOT set" not in blob
+    assert "container" not in blob.lower(), "no container hedging on a host deployment"
+
+
+def test_the_container_remedy_names_the_check_IT_CANNOT_DO():
+    """A remedy that cannot be followed from here has to say where it CAN be.
+
+    The publish is the thing that decides, it lives on the host, and this process
+    cannot read it -- so the sentence names the command rather than implying this
+    page could have answered it.
+    """
+    blob = "\n".join(kill_switch.refuse_off_box(_exposed(in_container=True)))
+    assert "CANNOT SEE" in blob
+    assert "docker compose port web 5000" in blob
+    assert "127.0.0.1:5100:5000" in blob and "5100:5000" in blob, (
+        "both publish forms, because the difference between them IS the answer"
+    )
+
+
+def test_the_env_refusal_stops_claiming_a_container_was_configured_off_box():
+    """"configured to be reachable off-box" is simply false of a container.
+
+    Inside one, 0.0.0.0 is what reaches the docker proxy and says nothing about who
+    can reach THAT.
+    """
+    container = "\n".join(kill_switch.refuse_off_box(_exposed(in_container=True)))
+    host = "\n".join(kill_switch.refuse_off_box(_exposed(in_container=False)))
+    assert "configured to be reachable off-box" in host
+    assert "configured to be reachable off-box" not in container
+    assert "says NOTHING about who can reach the published port" in container
+
+
+def test_container_detection_is_presence_only_and_never_gates_the_buttons():
+    """NOT A SECURITY CONTROL AND IT MUST NEVER BECOME ONE.
+
+    A planted /.dockerenv buys an attacker a differently worded refusal and nothing
+    else. This asserts the flag cannot flip a refusal into permission, which is the
+    property that makes a presence check good enough.
+    """
+    loopback = kill_switch.RequestFacts(
+        env={"SWAP_TERMINAL_HOST": "127.0.0.1"}, listening={"127.0.0.1"}, in_container=True
+    )
+    assert kill_switch.refuse_off_box(loopback) == [], (
+        "a genuinely loopback-bound container is permitted, as before"
+    )
+    for flag in (True, False):
+        assert kill_switch.refuse_off_box(_exposed(in_container=flag)), (
+            "and the flag cannot turn an exposed bind into a permitted one"
+        )
+
+
+def test_in_a_container_reads_a_marker_FILE_and_not_a_cgroup_parse(tmp_path, monkeypatch):
+    """/proc/1/cgroup has had three formats across cgroup v1, v2 and rootless podman.
+
+    A regex over it is a thing that silently stops matching, which here would
+    silently restore the wrong remedy. A missing marker degrades to the HOST
+    wording, which is the safe direction.
+    """
+    monkeypatch.setattr(kill_switch, "_CONTAINER_MARKERS", (tmp_path / "nope",))
+    assert kill_switch.in_a_container() is False
+    present = tmp_path / "dockerenv"
+    present.write_text("")
+    monkeypatch.setattr(kill_switch, "_CONTAINER_MARKERS", (tmp_path / "nope", present))
+    assert kill_switch.in_a_container() is True

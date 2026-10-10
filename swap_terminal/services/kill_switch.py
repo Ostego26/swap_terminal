@@ -432,6 +432,33 @@ class CaseInsensitiveHeaders(Protocol):
         ...
 
 
+#: Files whose mere existence means a container runtime created this filesystem.
+#:
+#: `/.dockerenv` is written by Docker itself. `/run/.containerenv` is Podman's. Both
+#: are presence-only -- their CONTENTS are not read and not required to be anything --
+#: so this is a check somebody can verify by looking rather than by trusting a parser.
+#:
+#: NOT A SECURITY CONTROL AND IT MUST NEVER BECOME ONE. This changes the WORDING of a
+#: refusal and never the verdict, which is the only reason a presence check is good
+#: enough: a missing file costs an operator a less specific sentence, and a planted one
+#: buys an attacker a differently worded refusal. If this ever gates whether the
+#: buttons render, it needs to be something an attacker cannot create.
+_CONTAINER_MARKERS = (Path("/.dockerenv"), Path("/run/.containerenv"))
+
+
+def in_a_container() -> bool:
+    """Is this process inside a container? Presence of a runtime's own marker file.
+
+    Deliberately NOT a cgroup parse. /proc/1/cgroup has had three formats across
+    cgroup v1, v2 and rootless podman, and a regex over it is a thing that silently
+    stops matching -- which here would silently restore the wrong remedy. A missing
+    marker file degrades to the host wording, which is the safe direction: it tells a
+    container operator something slightly less specific, where the old behavior told
+    them to make a change that breaks the page.
+    """
+    return any(marker.exists() for marker in _CONTAINER_MARKERS)
+
+
 @dataclass(frozen=True)
 class RequestFacts:
     """The four things about a request that decide whether it may operate the switch.
@@ -455,6 +482,27 @@ class RequestFacts:
     #: distinction from an empty set is the whole reason it returns None at all,
     #: and a control surface must refuse on it.
     listening: set[str] | None = None
+    #: Is this process inside a container? It changes NOTHING about the verdict and
+    #: everything about whether the refusal's remedy is correct.
+    #:
+    #: MEASURED ON THE OPERATOR'S HOST 2026-10-10 and the remedy was actively
+    #: harmful. The panel refused with "This server is listening on 0.0.0.0 ... Set
+    #: SWAP_TERMINAL_HOST=127.0.0.1 and restart the server." That deployment is a
+    #: CONTAINER, where 0.0.0.0 is the only bind that works -- and
+    #: docker-compose.web.yml:102 carries the measurement in a comment one line
+    #: below the port it publishes: "127.0.0.1 INSIDE A CONTAINER IS THE CONTAINER,
+    #: AND THAT IS WHY THE UI CAME UP EMPTY. Measured on the operator's host
+    #: 2026-10-05". So the remedy printed by a security refusal was the change the
+    #: repo had already recorded as breaking the page.
+    #:
+    #: THE VERDICT DOES NOT CHANGE, AND THAT IS DELIBERATE. From inside a container
+    #: the PUBLISH MAPPING IS NOT VISIBLE: `ports: 127.0.0.1:5100:5000` restricts
+    #: reachability at the docker proxy on the host, and nothing the container can
+    #: read says so. So "0.0.0.0 inside a loopback-published container" and
+    #: "0.0.0.0 on a host, open to the LAN" are indistinguishable from here, and a
+    #: control surface that arms a payout worker must refuse the pair. What this
+    #: flag buys is an honest explanation instead of a wrong instruction.
+    in_container: bool = False
 
     @classmethod
     def observed(cls, headers: CaseInsensitiveHeaders, remote_addr: str | None) -> RequestFacts:
@@ -464,7 +512,13 @@ class RequestFacts:
         decision function -- so the panel and the endpoint that guards it cannot
         read two different answers from two reads a few milliseconds apart.
         """
-        return cls(headers=headers, remote_addr=remote_addr, env=os.environ, listening=listening_addresses())
+        return cls(
+            headers=headers,
+            remote_addr=remote_addr,
+            env=os.environ,
+            listening=listening_addresses(),
+            in_container=in_a_container(),
+        )
 
 
 def lock_path(run_dir: Path) -> Path:
@@ -588,10 +642,10 @@ def refuse_off_box(facts: RequestFacts) -> list[str]:
         exposed = sorted(host for host in facts.listening if not is_loopback_host(host))
         if exposed:
             refusals.append(
-                f"This server is listening on {', '.join(exposed)}, which is reachable from off "
-                f"this machine. Nothing on this surface authenticates a caller, so a start or "
-                f"stop button here would let anyone who can reach the port stop the desk or arm "
-                f"a payout worker. Set SWAP_TERMINAL_HOST=127.0.0.1 and restart the server."
+                f"This server is listening on {', '.join(exposed)}, and nothing on this surface "
+                f"authenticates a caller -- so a start or stop button here would let anyone who "
+                f"can reach the port stop the desk or arm a payout worker. "
+                + (_CONTAINER_REMEDY if facts.in_container else _HOST_REMEDY)
             )
         elif not facts.listening:
             refusals.append(
@@ -605,15 +659,52 @@ def refuse_off_box(facts: RequestFacts) -> list[str]:
     if raw is not None:
         host = raw.strip()
         if host not in LOOPBACK_HOSTS:
+            # "CONFIGURED TO BE REACHABLE OFF-BOX" IS NOT TRUE OF A CONTAINER and the
+            # sentence used to say it flatly. Inside one, 0.0.0.0 is what reaches the
+            # docker proxy and says nothing about who can reach THAT.
+            reachable = (
+                "so this process accepts from any interface it can see. Inside a container that "
+                "is the only bind that works and says NOTHING about who can reach the published "
+                "port"
+                if facts.in_container
+                else "so this deployment was configured to be reachable off-box whatever the "
+                "socket table currently says"
+            )
             refusals.append(
                 f"SWAP_TERMINAL_HOST is set to {raw!r}, which is not one of "
                 f"{', '.join(sorted(LOOPBACK_HOSTS))}. That is what gunicorn.conf.py and app.py "
-                f"both read to build the bind, so this deployment was configured to be reachable "
-                f"off-box whatever the socket table currently says. (An empty value is refused "
+                f"both read to build the bind, {reachable}. (An empty value is refused "
                 f"too: os.getenv returns '' rather than the default, and gunicorn binds an empty "
                 f"host on ALL interfaces.)"
             )
     return refusals
+
+
+#: WHAT TO DO ABOUT A NON-LOOPBACK BIND, per deployment. Two sentences because the
+#: right answer is opposite in the two, and the wrong one breaks the page.
+#:
+#: The host remedy is the original and is correct there: gunicorn binds what
+#: SWAP_TERMINAL_HOST says, so setting it to loopback makes the deployment private.
+#:
+#: THE CONTAINER REMEDY CANNOT BE "SET IT TO LOOPBACK", because that binds the
+#: CONTAINER's loopback and the published port then reaches nothing --
+#: docker-compose.web.yml:102 records exactly that outcome, measured 2026-10-05.
+#: What actually makes a container private is the PUBLISH, on the host, and the
+#: container cannot see it. So the remedy names the check rather than an edit, and
+#: says plainly that this page cannot do it.
+_HOST_REMEDY = (
+    "Set SWAP_TERMINAL_HOST=127.0.0.1 and restart the server."
+)
+_CONTAINER_REMEDY = (
+    "THIS PROCESS IS IN A CONTAINER, so do NOT set SWAP_TERMINAL_HOST=127.0.0.1 -- inside a "
+    "container that binds the CONTAINER's loopback and the published port then reaches nothing "
+    "(docker-compose.web.yml records that outcome, measured 2026-10-05: the UI came up empty). "
+    "0.0.0.0 is the correct bind here. What decides whether this is private is the PUBLISH on "
+    "the host, which this process CANNOT SEE: `ports: 127.0.0.1:5100:5000` restricts it to the "
+    "host's loopback, a bare `5100:5000` does not. Check it with `docker compose port web 5000` "
+    "or by reading the compose ports line. These controls still refuse, because from in here "
+    "those two are indistinguishable and this surface arms a payout worker."
+)
 
 
 def refuse_cross_origin(facts: RequestFacts) -> list[str]:
