@@ -425,13 +425,30 @@ it the operator must remember two `-f` flags on every `up`, and measured
 2026-10-10 they came up unarmed three times in a row -- which is a defect in the
 ergonomics rather than in their memory.
 
-**WHAT IS STILL NOT MEASURED HERE**: whether `docker compose up` with that
-`COMPOSE_FILE` set produces a RUNNING container that holds the variable. `config`
-proves the merge; it does not prove the runtime. The presence check that does,
-without printing the secret, is
-`docker compose exec -T web printenv | grep -c GRIDCOIN_WALLET_PASSPHRASE`.
-Plain `docker compose config` must NOT be used for this -- it interpolates and
-would print the passphrase.
+**THE RUNTIME HALF IS NOW MEASURED TOO, 2026-10-10, AND FINDING 20 IS CLOSED.**
+`config` proved the MERGE; this proves the container actually holds the variable:
+
+```
+$ export COMPOSE_FILE=docker-compose.yml:docker-compose.web.armed-grc.yml
+$ docker compose up -d
+ ✔ Container swap-icp-replica            Running
+ ✔ Container swap-web                    Started
+$ docker compose exec -T web printenv | grep -c GRIDCOIN_WALLET_PASSPHRASE
+1
+```
+
+So `COMPOSE_FILE` arms a bare `docker compose up`, end to end: the overlay
+merges onto the included `web`, the recreated container carries the variable,
+and the payout worker inside it can attempt the unlock. `swap-icp-replica`
+reading `Running` rather than `Recreated` is worth noting beside it -- recreating
+only `web` left the replica's ledger state untouched, so arming costs nothing on
+the ICP side.
+
+THE PRESENCE CHECK IS `printenv | grep -c`, WHICH REPORTS 1 OR 0 AND NEVER THE
+VALUE. Plain `docker compose config` must not be used for it: it interpolates,
+and would print the passphrase to the terminal. That is the operator's standing
+rule and it is also why this finding could be closed without anybody seeing the
+secret.
 
 ### 20b. The original, as written before the measurement — NOT MEASURED
 **The armed path depends on the answer and this session could not take it.**
