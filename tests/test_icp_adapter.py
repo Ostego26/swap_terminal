@@ -587,7 +587,24 @@ def test_the_compose_files_the_transport_names_exist_from_ANY_directory(tmp_path
 
     argv = recorded["argv"]
     named = [argv[i + 1] for i, element in enumerate(argv) if element == "-f"]
-    assert len(named) == 2, argv
+    # ONE `-f`, AND IT WAS TWO UNTIL 2026-10-10. The literal `2` that used to be
+    # asserted here was the count of files, not the property this test is about:
+    # docker-compose.yml gained an `include:` of docker-compose.icp.yml, so the
+    # second `-f` would have been the same file arriving twice and _COMPOSE_FILES
+    # was reduced to one entry (its comment says why, and why not guessing what
+    # compose does with a doubled file was the point).
+    #
+    # ASSERTED AGAINST _COMPOSE_FILES RATHER THAN AGAINST A NEW LITERAL. A number
+    # written here has to be edited every time that tuple changes and says nothing
+    # when it is wrong; comparing the two means the test fails only if the transport
+    # stops passing what it declares -- which is the actual property. The literal
+    # that remains is `>= 1`, because an argv with no compose file at all is the
+    # 2026-10-06 defect returning as "no configuration file provided".
+    assert named, f"the exec transport passed no -f at all: {argv}"
+    assert len(named) == len(icp_module._COMPOSE_FILES), (
+        f"the transport passed {len(named)} compose file(s) and _COMPOSE_FILES declares "
+        f"{len(icp_module._COMPOSE_FILES)}: {argv}"
+    )
     for path in named:
         assert Path(path).is_absolute(), f"{path} is relative, so it depends on the caller's cwd"
         assert Path(path).is_file(), f"{path} is not a file from {tmp_path}"

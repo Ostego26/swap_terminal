@@ -311,7 +311,7 @@ def main() -> int:
             f"\nREFUSED, nothing read: {_CANISTER_VARIABLE} is unset. Its value is environment "
             f"state -- every fresh replica issues a different canister id -- so there is no "
             f"default worth guessing. Read it from the replica with:\n"
-            f"  docker compose -f docker-compose.yml -f docker-compose.icp.yml exec -T "
+            f"  docker compose -f docker-compose.yml exec -T "
             f"icp-replica cat /repo/.dfx/local/canister_ids.json",
             file=sys.stderr,
         )

@@ -1,4 +1,4 @@
-# Containers for swap_terminal. TWO services in this file, deliberately.
+# Containers for swap_terminal. THE WHOLE TERMINAL, from a bare `docker compose up`.
 #
 # Role: file (operator entry point at the repository root per CLAUDE.md rule 10 --
 #       this is what an operator, a launcher or a cron entry names)
@@ -21,7 +21,8 @@
 # the operator's host 2026-10-05: `docker compose up -d abstergo` printed only
 # GRC_DESK_DATADIR and SWAP_DB_DIR errors and started nothing.
 #
-# IN THIS FILE -- no required variable, startable with nothing set:
+# IN THIS FILE -- no required variable, and BOTH ARE NOW BEHIND A PROFILE, so
+# neither starts by default (see the `profiles:` comment on each):
 #
 #   abstergo   (increment 1) the Express swap-intent server. No SQLite, no
 #                  PID-namespace requirement, and NO REAPER AT ALL before this
@@ -33,15 +34,15 @@
 #
 # ONE FILE EACH -- every service carrying a volume path nobody may default:
 #
-#   web        (increment 4) docker-compose.web.yml. gunicorn AND the three
-#                  supervised workers, in ONE container because
+#   web        (increment 4) docker-compose.web.yml, INCLUDED below. gunicorn AND
+#                  the three supervised workers, in ONE container because
 #                  supervisor.unaccounted_workers() walks /proc. Touches
 #                  swap_terminal.db.
-#   grc-desk   (increment 3) docker-compose.grc-desk.yml. The desk's Gridcoin
-#                  daemon. Built from source, never built or run anywhere yet,
-#                  and NOT owed work.
+#   grc-desk   (increment 3) docker-compose.grc-desk.yml, NOT included. The desk's
+#                  Gridcoin daemon. Built from source, never built or run anywhere
+#                  yet, and NOT owed work.
 #
-#     docker compose -f docker-compose.yml -f docker-compose.web.yml up -d web
+#     docker compose up -d web
 #
 # THIS PARAGRAPH SAID `docker-compose.stateful.yml` UNTIL 2026-10-08, AT ALL THREE
 # PLACES ABOVE, AND THAT FILE HAS NEVER EXISTED SINCE THE DAY IT WAS NAMED. The
@@ -69,10 +70,20 @@
 # FIRST. Measured 2026-10-08 by listing the tree: eight docker-compose*.yml files
 # exist and not one of them is named stateful.
 #
-# `docker compose up` WITH NO SERVICE NAMED starts everything in the files given,
-# including the one that signs payouts. Nothing prevents that -- compose has no
-# "require an explicit name" switch -- so it is said here instead: name the
-# service.
+# `docker compose up` WITH NO SERVICE NAMED starts every service in the files given
+# that is not behind a profile. As of 2026-10-10 that set is exactly `web` and
+# `icp-replica` -- the terminal -- because this file includes their two files and
+# puts a profile on the two services that are not part of it. The paragraph that
+# used to sit here said "nothing prevents that -- compose has no 'require an
+# explicit name' switch", which was true of the service list and is the wrong lever:
+# `profiles:` is the switch, applied to the services that must be opted into rather
+# than to the operator's habit of naming one.
+#
+# IT STILL STARTS A SERVICE THAT CAN SIGN PAYOUTS. `web` runs payout_worker, and
+# whether that worker can broadcast depends only on what its environment arms --
+# docker-compose.web.yml passes no signing material, so unset means it serves and
+# cannot send. A bare `up` is not a safe-by-default command, it is a
+# correct-by-default one, and those are different claims.
 #
 # NOT CONTAINERIZED, so nobody reads this file as the whole topology:
 #   operator-panel  stays on the host (design doc S6), a recommendation rather
@@ -84,12 +95,193 @@
 #   grc-testnet-sync (S2) is not a separate service here. It was only ever S1
 #                   before it had synced, and the host daemon has already synced.
 
+
+# ===========================================================================
+# THE DEFAULT PROJECT IS THE TERMINAL. Added 2026-10-10 at the operator's
+# instruction: "make `docker compose up` and `docker compose down` cover this
+# terminal's whole container lifecycle instead of three -f flags."
+#
+# WHAT IT WAS, measured on this checkout before the change:
+#
+#     8 docker-compose*.yml files      0 declared `include:`
+#                                      0 declared `profiles:`
+#     a bare `docker compose up`       read THIS FILE ALONE and started
+#                                      `abstergo` + `harness` -- the Node bridge
+#                                      and the REGTEST HARNESS, on a host holding
+#                                      funded testnet wallets
+#     the real set                     assembled in swap_stack.py as
+#                                      ("docker-compose.yml",
+#                                       "docker-compose.icp.yml",
+#                                       "docker-compose.web.yml")
+#
+# So the terminal was reachable only through a tool that knew the three names, and
+# the literal command an operator types reached the two services that are NOT the
+# terminal. `include:` moves that knowledge into the file compose reads first.
+#
+# WHY `include:` AND NOT A `COMPOSE_FILE` ENTRY IN `.env`. Both would make a bare
+# `up` read all three. `COMPOSE_FILE` lives in a file this repository must never
+# read or write (CLAUDE.md's chain-safety rules: never read back `.env`), it is
+# invisible to anyone reading the compose files, and it is per-checkout state
+# rather than a declaration in the tree. `include:` is in version control, is read
+# by the same parser, and is what the suite can gate.
+#
+# WHAT IS DELIBERATELY NOT INCLUDED, and this is the load-bearing half:
+#
+#   docker-compose.web.armed-grc.yml   each one ARMS a chain: it mounts or passes
+#   docker-compose.web.armed-sol.yml   the key that lets the container sign and
+#   docker-compose.web.armed-xrp.yml   broadcast. Arming is a posture, not a
+#                                      setting, and entering it must take an act
+#                                      (rule 16). Naming the file on the command
+#                                      line IS that act, and it is visible in
+#                                      shell history. An `include:` would make the
+#                                      act disappear.
+#   docker-compose.web.hostnet.yml     replaces the container's whole network mode.
+#                                      An alternative, not an addition.
+#   docker-compose.grc-desk.yml        requires GRC_DESK_DATADIR, and a default
+#                                      there would be a compose file choosing which
+#                                      wallet to open. Including it would make that
+#                                      variable required to start ANYTHING.
+#
+# None of those four is referenced by this file, no secret of theirs is named here,
+# and tests/test_compose_default_project.py walks `include:` transitively and fails
+# if any of them is ever reachable from it.
+#
+# ---------------------------------------------------------------------------
+# HAZARD 1 -- `docker compose down` REMOVES CONTAINERS, AND THIS FILE JUST MADE
+# THAT VERB EASIER TO REACH. READ THIS BEFORE TYPING IT.
+# ---------------------------------------------------------------------------
+# The replica's canister state has been destroyed twice on the operator's host by
+# a container being replaced: 2026-10-07 (`down` took the ICP ledger and 1000
+# LICP) and 2026-10-08 (an image rebuild recreated the container and took the
+# ledger, threshold_custody and operator_admin, ~998.9498 LICP). And the tECDSA
+# key is worse than the canisters, because it is silent: measured 2026-10-07, the
+# SAME canister id with the SAME `dfx_test_key` produced two different public keys
+# across one ordinary recreation, so an address derived from it stops existing
+# without anything failing.
+#
+# WHAT CHANGED SINCE THOSE MEASUREMENTS, and it is why this is a hazard rather
+# than a refusal: 28de99c (2026-10-07 20:38 UTC) added
+# `icp-replica-data:/root/.local/share/dfx` to docker-compose.icp.yml, a NAMED
+# volume over the directory an inspection inside the running container measured at
+# 180M holding `network/local/<hash>/state`. Both destructive measurements above
+# were taken on containers whose dfx state was on the WRITABLE LAYER, which a
+# named volume is not. `docker compose down` without `-v` removes containers and
+# keeps named volumes.
+#
+# WHAT IS THEREFORE STILL NOT ESTABLISHED, stated as the hypothesis it is
+# (rule 17): whether the tECDSA key material for `dfx_test_key` lives under
+# /root/.local/share/dfx -- now on the volume -- or somewhere else inside the
+# container. NO replica is reachable from the container these lines were written
+# in, so this was not measured, and the 2026-10-07 key measurement cannot answer
+# it because it predates the volume by about three hours. A reason to believe the
+# key now survives is not the same as having checked.
+#
+# SO: `docker compose stop` IS THE VERB THIS REPOSITORY RECOMMENDS, and
+# `swap_stack.py down` deliberately runs `stop` rather than `down` for exactly
+# this reason (see its cmd_down comment, and docker/icp_replica_entrypoint.py,
+# which exists because `stop`-and-restart then left dfx unable to start). `down`
+# answers a question nobody asked -- "is the container gone" -- where the question
+# an operator means is "is anything of this stack running".
+#
+# THE ONE COMMAND THAT SETTLES IT, read-only, on a host with the replica up:
+#
+#     dfx canister call threshold_custody public_key '(vec {})'   # note the hex
+#     docker compose down && docker compose up -d
+#     dfx canister call threshold_custody public_key '(vec {})'   # same hex?
+#
+# Same hex means the key is on the volume and `down` is survivable. A different
+# hex means it is not, and any address derived from that key is already
+# unreachable. Run it with NOTHING AT A CANISTER-DERIVED ADDRESS.
+#
+# ---------------------------------------------------------------------------
+# HAZARD 2 -- A BARE `docker compose up` IN A FRESH CHECKOUT NOW FAILS, BY DESIGN.
+# ---------------------------------------------------------------------------
+# docker-compose.web.yml requires SWAP_DB_DIR -- `${SWAP_DB_DIR:?...}` -- because
+# a default there would be a compose file choosing which swap database to mount.
+# Compose interpolates every variable in every file it reads, includes among them,
+# BEFORE it selects a service, so including that file makes SWAP_DB_DIR required
+# for every command that reads this one.
+#
+# THAT IS THE CORRECT BEHAVIOR AND THE GUARD DOES NOT MOVE. The alternative is a
+# default, and the two candidates are both wrong: `./runtime/web` would serve an
+# EMPTY database that looks exactly like a working one with no swaps in it, and
+# the operator's real directory cannot be named by a file in version control. A
+# command that stops and names the variable is the only option that cannot
+# silently point the terminal at the wrong money.
+#
+# WHAT WAS DONE ABOUT IT instead of softening it: the error message now names the
+# variable, the file it is declared in, and the one check to run first, so the
+# failure reads as an instruction rather than as a bug. See that line.
+#
+# AND THE COST, named rather than discovered: `docker compose -f
+# docker-compose.yml -f docker-compose.grc-desk.yml up -d grc-desk` now demands
+# SWAP_DB_DIR too, a variable with nothing to do with the Gridcoin desk. That is
+# the 2026-10-05 defect this tree learned twice and split eight files over,
+# returning through `include:` -- bounded to ONE variable, which
+# tests/test_compose_default_project.py pins, so a second one arriving this way
+# fails the suite rather than taxing every command.
+#
+# ---------------------------------------------------------------------------
+# HAZARD 3 -- AN OVERLAY ON TOP OF AN INCLUDED SERVICE IS NOT ESTABLISHED HERE.
+# ---------------------------------------------------------------------------
+# The armed overlays and hostnet override `web`, which now arrives through
+# `include:` rather than through a `-f`. Whether compose permits a later `-f` file
+# to override a resource an earlier file IMPORTED is a question about compose's own
+# merge rules, and it could not be measured from the container this was written in:
+# running `docker` there was forbidden, `docker compose config` included.
+#
+# So no command in this tree passes a file that `include:` already supplies --
+# swap_stack.py, chains/icp.py and every printed remedy were reduced to `-f
+# docker-compose.yml` in the same change. The overlays are the one path that cannot
+# be reduced that way, and each of their headers carries the check to run before an
+# armed run. Do not treat this paragraph as a reason to think it works.
+# ===========================================================================
+include:
+  # The ICP half. Brings `icp-replica` and the two named volumes `icp-state` and
+  # `icp-replica-data`. No required variable, so including it taxes nothing.
+  - docker-compose.icp.yml
+  # The Flask UI and the three supervised workers. Brings `web` AND the required
+  # SWAP_DB_DIR -- hazard 2 above is this line.
+  - docker-compose.web.yml
+
 services:
   abstergo:
     build:
       context: ./swap_terminal/grc-sol-swap/abstergo_exchange
     image: swap-terminal/abstergo:local
     container_name: abstergo
+
+    # OPT-IN, AND THE PROFILE IS NAMED AFTER THE SERVICE ON PURPOSE.
+    #
+    #     docker compose --profile abstergo up -d abstergo
+    #
+    # WHY IT IS HERE AT ALL: before 2026-10-10 neither this service nor `harness`
+    # carried a profile, so a bare `docker compose up` started both -- an exchange
+    # nothing in this stack talks to, and a regtest harness, on a host holding
+    # funded testnet wallets. swap_stack.py worked around it by NAMING the two
+    # services it wanted (its UP_SERVICES comment records the measurement), which
+    # fixed the one command that read that constant and left the literal command
+    # an operator types still wrong.
+    #
+    # WHY THE NAME EQUALS THE SERVICE NAME, rather than something categorical like
+    # `optional` or `extras`:
+    #
+    #   - an operator who knows the service knows the profile. No second
+    #     vocabulary to learn, and the two cannot drift apart (rule 8: two names
+    #     for one thing agree on the day they are written).
+    #   - ONE PROFILE PER SERVICE, which is the same lesson the armed files are
+    #     split over. A shared `optional` profile would mean you cannot start the
+    #     exchange without also arming a regtest chain, and bundling two decisions
+    #     under one token is what docker-compose.web.armed-sol.yml's header
+    #     explains at length about keys.
+    #   - it reads as what it is on the command line -- `--profile abstergo up -d
+    #     abstergo` is redundant and unambiguous, and a MISTYPED profile starts
+    #     nothing and says so, rather than starting something else.
+    #   - it collides with nothing. `bridge` was the other candidate, and this
+    #     file's own `networks:` block at the bottom already uses that word for
+    #     the docker bridge it pins -- an overload a reader would have to
+    #     disambiguate by context every time, on a token that decides what starts.
+    profiles: ["abstergo"]
 
     # BUILD IT, NEVER TRY TO PULL IT. Without this, `docker compose up` attempts
     # a registry pull of the local tag first and prints, before it builds:
@@ -269,6 +461,21 @@ services:
     container_name: swap-harness
     pull_policy: build
 
+    # OPT-IN, AND THIS IS THE ONE THE PROFILE MATTERS MOST FOR.
+    #
+    #     docker compose --profile harness up -d harness
+    #
+    # A bare `docker compose up` started this container until 2026-10-10. It brings
+    # up regtest bitcoind and litecoind on a host whose other daemons hold funded
+    # testnet wallets, and the only thing that made that harmless was that
+    # regtest/daemons.assert_regtest() is unconditional and the datadirs are its
+    # own. "Harmless by a check elsewhere" is not the same as "not started", and a
+    # test harness that comes up because of a filename is rule 13's unreaped spawn
+    # one step earlier: nobody asked for it, so nobody is watching it.
+    #
+    # Named after the service for the reasons spelled out on `abstergo` above.
+    profiles: ["harness"]
+
     # NO PORTS PUBLISHED, and that is the design doc's own recommendation: the
     # harness lives in this container, so it reaches both daemons over the
     # container's loopback and publishing 18443/19443 buys nothing. Add
@@ -339,6 +546,26 @@ services:
 # VERIFY IT RATHER THAN TRUST IT: `swap_stack.py status` reads the live subnet back
 # out of docker and prints it beside this declared value, because a pin nobody
 # reads back is the same defect as a deploy nobody verifies.
+#
+# AND SINCE 2026-10-10 THAT READ-BACK IS CARRYING MORE WEIGHT THAN IT WAS WRITTEN
+# FOR. `web` and `icp-replica` used to arrive through `-f`, where this block and
+# their service definitions were merged by one mechanism. They now arrive through
+# `include:`, and neither of their files declares a `networks:` key -- so whether
+# the included services attach to THIS `default` definition, with its ipam, or to a
+# `default` compose derives separately, is a question about compose's own include
+# semantics that was NOT measured where this change was made. The reasonable
+# expectation is that they attach to it; expecting is not reading (rule 17).
+#
+# IT IS THE CHEAPEST OF THE UNKNOWNS TO CHECK, because the mechanism already exists
+# and nobody has to remember to use it: `swap_stack.py status` prints
+#
+#     bridge subnet     is the compose network on 172.18.0.0/16, ...
+#
+# with the LIVE value read out of docker, and says `drifted` rather than `matches`
+# when they differ. If that line ever reads `drifted` on a stack started by a bare
+# `docker compose up`, this is the paragraph to come back to -- the symptom would
+# otherwise be every chain reading NOT CONFIGURED in a container whose environment
+# is perfectly correct.
 networks:
   default:
     ipam:

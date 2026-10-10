@@ -35,6 +35,30 @@
 # moving a live wallet's datadir into a bind mount.
 #
 #     docker compose -f docker-compose.yml -f docker-compose.grc-desk.yml up -d grc-desk
+#
+# THAT COMMAND NOW ALSO DEMANDS SWAP_DB_DIR, AND THIS FILE DOES NOT USE IT. Since
+# 2026-10-10 docker-compose.yml `include:`s docker-compose.web.yml, which requires
+# SWAP_DB_DIR, and compose interpolates every variable in every file it reads --
+# includes among them -- before it selects a service. So starting the Gridcoin desk
+# needs a variable about the swap database.
+#
+# THAT IS THE 2026-10-05 DEFECT THIS TREE SPLIT EIGHT FILES OVER, returning through
+# a different door, and it is named here rather than discovered: the rule those
+# splits produced is "a file may contain at most one service with a required
+# variable", and `include:` makes a file's requirements transitive in a way `-f`
+# never did for a command that did not name it.
+#
+# WHY IT WAS ACCEPTED ANYWAY. The trade was made deliberately, in the open, and the
+# cost is bounded: the default project requires exactly ONE variable,
+# tests/test_compose_default_project.py pins that count, and this service has never
+# been built or run anywhere (see NOT OWED WORK above). Weakening SWAP_DB_DIR's
+# guard to spare this command would be a compose file choosing which swap database
+# to mount, which is strictly worse than exporting a variable.
+#
+# IF YOU WANT THIS SERVICE WITHOUT THAT: `export SWAP_DB_DIR=<the directory holding
+# swap_terminal.db>` is the one-line answer and is correct regardless -- compose
+# only interpolates the value, it mounts nothing for a service it was not asked to
+# start.
 
 services:
   # ---------------------------------------------------------------------------

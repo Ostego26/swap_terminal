@@ -100,6 +100,7 @@ from swap_terminal.stack_authority import (  # noqa: E402
     container_label,
     container_verdict,
     down_verdict,
+    include_entries,
     listening_inodes,
     pids_owning_inodes,
     port_is_free,
@@ -195,27 +196,70 @@ _GIT = shutil.which("git") or "git"
 
 #: The compose files this stack is assembled from, in the order `-f` wants them.
 #:
-#: HARDCODED RATHER THAN GLOBBED, and the glob is the bug it avoids: the directory
-#: also holds docker-compose.web.armed-sol.yml, .armed-xrp.yml and .hostnet.yml,
-#: which are ALTERNATIVE overlays. A glob would pass all of them to one command and
-#: the last one silently wins, so `up` would arm SOL or XRP because of a filename's
-#: sort order. An operator wanting an armed overlay names it with --compose-file.
-COMPOSE_FILES = ("docker-compose.yml", "docker-compose.icp.yml", "docker-compose.web.yml")
+#: ONE FILE SINCE 2026-10-10, AND IT USED TO BE THREE:
+#:
+#:     ("docker-compose.yml", "docker-compose.icp.yml", "docker-compose.web.yml")
+#:
+#: docker-compose.yml now declares `include:` for the other two, so the default
+#: project IS the terminal and a bare `docker compose up` reaches the same services
+#: this command does. That was the operator's instruction, and it moves the
+#: knowledge of which files make up the stack out of this constant and into the file
+#: compose reads first -- where the literal command an operator types can find it.
+#:
+#: WHY THE OTHER TWO ARE NOT STILL PASSED AS WELL. They would be the SAME FILE
+#: ARRIVING TWICE: once imported by `include:`, once merged as a `-f` override.
+#: Whether compose permits that, errors on it, or silently picks one is a question
+#: about compose's own merge rules, and it could NOT be measured from the container
+#: this change was written in -- running `docker` there was forbidden, `docker
+#: compose config` included (rule 17: a reason to believe is not a reading). So no
+#: command in this tree passes a file that `include:` already supplies. The same
+#: reduction was made to chains/icp.py's `_COMPOSE_FILES` and to every remedy string
+#: that printed the two-file form.
+#:
+#: STILL HARDCODED RATHER THAN GLOBBED, and the glob is the bug it avoids: the
+#: directory also holds docker-compose.web.armed-sol.yml, .armed-xrp.yml and
+#: .hostnet.yml, which are ALTERNATIVE overlays. A glob would pass all of them to
+#: one command and the last one silently wins, so `up` would arm SOL or XRP because
+#: of a filename's sort order. An operator wanting an armed overlay names it with
+#: --compose-file, and docker-compose.yml's hazard-3 block says what to check first.
+#:
+#: IT IS STILL A TUPLE and compose() still loops over it, because --compose-file
+#: hands this code an arbitrary list and the armed path is exactly that list with a
+#: second entry. A single string here would have made that path a special case.
+COMPOSE_FILES = ("docker-compose.yml",)
 
 #: The services `up` starts, NAMED rather than left to compose's default of "all of
 #: them in every -f file".
 #:
-#: THIS IS A FIX, MEASURED 2026-10-07. docker-compose.yml also defines `abstergo` (a
-#: GRC-SOL exchange under swap_terminal/grc-sol-swap/) and `harness` (the test
-#: harness, docker/harness.Dockerfile), and NEITHER carries a `profiles:` key --
-#: checked across all three files, there is not one. Compose starts every service in
-#: every file it is given unless told otherwise, so the first `swap_stack.py up`
-#: would have built and started a TEST HARNESS on a host holding real testnet
-#: wallets, plus an exchange container nothing in this stack talks to.
+#: THIS WAS A FIX, MEASURED 2026-10-07, AND THE DEFECT IT WORKED AROUND IS NOW FIXED
+#: AT ITS CAUSE. docker-compose.yml also defines `abstergo` (a GRC-SOL exchange under
+#: swap_terminal/grc-sol-swap/) and `harness` (the test harness,
+#: docker/harness.Dockerfile). As measured that day NEITHER carried a `profiles:`
+#: key -- checked across all three files, there was not one -- so compose started
+#: every service in every file it was given, and the first `swap_stack.py up` would
+#: have built and started a TEST HARNESS on a host holding real testnet wallets, plus
+#: an exchange container nothing in this stack talks to.
 #:
 #: That is the opposite of what `up` is for and it is the kind of surprise a single
 #: command must never have: the operator asked for one lever over their stack, not a
 #: lever that also starts whatever else happens to live in the same yaml.
+#:
+#: SINCE 2026-10-10 BOTH CARRY `profiles:` (named after themselves; the reasoning is
+#: at each service), so naming the services here is no longer the ONLY thing standing
+#: between `up` and a regtest chain. It is kept anyway, and the reason is rule 19's
+#: test for a patch -- naming the services stops the symptom for this one command,
+#: `profiles:` stops the cause for every command, and the second does not make the
+#: first wrong:
+#:
+#:   - `up` is a CHOICE of deployment, not "everything in the files". If a future
+#:     service joins the default project, this command should keep starting the two
+#:     it was written to start until somebody decides otherwise.
+#:   - it is what the banner prints. An operator reading `services icp-replica, web`
+#:     is reading a list, not inferring one from the absence of profile keys.
+#:   - the two mechanisms now disagree LOUDLY if they ever drift:
+#:     tests/test_compose_default_project.py asserts this tuple equals the default
+#:     project's own service set, so adding a service to either side without the
+#:     other fails the suite.
 #:
 #: `down` is deliberately NOT narrowed the same way. "Stop everything this swap
 #: terminal uses" is the whole point of it, so it removes the project's containers
@@ -255,6 +299,26 @@ UP_SERVICES = ("icp-replica", "web")
 def say(line: str) -> None:
     """Print immediately. Rule 14: silence is indistinguishable from hung."""
     print(line, flush=True)
+
+
+def included_files(path: Path) -> list[str]:
+    """The files `path` declares in its own `include:`. The read; the decision is elsewhere.
+
+    stack_authority.include_entries() is the parse and is pure. This is the two lines
+    that touch the filesystem, split off for the reason rule 10 gives: the decision
+    is callable with a seeded string from a test with no repository on disk, and what
+    is left here cannot be wrong about anything but whether a file opened.
+
+    A MISSING OR UNREADABLE FILE YIELDS NOTHING RATHER THAN RAISING. This is called
+    from the header of `status`, whose whole job is to report on a stack that may be
+    broken -- and `--compose-file` can name anything. A report that died because it
+    could not label one of its own lines would lose the findings it was printing,
+    which is the trade compose() already makes for its auxiliary lookups.
+    """
+    try:
+        return include_entries(path.read_text(encoding="utf-8"))
+    except OSError:
+        return []
 
 
 #: How wide a wrapped report line may be, including its indent.
@@ -533,7 +597,21 @@ def cmd_status(files: tuple[str, ...]) -> int:
     code = _say_code_version()
     say(f"  repository        {REPO_ROOT}")
     say(f"  database          {Config.DB_PATH}  <- SWAP_DB_PATH")
-    say(f"  compose files     {', '.join(files)}")
+    # WHAT THIS LINE READ BEFORE 2026-10-10 WAS THE WHOLE STACK, AND NOW IT IS NOT.
+    # It printed three filenames, so an operator could read the services from the
+    # files named. Since docker-compose.yml declares `include:`, one name stands for
+    # three, and a bare "docker-compose.yml" beside a `docker compose ps` table
+    # listing `web` and `icp-replica` reads as a report that lost two files.
+    #
+    # So the included set is printed under it, read out of the file rather than
+    # restated here -- a second hardcoded list is rule 8's bug with a delay on it,
+    # and this one would be read as authority. `(none)` when a `--compose-file`
+    # override names a file with no include, because a blank gap is ambiguous
+    # between "nothing included" and "the read broke" (rule 14).
+    say(f"  compose files     {', '.join(files)}  <- what is passed as -f")
+    for name in files:
+        included = included_files(REPO_ROOT / name)
+        say(f"  {name} includes  {', '.join(included) if included else '(none)'}")
     say("")
     say("  containers        docker compose ps")
     done = compose(["ps"], files)
@@ -629,6 +707,13 @@ def cmd_down(files: tuple[str, ...]) -> int:
     say("  containers        STOPPED, not removed -- `docker compose down` removed the replica's")
     say("                    container on 2026-10-07 and its ledger canister went with it. Nothing")
     say("                    of this stack runs when this returns, which is what `down` is for.")
+    say("  and the literal   `docker compose down` now reaches this WHOLE terminal in one command")
+    say("  docker verb       (docker-compose.yml includes the icp and web files as of 2026-10-10).")
+    say("                    It removes containers. Named volumes survive it without -v, so the")
+    say("                    ledger should; whether the replica's tECDSA key does is NOT")
+    say("                    ESTABLISHED -- the icp-replica-data volume landed three hours AFTER")
+    say("                    the measurement that showed the key changing. Prefer this command,")
+    say("                    or `docker compose stop`. See docker-compose.yml's hazard 1.")
     say("  never stopped     chain daemons, and a FOREIGN listener on one of our ports. Both are")
     say("                    reported below rather than passed over in silence")
     say("")
@@ -647,21 +732,57 @@ def cmd_down(files: tuple[str, ...]) -> int:
     # The ledger canister -- holding the desk's 1000 test ICP, deployed and funded
     # across two days of work -- was not in the replica any more. `docker compose
     # down` REMOVES containers, and the replica's canister state did not survive its
-    # container. docker/icp-replica.Dockerfile sets DFX_CONFIG_ROOT=/state with a
-    # comment saying it is "so a `dfx start` survives a rebuild"; that claim is now in
-    # doubt and is NOT established either way from here.
+    # container.
     #
     # `stop` satisfies what `down` is for -- nothing of this stack is running when it
     # returns, which is the question an operator asks -- while leaving the containers,
     # and therefore their writable layers, intact. The port proof below is unchanged
     # and is what makes "nothing running" a measurement rather than a claim.
     #
-    # WHAT THIS DOES NOT FIX, said plainly rather than left to be rediscovered: `up`
-    # RECREATES a container when its image changes, so the next rebuild of the replica
-    # image loses the ledger again. The real fix is getting the replica's state onto
-    # the icp-state volume, which needs a measurement of where dfx actually puts it --
-    # a question no session without a running replica can answer. Until then, redeploy
-    # after a replica rebuild: icp_ledger_init.py and `dfx deploy` are the path.
+    # WHAT CHANGED SINCE, AND WHY `stop` STAYS ANYWAY. Two sentences that used to sit
+    # here were already false when they were written and are corrected rather than
+    # overwritten (rule 16, and rule 1 wants the drift visible):
+    #
+    #   "docker/icp-replica.Dockerfile sets DFX_CONFIG_ROOT=/state ... that claim is
+    #   now in doubt and is NOT established either way from here."
+    #
+    #   "The real fix is getting the replica's state onto the icp-state volume, which
+    #   needs a measurement of where dfx actually puts it -- a question no session
+    #   without a running replica can answer."
+    #
+    # That measurement was taken THE SAME DAY, inside the running container, and it
+    # is written into docker-compose.icp.yml beside the mount it produced:
+    #
+    #     /state                    40K    .config only
+    #     /root/.local/share/dfx    180M   network/local/<hash>/state
+    #     /repo/.dfx                2.3M   canister ids and wasm copies
+    #
+    # DFX_CONFIG_ROOT moves dfx's CONFIG and not its DATA. 28de99c (2026-10-07 20:38
+    # UTC) therefore added `icp-replica-data:/root/.local/share/dfx`, a NAMED volume,
+    # and `docker compose down` without `-v` keeps named volumes while removing
+    # containers. So the specific loss this comment was written about -- the ledger
+    # canister -- is addressed at its cause for any container created since.
+    #
+    # `stop` STAYS, for two reasons that are not the same reason:
+    #
+    #   1. THE tECDSA KEY IS STILL NOT ESTABLISHED. Measured 2026-10-07 at 15:58 UTC,
+    #      the same canister id with the same `dfx_test_key` gave two different public
+    #      keys across one ordinary recreation. That is three hours BEFORE the volume
+    #      existed, so it describes a topology that is gone -- and nothing has
+    #      measured whether the key material lives under /root/.local/share/dfx (now
+    #      on the volume) or elsewhere in the container. A reason to believe it now
+    #      survives is not a reading of it (rule 17). docker-compose.yml's hazard-1
+    #      block carries the three-command check that would settle it.
+    #   2. `down` ANSWERS A QUESTION NOBODY ASKED. "Is the container gone" is not what
+    #      an operator means by down; "is anything of this stack running" is, and
+    #      `stop` plus the bind proof below answers exactly that. Removing containers
+    #      to answer it is a destructive step taken for a report.
+    #
+    # STILL TRUE AND STILL NOT FIXED BY EITHER: `up` RECREATES a container when its
+    # image changes, which is how three canisters were lost on 2026-10-08 -- on a
+    # container that predated the volume. That is why step 2 of cmd_up() asks
+    # replica_state() BEFORE the rebuild, and why a redeploy after a replica rebuild
+    # (icp_ledger_init.py, then `dfx deploy`) is the path when it answers badly.
     done = compose(["stop"], files)
     for line in (done.stderr or done.stdout).strip().splitlines():
         say(f"                    {line}")
@@ -1554,9 +1675,10 @@ def _say_up_banner() -> tuple[str, str]:
     say("swap_stack: UP")
     code = _say_code_version()
     say(f"  database          {Config.DB_PATH}  <- SWAP_DB_PATH")
-    say(f"  services          {', '.join(UP_SERVICES)}  <- named, NOT every service in those files:")
-    say("                    docker-compose.yml defines `abstergo` and `harness` with no profiles:")
-    say("                    gate, so a bare `docker compose up` starts the TEST HARNESS too")
+    say(f"  services          {', '.join(UP_SERVICES)}  <- named, and as of 2026-10-10 also what a")
+    say("                    bare `docker compose up` starts: docker-compose.yml includes the icp")
+    say("                    and web files, and `abstergo` and `harness` are behind profiles of")
+    say("                    their own names. Before that a bare `up` started the TEST HARNESS.")
     say("  deployment        CONTAINERIZED. `web` runs gunicorn (gunicorn.conf.py, wsgi:app) AND")
     say("                    the three workers, both inside the container. NO host worker is")
     say("                    started here and `python app.py` is not needed -- that is the Flask")

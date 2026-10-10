@@ -1027,7 +1027,7 @@ def icp_plan(console_say, target: float, minter_identity: str) -> dict:
         return {"refusal": (
             f"ICP is not configured: {why_unconfigured('ICP', Config.RPC)}. The canister ids are "
             f"replica-issued environment state and nothing in this checkout can know them -- read "
-            f"them with: docker compose -f docker-compose.yml -f docker-compose.icp.yml exec -T "
+            f"them with: docker compose -f docker-compose.yml exec -T "
             f"icp-replica cat /repo/.dfx/local/canister_ids.json"
         )}
 

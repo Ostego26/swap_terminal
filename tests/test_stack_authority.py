@@ -82,6 +82,7 @@ from swap_terminal.stack_authority import (
     down_verdict,
     envelope_staleness_lines,
     hex_port,
+    include_entries,
     listening_inodes,
     pids_owning_inodes,
     port_is_free,
@@ -609,6 +610,83 @@ def test_a_bound_port_with_no_listener_is_not_a_proven_stop():
     assert set(DOWN_VERDICTS) == {"down", "stopped_not_proven", "not_down"}
 
 
+# ---------------------------------------------------------------------------
+# WHICH FILES A COMPOSE FILE PULLS IN BY ITSELF, which became a question on
+# 2026-10-10 when docker-compose.yml gained an `include:` of the icp and web
+# files -- so one filename in `status`'s header now stands for three.
+# ---------------------------------------------------------------------------
+
+
+def test_include_entries_reads_every_spelling_the_spec_defines():
+    """Three forms, one meaning. A reader that knows only one stops covering the file.
+
+    Seeded strings and no repository on disk, which is the whole reason the parse is
+    a pure function over text (rule 10) rather than something that opens a path.
+    """
+    assert include_entries("include:\n  - a.yml\n  - b.yml\n") == ["a.yml", "b.yml"]
+    assert include_entries("include:\n  - path: a.yml\n") == ["a.yml"]
+    assert include_entries("include:\n  - path:\n      - a.yml\n      - b.yml\n") == [
+        "a.yml", "b.yml",
+    ]
+    assert include_entries('include:\n  - "a.yml"\n') == ["a.yml"], "quotes are YAML, not a name"
+
+
+def test_include_entries_reads_nothing_it_was_not_asked_for():
+    """The four ways a naive scan over this file would over-read.
+
+    OVER-READING IS THE DIRECTION THAT LIES. A name reported as included that is not
+    tells an operator a file is part of their default project when it is not, and
+    the armed overlays are files whose inclusion would be a custody change -- so a
+    function that says "included" where compose says otherwise is worse than one
+    that says `(none)`.
+    """
+    assert include_entries("services:\n  x:\n    image: y\n") == [], "no include block at all"
+    assert include_entries("services:\n  x:\n    include: nope.yml\n") == [], (
+        "`include` as a SERVICE's own key is not the top-level block"
+    )
+    assert include_entries("include:\n  # - commented.yml\n  - a.yml\n") == ["a.yml"], (
+        "a commented-out entry is not an entry"
+    )
+    assert include_entries("include:\n  - a.yml\nservices:\n  - b.yml\n") == ["a.yml"], (
+        "the next top-level key CLOSES the block; a list under it is not an include"
+    )
+
+
+def test_include_entries_does_not_read_the_whole_file_as_prose():
+    """The fourth prose-reading detector of a previous session is the cautionary case.
+
+    docker-compose.yml's own header quotes the three-file `-f` command it replaced,
+    and its hazard blocks name every armed overlay in prose. A scan that matched
+    filenames anywhere in the text would report all of them as included -- which for
+    an armed overlay is the worst available false positive.
+    """
+    body = (Path(swap_stack.__file__).parent / "docker-compose.yml").read_text(encoding="utf-8")
+    read = include_entries(body)
+    assert read == ["docker-compose.icp.yml", "docker-compose.web.yml"], read
+    for armed in ("armed-grc", "armed-sol", "armed-xrp", "hostnet"):
+        assert "docker-compose.web." + armed + ".yml" in body, (
+            f"this test is only meaningful while {armed} is NAMED in that file's prose"
+        )
+        assert not any(armed in name for name in read), (
+            f"{armed} is named in docker-compose.yml's comments and must not be read as "
+            f"an include -- it is an overlay, and for the armed ones naming it on the "
+            f"command line IS the custody decision"
+        )
+
+
+def test_status_prints_what_each_compose_file_includes():
+    """Rule 14: one filename standing for three must not read as two lost files.
+
+    THROUGH THE REAL FUNCTION `status` CALLS, so this cannot pass against a
+    different parser than the report uses.
+    """
+    included = swap_stack.included_files(Path(swap_stack.__file__).parent / "docker-compose.yml")
+    assert included, "the header line would print (none) for the file that includes two"
+    assert swap_stack.included_files(Path("/nonexistent/docker-compose.yml")) == [], (
+        "`--compose-file` can name anything, and a report must not die labeling its own line"
+    )
+
+
 def test_the_compose_file_flag_accepts_the_form_its_own_help_text_names():
     """`-f` reaches the same destination as `--compose-file`, on the REAL parser.
 
@@ -638,9 +716,29 @@ def test_the_compose_file_flag_accepts_the_form_its_own_help_text_names():
 
     # The default, so that an override is distinguishable from no override at all.
     assert parser.parse_args(["up"]).compose_file is None
-    assert swap_stack.COMPOSE_FILES == (
-        "docker-compose.yml", "docker-compose.icp.yml", "docker-compose.web.yml",
-    ), "the hostnet and armed overlays are ALTERNATIVES and must stay off the default"
+    # ONE FILE SINCE 2026-10-10, AND IT PINNED THREE UNTIL THEN:
+    #
+    #     ("docker-compose.yml", "docker-compose.icp.yml", "docker-compose.web.yml")
+    #
+    # docker-compose.yml now declares `include:` for the other two, so passing them
+    # as `-f` as well would be the same file arriving twice -- a merge case nothing
+    # in this tree depends on, because what compose makes of it was not measurable
+    # where that change was written (swap_stack.COMPOSE_FILES records the reasoning).
+    #
+    # WHAT THIS ASSERTION IS STILL FOR is unchanged and is the reason it is a tuple
+    # comparison rather than a membership test: the directory also holds
+    # docker-compose.web.hostnet.yml and three armed-* overlays, which are
+    # ALTERNATIVES. Any of them appearing here would arm a chain or replace the
+    # network mode on every `swap_stack.py up`.
+    #
+    # THE PROPERTY THAT THIS CANNOT CHECK is now covered where it belongs:
+    # tests/test_compose_default_project.py walks `include:` transitively and fails
+    # if any entry here is a file another entry already supplies, and if any armed
+    # overlay is reachable from an include at all.
+    assert swap_stack.COMPOSE_FILES == ("docker-compose.yml",), (
+        "the hostnet and armed overlays are ALTERNATIVES and must stay off the default, "
+        "and a file docker-compose.yml already includes must not be passed again"
+    )
 
 
 def test_every_compose_file_the_default_names_exists_on_disk():

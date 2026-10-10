@@ -1,13 +1,27 @@
 # THE ICP HALF OF THE TOPOLOGY, under compose like everything else.
 #
-# `docker compose -f docker-compose.yml -f docker-compose.icp.yml up -d icp-replica`
+# `docker compose up -d icp-replica`
+#
+# NO `-f` AT ALL SINCE 2026-10-10: docker-compose.yml declares `include:` for this
+# file, so it is part of the default project and the command above is the whole of
+# it. The line here used to read
+#
+#     docker compose -f docker-compose.yml -f docker-compose.icp.yml up -d icp-replica
+#
+# and passing that second `-f` now hands compose the same file twice -- once
+# imported, once as a `-f` override -- which is a merge case nothing in this tree
+# depends on any more (swap_stack.py's COMPOSE_FILES records why, and why it was not
+# measured).
 #
 # WHY A SEPARATE FILE rather than a service in docker-compose.yml: the same reason
 # the web and grc-desk files are separate. Compose interpolates every variable in
-# every -f file BEFORE it selects a service, so a required variable in one file
-# makes every service in the set unstartable -- measured on this project earlier.
-# This file introduces no required variable, but it also has no business being
-# started by someone who only wants the harness.
+# every file it reads -- `-f` files and includes alike -- BEFORE it selects a
+# service, so a required variable in one file makes every service in the set
+# unstartable. Measured on this project earlier, and it is exactly why this file
+# could be included while docker-compose.grc-desk.yml could not: THIS FILE
+# INTRODUCES NO REQUIRED VARIABLE. The separation is still worth keeping now that
+# it is included, because it is what keeps that property checkable per file --
+# tests/test_docker_build_context.py asserts it one file at a time.
 services:
   icp-replica:
     build:

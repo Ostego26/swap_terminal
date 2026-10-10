@@ -588,6 +588,95 @@ def port_is_free(port: int, host: str = "127.0.0.1") -> bool:
 
 
 # =============================================================================
+# WHICH FILES A COMPOSE FILE PULLS IN BY ITSELF. Added 2026-10-10 with the
+# `include:` that made the question exist.
+#
+# WHY IT IS A PURE FUNCTION OVER TEXT (rule 10: the thing that decides is the
+# smallest, most testable piece at the bottom). The answer is a derivation from a
+# file's content, it has no network and no container in it, and it can be called
+# with a seeded string -- so it is testable without a repository on disk, let alone
+# a docker daemon.
+#
+# WHY IT IS HAND-PARSED AND NOT `yaml.safe_load`. MEASURED: PyYAML is in
+# requirements-dev.txt, NOT in requirements.txt. Its entry says so in its own words
+# -- "Parses docker-compose.yml for tests/test_docker_build_context.py" -- and
+# requirements.txt was written on 2026-10-05 from an AST walk of every third-party
+# top-level import under swap_terminal/, so yaml is absent from it because nothing
+# in the application imports it. swap_stack.py is a tool an operator runs against a
+# live stack, and making `status` die on a missing dev dependency would be this
+# function choosing to be the reason a report cannot print.
+#
+# WHAT THAT COSTS, STATED RATHER THAN HIDDEN, because a hand parser over YAML is
+# usually the wrong trade and this file's own tests say so about a security
+# invariant ("the thing being checked is a security invariant, and it should not
+# rest on a pattern that breaks when somebody reformats a mapping"). The difference
+# is what the answer is FOR: this one labels a line in a report. If it under-reads,
+# a `status` line says `(none)` where it should have named a file, which is a
+# cosmetic defect in a report nobody acts on blindly. The SAME question asked as a
+# gate -- is an armed overlay reachable from an include -- is answered in
+# tests/test_compose_default_project.py by the real YAML parser, because there a
+# wrong answer is a custody decision.
+# =============================================================================
+
+
+def include_entries(text: str) -> list[str]:
+    """The filenames a compose file's own top-level `include:` names. PURE.
+
+    Not recursive, and deliberately: a caller that wants the closure composes this
+    with itself, and a function that silently read other files could not be called
+    with a seeded string.
+
+    THE SHAPES IT READS, which are the ones the Compose specification defines:
+
+        include:                     include:
+          - docker-compose.icp.yml     - path: docker-compose.icp.yml
+
+    and `path:` taking a list of names. All three mean the same thing, so a reader
+    that understood only the spelling in use today would stop covering the file the
+    moment somebody used another -- and the drift would be invisible, because both
+    forms are correct.
+
+    TOP LEVEL ONLY. A key at column 0 named `include` opens the block and the next
+    key at column 0 closes it, so an `include` appearing as a service's own key, or
+    the word inside a comment or a value, is not read. Comments and blank lines
+    inside the block are skipped; anything else inside it that is not an entry ends
+    the block, which is the conservative direction -- under-reading labels a report
+    line, over-reading would name a file that is not included.
+    """
+    found: list[str] = []
+    inside = False
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].rstrip()
+        if not line:
+            continue
+        unindented = line[:1] != " " and line[:1] != "\t"
+        if unindented:
+            # A top-level key. `include:` opens the block; any other closes it.
+            inside = line.split(":", 1)[0].strip() == "include"
+            continue
+        if not inside:
+            continue
+        item = line.strip()
+        if not item.startswith("- "):
+            # Still indented, still inside, but not a list entry: a `path:` list's
+            # continuation lines look like this, so they are read rather than
+            # treated as the end of the block.
+            if item.startswith("path:"):
+                value = item.split(":", 1)[1].strip()
+                if value and not value.startswith("["):
+                    found.append(value.strip('"\''))
+                continue
+            inside = False
+            continue
+        value = item[2:].strip()
+        if value.startswith("path:"):
+            value = value.split(":", 1)[1].strip()
+        if value and not value.endswith(":"):
+            found.append(value.strip('"\''))
+    return found
+
+
+# =============================================================================
 # THE TWO DECISIONS A `down` MAKES, extracted here on 2026-10-07 because both
 # were inlined in swap_stack.py's cmd_down() and one of them was WRONG THERE for
 # as long as it existed -- in the block whose whole purpose is to be the proof.
@@ -1178,7 +1267,7 @@ def replica_state_verdict(
          "changed -- which deletes that layer. the ICP ledger, threshold_custody and",
          "operator_admin would go with it, and `up` would still print SERVING.",
          "this is what happened on 2026-10-08 and it cost the desk's minted LICP.",
-         "remedy: `docker compose -f docker-compose.yml -f docker-compose.icp.yml up -d",
+         "remedy: `docker compose -f docker-compose.yml up -d",
          "--force-recreate icp-replica` ONCE, deliberately, accepting the loss now and",
          "redeploying -- rather than discovering it after an unrelated rebuild. THE",
          "OPERATOR'S CALL: it destroys canisters either way, and only they know",
@@ -2544,8 +2633,7 @@ def bridge_subnet_verdict(observed: str, reason: str = "") -> tuple[str, str, li
          "subnet cannot change. Applying the pin needs the network REMOVED:",
          "",
          "    swapterm status          <- read the `replica state` line FIRST",
-         "    docker compose -f docker-compose.yml -f docker-compose.icp.yml \\",
-         "                   -f docker-compose.web.yml down",
+         "    docker compose -f docker-compose.yml down",
          "    swapterm up",
          "",
          "THE replica state LINE FIRST IS NOT CEREMONY. A real `docker compose down`",

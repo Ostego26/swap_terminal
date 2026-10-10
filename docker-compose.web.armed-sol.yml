@@ -36,9 +36,41 @@
 # it belongs in a single `docker compose run --env` invocation, because argv is
 # world-readable through /proc.
 #
-#     docker compose -f docker-compose.yml -f docker-compose.web.yml \
+#     docker compose -f docker-compose.yml \
 #                    -f docker-compose.web.hostnet.yml \
 #                    -f docker-compose.web.armed-sol.yml up -d web
+#
+# EVERY `-f` FOR A FILE docker-compose.yml NOW INCLUDES IS GONE FROM THAT COMMAND.
+# Since 2026-10-10 it declares `include:` for docker-compose.icp.yml and
+# docker-compose.web.yml, so both arrive with it, and naming one again would hand
+# compose the same file twice -- once imported, once as a `-f` override. (This
+# file's old command listed the ones it listed; the diff is the record of which.)
+#
+# AND HERE IS THE PART THAT IS NOT ESTABLISHED, because this overlay is the one
+# path in the tree that cannot avoid the question (rule 17: say which you have).
+# `web` now reaches compose through an `include:`, and this file overrides it
+# from a later `-f`. Whether compose PERMITS an overlay to override a resource an
+# earlier file imported, errors on it, or silently keeps one of the two, was NOT
+# measured: the container this change was written in was forbidden to run `docker`
+# at all, `docker compose config` included. Every other command in this tree was
+# reduced so that it does not depend on the answer. This one cannot be.
+#
+# SO CHECK IT BEFORE YOU ARM ANYTHING, with one read-only command on your own host:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.web.armed-sol.yml config --services
+#
+# `config` renders the merged model and starts nothing. If it prints the service
+# list, the override is accepted and the `up` command above is correct. If it
+# errors about a conflict with an imported resource, STOP -- do not improvise a
+# longer -f chain, because the failure mode of getting this wrong is a container
+# that comes up WITHOUT the overlay, which for an armed overlay means a payout
+# worker that cannot sign and for hostnet means every chain unreachable. Report
+# what it said; the fix is in docker-compose.yml, not here.
+#
+# NOTHING IN THIS FILE WAS OTHERWISE CHANGED by that work: no variable, no mount,
+# no `:?` guard, and no secret of this file is named anywhere in
+# docker-compose.yml. `include:` deliberately does NOT list it -- arming is an act,
+# and naming this file on the command line is that act.
 #
 # THE KEYPAIR IS A FILE, MOUNTED READ-ONLY, AND ITS CONTENTS ARE NEVER READ HERE.
 # SOL_PAYOUT_KEYPAIR_PATH names a path, so the path must exist inside the

@@ -174,6 +174,8 @@ class ICPCallFailed(RuntimeError):
 #:
 #:     ["docker", "compose", "-f", "docker-compose.yml", "-f", "docker-compose.icp.yml", ...]
 #:
+#: (that command was two -f flags then; it is one now -- see _COMPOSE_FILES below)
+#:
 #: and passed no `cwd=`, so both paths resolved against whatever directory the
 #: CALLING process happened to be in. Every caller that matters is in the wrong one:
 #:
@@ -197,7 +199,23 @@ class ICPCallFailed(RuntimeError):
 #: fail at the first ICP call instead of at startup.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-_COMPOSE_FILES = (_REPO_ROOT / "docker-compose.yml", _REPO_ROOT / "docker-compose.icp.yml")
+#: The compose files the `docker compose exec` transport passes as `-f`.
+#:
+#: ONE FILE SINCE 2026-10-10, AND IT WAS TWO: docker-compose.yml AND
+#: docker-compose.icp.yml. docker-compose.yml now declares `include:` for the icp and
+#: web files, so `icp-replica` reaches this command through the one file, and passing
+#: the second as well would be the same file arriving twice -- once imported, once as
+#: a `-f` override. Whether compose permits that, errors on it, or silently picks one
+#: is a question about compose's own merge rules that could not be measured where this
+#: change was written (running docker was forbidden there, `docker compose config`
+#: included), so no command in this tree passes a file `include:` already supplies.
+#: Rule 17: not guessing is the whole of it. swap_stack.py's COMPOSE_FILES records the
+#: same reduction and the same reason.
+#:
+#: IT STAYS A TUPLE, and dfx_transport() loops over it rather than indexing, because
+#: indexing `[0]` and `[1]` is what made a two-element tuple a shape assumption --
+#: a third entry or a second removal would have had to be made in two places.
+_COMPOSE_FILES = (_REPO_ROOT / "docker-compose.yml",)
 
 
 #: Lines of dfx output that carry KEY MATERIAL and must never be surfaced.
@@ -473,10 +491,12 @@ def dfx_transport(service: str, timeout: float, network_url: str = "", identity:
             # mount -- against the root as well. Fixing only the -f paths would move the
             # failure from "no configuration file provided" to a wrong build context,
             # which is the harder one to read.
+            compose_flags: list[str] = []
+            for path in _COMPOSE_FILES:
+                compose_flags += ["-f", str(path)]
             argv = [
                 "docker", "compose",
-                "-f", str(_COMPOSE_FILES[0]),
-                "-f", str(_COMPOSE_FILES[1]),
+                *compose_flags,
                 "exec", "-T", service,
                 *dfx_argv,
             ]

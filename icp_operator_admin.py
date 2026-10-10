@@ -237,8 +237,17 @@ def candid_seed(posture: dict) -> str:
     )
 
 
-COMPOSE = ("docker compose -f docker-compose.yml -f docker-compose.icp.yml "
-           "exec -T icp-replica dfx")
+#: The `docker compose exec` prefix every dfx command this file prints is built on.
+#:
+#: ONE `-f`, AND IT WAS TWO UNTIL 2026-10-10. docker-compose.yml declares
+#: `include:` for docker-compose.icp.yml, so `icp-replica` is reachable through
+#: the one file, and naming the second as well would hand compose the same file
+#: twice -- once imported, once as a `-f` override. Nothing in this tree does
+#: that any more, because what compose makes of it was not measurable where the
+#: change was written (rule 17). swap_stack.py's COMPOSE_FILES carries the full
+#: reasoning; this is the same reduction in a command an operator PASTES, which
+#: is the half that has to be right the first time.
+COMPOSE = "docker compose -f docker-compose.yml exec -T icp-replica dfx"
 
 #: Where the generated init argument goes. dfx.json names this path.
 #:

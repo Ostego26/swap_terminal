@@ -40,7 +40,19 @@
 # this file can only state.
 #
 #     python3 swap_terminal/supervisor.py stop     # on the HOST, first
-#     docker compose -f docker-compose.yml -f docker-compose.web.yml up -d web
+#     docker compose up -d web
+#
+# NO `-f` SINCE 2026-10-10: docker-compose.yml declares `include:` for this file, so
+# `web` is in the default project. The line used to read `-f docker-compose.yml -f
+# docker-compose.web.yml up -d web`, and passing that second `-f` now hands compose
+# the same file twice -- a merge case nothing in this tree depends on, because what
+# compose makes of it was not measurable where the change was written (rule 17;
+# swap_stack.py's COMPOSE_FILES carries the reasoning).
+#
+# A BARE `docker compose up` STARTS THIS SERVICE AND `icp-replica`, with no service
+# named. That is deliberate, and the precondition above is the one it cannot check:
+# compose has no way to know whether the host's three workers are running, and this
+# container starts three of its own.
 
 services:
   # ---------------------------------------------------------------------------
@@ -402,7 +414,28 @@ services:
       # into the image, where they are discarded -- and a WAL database separated
       # from its WAL is a database missing its most recent committed writes.
       # So this mounts the DIRECTORY, never the file.
-      - "${SWAP_DB_DIR:?set SWAP_DB_DIR to the directory holding swap_terminal.db, after running the stat -f check in the comment above}:/data"
+      #
+      # THE GUARD STAYS REQUIRED AND THE MESSAGE WAS REWRITTEN, 2026-10-10, because
+      # docker-compose.yml now `include:`s this file. Before that, the only way to
+      # reach this line was to type `-f docker-compose.web.yml` yourself, so the
+      # reader of the failure had this file open; the old message ended with "after
+      # running the stat -f check in the comment above" and "above" was on their
+      # screen. Now a bare `docker compose up` in a fresh checkout hits it, and that
+      # reader has opened nothing: compose prints the message with no file, no line
+      # and no comment around it.
+      #
+      # So the message carries its own context -- the variable, the file that
+      # declares it, what the value must be, and the one check to run first. Rule
+      # 14: "pasted output has to be self-describing a day later, because it usually
+      # is read a day later." A hard failure here is CORRECT (the alternatives are a
+      # default that mounts an empty database indistinguishable from a working one,
+      # or one naming a host path that cannot exist in version control) and a correct
+      # failure that reads like a bug still costs the operator the same hour.
+      #
+      # NO `}` ANYWHERE IN THE MESSAGE: compose's `${VAR:?message}` ends at the first
+      # closing brace, so a brace in the prose truncates the sentence and leaves the
+      # remainder in the YAML as garbage.
+      - "${SWAP_DB_DIR:?SWAP_DB_DIR is not set. docker-compose.web.yml -- included by docker-compose.yml, so a bare `docker compose up` reads it -- mounts this at /data and will not guess which swap database the terminal opens. Set it to the DIRECTORY holding swap_terminal.db, never the file: WAL keeps -wal and -shm sidecars beside it and they must be one mount. Check the filesystem FIRST with: stat -f -c '%T  %n' <that directory>. ext4, xfs, btrfs or zfs on a native Linux host: proceed. fuseblk, virtiofs, nfs, smb2 or 9p: STOP, WAL fails there by corrupting rather than by erroring. The comment above this line in docker-compose.web.yml has the rest}:/data"
       # pid files, worker logs and kill_switch.lock. On the writable layer these
       # die with the container, and a pid file that cannot outlive the process it
       # names can never prove a stop across a restart (rule 13).
