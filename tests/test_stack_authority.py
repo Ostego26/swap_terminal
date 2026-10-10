@@ -50,6 +50,8 @@ from swap_terminal.stack_authority import (
     CANISTER_SURFACES,
     CHAIN_ADAPTERS_KEY,
     CHAIN_ATTEMPTED_KEY,
+    CHAIN_ENVELOPE_VERSION,
+    CHAIN_ENVELOPE_VERSION_KEY,
     CHAIN_EXIT_CODES,
     CHAIN_PROBE_ROWS_KEY,
     CHAIN_PROBED_AT_KEY,
@@ -77,6 +79,7 @@ from swap_terminal.stack_authority import (
     container_label,
     container_verdict,
     down_verdict,
+    envelope_staleness_lines,
     hex_port,
     listening_inodes,
     pids_owning_inodes,
@@ -3160,3 +3163,104 @@ def test_every_sync_state_has_a_rendering_decision():
         )
     }
     assert reached == set(SYNC_STATES)
+
+
+# ---------------------------------------------------------------------------
+# DOES THE CONTAINER PRODUCE THE FIELDS THIS REPORT READS.
+#
+# Measured on the operator's host 2026-10-10 and it cost a shipped feature's
+# visibility. The sync lines went in two hours earlier; the operator pulled, ran
+# `swapterm chains`, and a BTC daemon at 74% of its initial block download
+# rendered as a plain healthy chain with no STILL SYNCING block anywhere.
+#
+# Nothing on that screen was wrong. probe_chain() runs INSIDE the container,
+# docker/web.Dockerfile bakes the app in, the container had not been rebuilt, so
+# the rows arrived without `sync` and the renderer correctly printed nothing for a
+# field nobody reported. Rule 13: "verify the artifact, not the deploy."
+# ---------------------------------------------------------------------------
+
+
+def test_the_producer_and_the_version_constant_agree():
+    """BUMP THE CONSTANT WHEN A FIELD IS ADDED. This makes forgetting a failure.
+
+    Without it the marker rots the moment somebody adds a key without bumping,
+    and a rotten staleness check is worse than none -- it reports agreement.
+    """
+    produced = chain_probe_envelope([], probed_at="t", adapters_configured=0)
+    assert produced[CHAIN_ENVELOPE_VERSION_KEY] == CHAIN_ENVELOPE_VERSION
+    assert CHAIN_ENVELOPE_VERSION >= 2, (
+        "v2 is the shape with `network` and `sync` in the rows; anything lower cannot "
+        "be what this file's renderers read"
+    )
+
+
+def test_a_container_SERVING_THE_FIELDS_says_nothing():
+    """Silent when they agree, which is almost always."""
+    body = chain_probe_envelope(
+        [_answered("BTC", "testnet4")], probed_at="t", adapters_configured=1
+    )
+    assert envelope_staleness_lines(body) == []
+    assert "OLDER CODE" not in "\n".join(chain_reachability_verdict(body)[2])
+
+
+def test_an_envelope_with_NO_VERSION_KEY_is_the_OLDER_case_not_an_unknown_one():
+    """THE EXACT BODY THE OPERATOR'S CONTAINER SERVED.
+
+    v1 had no version key at all, so its absence dates the container precisely:
+    before 2026-10-10. Treating it as "could not tell" would put the first and
+    most likely stale container in the quiet branch.
+
+    MUTATION CHECKED: defaulting the missing key to CHAIN_ENVELOPE_VERSION
+    instead of 1 fails here, and the check goes silent on the one case it exists for.
+    """
+    body = {
+        "probed_at": "2026-10-10T01:00:31Z",
+        "adapters_configured": 6,
+        "probes_attempted": 4,
+        CHAIN_PROBE_ROWS_KEY: [_answered("BTC", "testnet4")],
+    }
+    blob = "\n".join(envelope_staleness_lines(body))
+    assert "OLDER CODE" in blob
+    assert "envelope v1" in blob
+    assert "swapterm rebuild" in blob, "the remedy, because `git pull` does NOT fix this"
+    assert "BAKED INTO THE IMAGE" in blob, "and why a pull does not fix it"
+
+
+def test_a_NEWER_container_is_reported_too_and_differently():
+    """Rebuilt but not pulled. The screen is incomplete rather than wrong, and the
+    remedy is the opposite one."""
+    body = chain_probe_envelope(
+        [_answered("BTC", "testnet4")], probed_at="t", adapters_configured=1
+    )
+    body[CHAIN_ENVELOPE_VERSION_KEY] = CHAIN_ENVELOPE_VERSION + 5
+    blob = "\n".join(envelope_staleness_lines(body))
+    assert "NEWER CODE" in blob
+    assert "git pull" in blob
+    assert "swapterm rebuild" not in blob, "the opposite remedy would be wrong here"
+
+
+def test_the_staleness_warning_comes_BEFORE_the_counts():
+    """It changes how everything below should be read.
+
+    A stale container makes every absent field look like a deliberate "not
+    reported", so the reader needs this before the rows rather than after them.
+    """
+    body = {
+        "probed_at": "t", "adapters_configured": 1, "probes_attempted": 1,
+        CHAIN_PROBE_ROWS_KEY: [_answered("BTC", "testnet4")],
+    }
+    lines = chain_census_lines(body, chain_probe_rows(body))
+    joined = "\n".join(lines)
+    assert joined.index("OLDER CODE") < joined.index("asked at")
+
+
+@pytest.mark.parametrize("served", ["two", None, 2.0, [], {}])
+def test_a_NON_INTEGER_version_is_not_guessed_at(served):
+    """A body carrying nonsense in that key says nothing rather than inventing a verdict.
+
+    "The container is older" is a claim, and a claim from an unparseable value is
+    the guess rule 17 forbids.
+    """
+    body = chain_probe_envelope([], probed_at="t", adapters_configured=0)
+    body[CHAIN_ENVELOPE_VERSION_KEY] = served
+    assert envelope_staleness_lines(body) == []

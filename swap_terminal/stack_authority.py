@@ -1224,6 +1224,41 @@ _NOT_ASKED = None
 CHAIN_PROBE_ROWS_KEY = "chains"
 
 
+#: THE SHAPE OF /api/admin/chains' BODY, BUMPED WHENEVER A FIELD IS ADDED TO IT.
+#:
+#: WHY A NUMBER AND NOT A COMMIT HASH. The question this answers is not "which commit
+#: is the container on" but "does the container produce the fields this report reads".
+#: A hash answers the first and needs a build-arg pipeline to even obtain; a version
+#: the PRODUCER owns answers the second with one integer and no build changes.
+#:
+#: WHAT ITS ABSENCE COST, measured on the operator's host 2026-10-10. The sync lines
+#: shipped two hours earlier -- probe_chain() putting `sync` in each row, the report
+#: shouting STILL SYNCING -- were INVISIBLE, because probe_chain() runs INSIDE the
+#: container and docker/web.Dockerfile bakes the app in (`COPY swap_terminal
+#: ./swap_terminal`). The host had pulled; the container had not been rebuilt. So the
+#: rows arrived without `sync`, the renderer correctly printed nothing for a field
+#: nobody reported, and a BTC daemon at 74% of its initial block download rendered as
+#: a plain healthy chain.
+#:
+#: Nothing on that screen was wrong. That is the problem: rule 13's "when a deploy
+#: depends on new code actually running, verify the artifact, not the deploy", and
+#: OPEN_FINDINGS entry 10 has asked for a container staleness marker since
+#: 2026-10-08. A silent absence is indistinguishable from a healthy answer, which is
+#: the same defect class this probe has now produced four times -- `network`, the
+#: envelope counts, `sync`, and now the envelope itself.
+#:
+#: BUMP THIS when a key is added to chain_probe_envelope() or to a row that the
+#: report reads. tests/test_stack_authority.py asserts the producer and this constant
+#: agree, so forgetting is a test failure rather than a silent blind spot.
+#:
+#:   1  the original shape: probed_at, adapters_configured, probes_attempted, chains
+#:   2  rows gained `network` (2026-10-09) and `sync` (2026-10-10)
+CHAIN_ENVELOPE_VERSION = 2
+
+#: The key it travels under.
+CHAIN_ENVELOPE_VERSION_KEY = "envelope_version"
+
+
 def chain_probe_envelope(
     chains: list[dict], probed_at: str, adapters_configured: int
 ) -> dict:
@@ -1241,6 +1276,7 @@ def chain_probe_envelope(
     """
     return {
         "probed_at": probed_at,
+        CHAIN_ENVELOPE_VERSION_KEY: CHAIN_ENVELOPE_VERSION,
         "adapters_configured": adapters_configured,
         "probes_attempted": sum(1 for chain in chains if chain.get("probed")),
         CHAIN_PROBE_ROWS_KEY: chains,
@@ -1404,6 +1440,51 @@ CHAIN_ADAPTERS_KEY = "adapters_configured"
 CHAIN_ATTEMPTED_KEY = "probes_attempted"
 
 
+def envelope_staleness_lines(body: object) -> list[str]:
+    """Does the CONTAINER produce the fields this report reads? Says so when it does not.
+
+    THE ONE QUESTION NO OTHER CHECK ASKS. code_version_verdict() above compares this
+    HOST CHECKOUT against origin -- whether the operator has pulled. This compares the
+    host against the CONTAINER, which is a different thing entirely, because
+    docker/web.Dockerfile bakes the app into the image: a `git pull` changes what
+    `swapterm chains` RENDERS and changes nothing about what the container PRODUCES.
+
+    Silent when they agree, which is almost always.
+
+    THREE OUTCOMES, and the middle one is the one that was invisible:
+
+      equal    nothing to say.
+      older    the container predates a field this report reads. Everything derived
+               from that field renders as "not reported", which is correct and reads
+               as healthy. `swapterm rebuild`.
+      newer    the container is ahead of this checkout -- the operator rebuilt and did
+               not pull, or pulled and reverted. `git pull`.
+
+    AND A MISSING KEY IS THE `older` CASE, NOT AN UNKNOWN ONE. Version 1 of this
+    envelope had no version key at all, so its absence dates the container precisely:
+    before 2026-10-10. Treating it as "could not tell" would put the first and most
+    likely stale container in the quiet branch.
+    """
+    if not isinstance(body, Mapping):
+        return []
+    served = body.get(CHAIN_ENVELOPE_VERSION_KEY, 1)
+    if not isinstance(served, int) or served == CHAIN_ENVELOPE_VERSION:
+        return []
+    if served < CHAIN_ENVELOPE_VERSION:
+        return [
+            "  *** THE CONTAINER IS SERVING OLDER CODE THAN THIS CHECKOUT. It produces",
+            f"      envelope v{served}; this report reads v{CHAIN_ENVELOPE_VERSION}. Fields added since are ABSENT,",
+            "      and everything derived from them renders as 'not reported' -- which is",
+            "      accurate and reads as healthy. A `git pull` does not fix it: the app is",
+            "      BAKED INTO THE IMAGE (docker/web.Dockerfile). Run `swapterm rebuild`. ***",
+        ]
+    return [
+        f"  *** THE CONTAINER IS SERVING NEWER CODE THAN THIS CHECKOUT -- envelope v{served}",
+        f"      against this report's v{CHAIN_ENVELOPE_VERSION}. It may be reporting fields this report does not",
+        "      read, so this screen is incomplete rather than wrong. `git pull`. ***",
+    ]
+
+
 def chain_census_lines(body: object, rows: list) -> list[str]:
     """When the probe ran, and whether every configured adapter is even IN the report.
 
@@ -1435,7 +1516,12 @@ def chain_census_lines(body: object, rows: list) -> list[str]:
     """
     if not isinstance(body, Mapping):
         return []
-    lines = []
+    # FIRST, BECAUSE IT CHANGES HOW EVERYTHING BELOW SHOULD BE READ. A stale container
+    # makes every absent field look like a deliberate "not reported", so the reader
+    # needs this before the rows rather than after them.
+    lines = list(envelope_staleness_lines(body))
+    if lines:
+        lines.append("")
     probed_at = body.get(CHAIN_PROBED_AT_KEY)
     lines.append(
         f"  asked at          {probed_at}  <- by the CONTAINER, in UTC"
