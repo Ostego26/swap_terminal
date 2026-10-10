@@ -113,8 +113,10 @@ from chains.daemon_network import (
 )
 from chains.registry import build_adapters, why_unconfigured
 from config import Config
+from microfortnights import format_duration
 from regtest.console import FAIL, OK, Console
 from regtest.daemons import RegtestSetupError, WalletSite, ensure_wallet_on
+from stack_authority import probe_failure_detail
 
 #: The chains this file can prepare. BTC and LTC only, and the omissions are
 #: reasons rather than an oversight:
@@ -247,6 +249,14 @@ FAUCET_SLUGS = {"BTC": "btc-testnet", "LTC": "ltc-testnet"}
 #: rather than guessed at -- the four below are what the faucet says it returns, and
 #: an unlisted one means it changed and nobody has looked.
 FAUCET_ERRORS = {
+    # 200 IS NOT AN ERROR CODE AND IS IN HERE ANYWAY, because the faucet can answer
+    # `{"ok": false}` with a 200 status -- urllib raises nothing, so that refusal
+    # arrives down the SUCCESS path. It was rendered separately there until
+    # 2026-10-10, which is rule 8's two-copies-of-one-rule: one copy reported
+    # `retry_after` in microfortnights and the other dumped the whole dict into a
+    # column. Both now read this map.
+    200: ("the faucet answered HTTP 200 and still refused to pay. Nothing in its "
+          "README documents that shape, so the body below is the whole diagnosis"),
     400: "the faucet rejected the address or the network slug as invalid",
     # 403 IS NOT IN THE README. It is Cloudflare's, in front of the faucet, and it was
     # found by this client getting it on 2026-10-10 where `curl` had succeeded minutes
@@ -287,6 +297,71 @@ FAUCET_USER_AGENT = (
 #: because urllib's default is to block forever and rule 14's complaint about a
 #: blinking cursor is what that produces.
 FAUCET_TIMEOUT_SECONDS = 30.0
+
+
+def refusal_lines(status: int, body: bytes) -> list[str]:
+    """What to print when the faucet refuses, READING the body rather than dumping it.
+
+    THE FAUCET ANSWERS A STRUCTURED REFUSAL and the first version of this threw the
+    structure away. Measured on the operator's host 2026-10-10:
+
+        {"ok":false,"error":"rate_limited",
+         "message":"You have already claimed within the current window.",
+         "retry_after":1846,"next_claim":"2026-10-10T14:22:28+00:00","source":"..."}
+
+    and what reached the screen was `the faucet said: {"ok":false,...` cut off at 200
+    characters, mid-field, with the generic sentence "Wait it out" above it. The faucet
+    had just said EXACTLY how long to wait, twice, in two formats -- and the operator
+    was left to parse JSON by eye to find it. Rule 14: state what the number means,
+    next to the number.
+
+    TRUNCATING MID-FIELD IS ITS OWN DEFECT and this repo has paid for it once already:
+    C27, `str(detail)[:150]`, kept the HEAD of a requests error -- where the host and
+    port are, which the row already said -- and dropped the TAIL, where the cause was.
+    Here the cut landed inside `"source":"https://github.com/Tech1k/cyphe`. An elision
+    that does not announce itself reads as the whole message, so a body that is not
+    JSON goes through stack_authority.probe_failure_detail(), which keeps both ends and
+    says how many characters it dropped between them.
+
+    `retry_after` IS REPORTED IN MICROFORTNIGHTS (rule 6) with the seconds in
+    parentheses, and the wall-clock `next_claim` beside it, because those answer
+    different questions: how long to wait, and whether it is worth waiting at all.
+
+    BOTH REFUSAL PATHS COME THROUGH HERE, and they did not at first. urllib raises
+    HTTPError for a 4xx/5xx, so a 429 arrives as an exception -- but the faucet can
+    also answer `{"ok": false}` with a 200, which raises nothing and lands in the
+    success branch. That branch had its own rendering: it put `payload["error"]`
+    (or, absent that key, the WHOLE DICT) into a console column and printed no body
+    at all, so the identical refusal reported two different ways depending on a
+    status code the operator never sees. Rule 8 -- and the drift was already there
+    on the day the second copy was written. `status=200` has a row in FAUCET_ERRORS
+    for exactly this caller.
+    """
+    detail = FAUCET_ERRORS.get(status, f"undocumented status {status} -- not in the faucet's "
+                                       f"documented set (400/403/409/429/503), so the body "
+                                       f"below is the whole diagnosis")
+    lines = [detail]
+    text = body.decode("utf-8", "replace") if body else ""
+    if not text:
+        return [*lines, "the faucet sent no body, so there is nothing more to read"]
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        # NOT JSON. A Cloudflare refusal is an HTML page, and `error code: 1010` inside
+        # it is what identified the Browser Integrity Check -- so the body still has to
+        # arrive, with its elision announced.
+        return [*lines, f"the faucet said: {probe_failure_detail(text)}"]
+    if message := payload.get("message"):
+        lines.append(f"the faucet said: {message}")
+    wait = payload.get("retry_after")
+    if isinstance(wait, int | float):
+        lines.append(f"retry in {format_duration(float(wait))}"
+                     + (f", at {payload['next_claim']}" if payload.get("next_claim") else ""))
+    elif payload.get("next_claim"):
+        lines.append(f"next claim at {payload['next_claim']}")
+    if (code := payload.get("error")) and code not in str(payload.get("message", "")):
+        lines.append(f"its own code for this: {code!r}")
+    return lines
 
 
 def claim_from_faucet(console: Console, asset: str, address: str) -> dict:
@@ -332,14 +407,16 @@ def claim_from_faucet(console: Console, asset: str, address: str) -> dict:
     console.say(f"    asking {FAUCET_CLAIM_URL} for {FAUCET_SLUGS[asset]} -> {address}")
     try:
         with urllib.request.urlopen(request, timeout=FAUCET_TIMEOUT_SECONDS) as answer:  # noqa: S310 -- checked: same literal https URL
-            payload = json.loads(answer.read().decode("utf-8", "replace"))
+            # THE BYTES ARE KEPT, not just the parsed dict: an `ok=false` 200 is a
+            # refusal and refusal_lines() reads a body. Parsing twice would be the
+            # cheaper-looking option and would also mean the branch below could not
+            # report a field refusal_lines() knows about and this function does not.
+            raw = answer.read()
+            payload = json.loads(raw.decode("utf-8", "replace"))
     except urllib.error.HTTPError as error:
-        detail = FAUCET_ERRORS.get(error.code, f"undocumented status {error.code}")
-        body_text = error.read().decode("utf-8", "replace")[:200] if error.fp else ""
         console.check(f"{asset} faucet", f"HTTP {error.code}", "HTTP 200", FAIL)
-        console.say(f"    {detail}")
-        if body_text:
-            console.say(f"    the faucet said: {body_text}")
+        for line in refusal_lines(error.code, error.read() if error.fp else b""):
+            console.say(f"    {line}")
         return {"ok": False, "why": f"HTTP {error.code}"}
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
         # NAMED, NOT SWALLOWED. A denied host is the failure this will actually hit --
@@ -353,7 +430,9 @@ def claim_from_faucet(console: Console, asset: str, address: str) -> dict:
         return {"ok": False, "why": type(error).__name__}
 
     if not payload.get("ok"):
-        console.check(f"{asset} faucet", payload.get("error", payload), "ok=true", FAIL)
+        console.check(f"{asset} faucet", payload.get("error") or "ok=false", "ok=true", FAIL)
+        for line in refusal_lines(200, raw):
+            console.say(f"    {line}")
         return {"ok": False, "why": str(payload.get("error", "refused"))}
     console.check(f"{asset} faucet", f"{payload.get('amount')} {payload.get('currency')}",
                   "a payment", OK)

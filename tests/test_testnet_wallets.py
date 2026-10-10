@@ -560,6 +560,32 @@ class _Answer:
         return False
 
 
+@pytest.fixture(autouse=True)
+def _no_real_faucet(monkeypatch):
+    """No test in this file may reach the network. Enforced, not promised.
+
+    The section header above has claimed this since the file was written, and for
+    one commit it was false -- see
+    test_a_SUCCESSFUL_claim_reports_the_amount_the_currency_and_the_TXID for the
+    measurement. A comment cannot fail; this can.
+
+    It patches the same attribute `_faucet()` does, so a test that calls `_faucet`
+    overwrites this with its own stub and is unaffected. A test that forgets gets
+    a named failure at the call site instead of a 30-second timeout, a denied-host
+    URLError that looks like a real refusal, or -- on a host whose egress is open
+    -- an actual claim.
+    """
+    def _refuse(request, timeout=None):
+        url = getattr(request, "full_url", request)
+        raise AssertionError(
+            f"this test reached the REAL network ({url}). Patch urlopen with "
+            f"_faucet(monkeypatch, outcome) -- a live request burns the operator's "
+            f"per-IP faucet window on every suite run"
+        )
+
+    monkeypatch.setattr(tw.urllib.request, "urlopen", _refuse)
+
+
 def _faucet(monkeypatch, outcome):
     """Replace urlopen and record the request the client built."""
     sent = {}
@@ -607,12 +633,27 @@ def test_the_LTC_slug_is_its_own_and_not_the_BTC_one(monkeypatch):
 
 
 def test_a_SUCCESSFUL_claim_reports_the_amount_the_currency_and_the_TXID(monkeypatch):
-    """The txid is the receipt. A claim that printed no txid would be unverifiable."""
-    stream = io.StringIO()
-    row = tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
-    del row
-    sent = _faucet(monkeypatch, _REAL_BTC_200)
-    del sent
+    """The txid is the receipt. A claim that printed no txid would be unverifiable.
+
+    THIS TEST SENT A REAL REQUEST TO THE LIVE FAUCET until 2026-10-10, and the
+    section header above it said "NOTHING HERE OPENS A SOCKET" the whole time. A
+    botched edit left a `claim_from_faucet()` call BEFORE `_faucet()` had patched
+    anything, with its result discarded by `del row`, and nothing failed: in the
+    container that wrote it every faucet host is denied, so the unpatched call
+    raised URLError, `claim_from_faucet` caught it and returned ok=False, and the
+    `del` threw that away. Green here, a real claim on the operator's host, once
+    per suite run, against the per-IP window this file's own 429 handling exists
+    to explain.
+
+    Measured with a pytest plugin that wrapped the real `urllib.request.urlopen`
+    and counted: `REAL urlopen reached 1 time(s):
+    ['https://cypherfaucet.com/api/v1/claim']` across the 47 tests in this file.
+    After the fix, 0. The `_no_real_faucet` fixture below is what makes the
+    header's promise mechanical rather than a comment -- rule 19: the ratchet is
+    not the fix, removing the cause is, and the fixture stops the cause RECURRING
+    rather than stopping it being reported.
+    """
+    _faucet(monkeypatch, _REAL_BTC_200)
     stream = io.StringIO()
     row = tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
     out = stream.getvalue()
@@ -862,3 +903,229 @@ def test_a_CLOUDFLARE_403_says_whose_refusal_it_is_and_points_at_the_browser_lin
     assert "Cloudflare refused this client, not the faucet" in out
     assert "1010" in out and "Browser Integrity Check" in out
     assert "?address=" in out, "and it points at the link that actually works"
+
+
+# ---------------------------------------------------------------------------
+# THE REFUSAL BODY, 2026-10-10. The faucet answers a STRUCTURED refusal and the
+# first client threw the structure away: what reached the operator's screen was
+#
+#     rate limited: one claim per address and one per IP per window. Wait it out
+#     the faucet said: {"ok":false,"error":"rate_limited","message":"You have
+#     already claimed within the current window.","retry_after":1846,"next_claim":
+#     "2026-10-10T14:22:28+00:00","source":"https://github.com/Tech1k/cyphe
+#
+# -- a generic "wait it out" above a body cut off at 200 characters, mid-field,
+# inside `"source"`. The faucet had just said how long to wait, TWICE, in two
+# formats, and the operator was left to read JSON by eye to find it.
+#
+# The bodies below are that one verbatim. Nothing here opens a socket.
+# ---------------------------------------------------------------------------
+
+#: The real 429, copied from the operator's terminal. `retry_after` is an int and
+#: `next_claim` is an ISO-8601 string with an offset -- both observed, neither
+#: guessed, which is the same reason _REAL_BTC_200 keeps `amount` as a string.
+_REAL_429 = {
+    "ok": False, "error": "rate_limited",
+    "message": "You have already claimed within the current window.",
+    "retry_after": 1846, "next_claim": "2026-10-10T14:22:28+00:00",
+    "source": "https://github.com/Tech1k/cypherfaucet.com",
+}
+
+
+def _http_error(status, payload):
+    """An HTTPError that CARRIES A BODY, which is the half the older tests omit.
+
+    The existing error tests pass `fp=None`, so `error.fp` is falsy and the client
+    reads an empty body -- that exercises the "sent no body" branch and nothing
+    else. A refusal with a body is the case the faucet actually produces, and it
+    needed its own constructor rather than a fourth copy of these five arguments.
+    """
+    body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+    return tw.urllib.error.HTTPError(tw.FAUCET_CLAIM_URL, status, "refused", {},
+                                     io.BytesIO(body))
+
+
+def test_a_429_reports_the_WAIT_IN_MICROFORTNIGHTS_and_the_WALL_CLOCK_beside_it(monkeypatch):
+    """The two numbers the faucet supplied and the first client discarded.
+
+    They answer DIFFERENT questions and that is why both are printed: `retry_after`
+    is how long to wait, `next_claim` is whether it is worth waiting at all -- 1846s
+    is half an hour, which an operator may well decide to spend on the one-click link
+    instead. Rule 6 governs the rendering (µfn with the seconds in parentheses, no
+    space before either unit) and rule 14 governs that the figure appears at all:
+    state what the number means, next to the number.
+    """
+    _faucet(monkeypatch, _http_error(429, _REAL_429))
+    stream = io.StringIO()
+    row = tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
+    out = stream.getvalue()
+    assert row["ok"] is False and row["why"] == "HTTP 429"
+    assert "rate limited" in out, "the status still gets its own sentence"
+    assert "You have already claimed within the current window." in out, (
+        "the faucet's own message, whole -- not a 200-character prefix of the raw body"
+    )
+    assert "1526.1µfn (1846.0s)" in out, (
+        "the wait, in microfortnights with the seconds in parentheses (rule 6)"
+    )
+    assert "2026-10-10T14:22:28+00:00" in out, "and the wall clock, so it can be judged"
+    assert "{\"ok\":false" not in out and "'ok': False" not in out, (
+        "the raw body is READ, not dumped -- dumping it is what cut `source` in half"
+    )
+
+
+def test_the_WAIT_IS_NOT_PRINTED_AS_BARE_SECONDS(monkeypatch):
+    """Rule 6's two absolutes, asserted negatively, because that is the half with teeth.
+
+    A test that looked for `1846` would pass on `retry in 1846 seconds`, on
+    `1846 ufn`, and on `1846.0 µfn` -- the ASCII `u` and the space before the unit
+    are both named as defects rather than typos, and every script written for that
+    rule in the sibling repo drifted to one or the other because nothing failed.
+    """
+    _faucet(monkeypatch, _http_error(429, _REAL_429))
+    stream = io.StringIO()
+    tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
+    out = stream.getvalue()
+    assert "ufn" not in out, "the unit is µfn (U+00B5), never an ASCII u"
+    assert " µfn" not in out and " s)" not in out, "and no space before either unit"
+    assert "1846 second" not in out and "retry in 1846" not in out, (
+        "a bare seconds figure is what rule 6 converts on the way out"
+    )
+
+
+def test_a_NON_JSON_refusal_ANNOUNCES_ITS_ELISION_rather_than_cutting_mid_field(monkeypatch):
+    """A Cloudflare refusal is an HTML page, and `error code: 1010` is at the END of it.
+
+    THIS IS THE C27 DEFECT, which this repo has already paid for once: `str(detail)[:150]`
+    kept the HEAD of a failure -- the host and port, which the row already said -- and
+    dropped the TAIL, where the cause was. The 1010 that identified the Browser
+    Integrity Check sits in the tail of exactly such a page, so a head-only cut would
+    have hidden the one string that made the diagnosis possible.
+
+    probe_failure_detail() keeps BOTH ends and says how many characters it dropped
+    between them, so the reader can tell a severed message from a complete one. Reusing
+    it rather than writing a second truncator is rule 8: the fix exists, and a second
+    copy would drift from it.
+    """
+    page = ("<!DOCTYPE html><html><head><title>Access denied</title></head><body>"
+            + "<p>padding</p>" * 60
+            + "<span>error code: 1010</span></body></html>").encode()
+    _faucet(monkeypatch, _http_error(403, page))
+    stream = io.StringIO()
+    row = tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
+    out = stream.getvalue()
+    assert row["ok"] is False and row["why"] == "HTTP 403"
+    assert "error code: 1010" in out, (
+        "the TAIL survives -- it is where the cause is, and a head-only cut is the C27 bug"
+    )
+    assert "<!DOCTYPE html" in out, "and the head, so the reader can see what kind of page it is"
+    assert "chars]" in out, "and the elision says how much it dropped, rather than reading as whole"
+    assert len(page.decode()) > len(out), "it is in fact shortened, not just passed through"
+
+
+def test_a_SHORT_non_JSON_body_arrives_WHOLE_with_no_elision_marker(monkeypatch):
+    """The common case is a daemon or proxy refusing in one line. It is not cut.
+
+    probe_failure_detail() returns a short string untouched, so a reader never has to
+    wonder whether a 40-character refusal was the whole thing. Asserted here rather
+    than trusted to the helper's own tests, because this caller is the one that would
+    notice if the threshold moved.
+    """
+    _faucet(monkeypatch, _http_error(503, b"upstream node is unavailable"))
+    stream = io.StringIO()
+    tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
+    out = stream.getvalue()
+    assert "upstream node is unavailable" in out
+    assert "chars]" not in out, "nothing was dropped, so nothing claims to have been"
+
+
+def test_an_EMPTY_refusal_body_SAYS_SO_rather_than_printing_a_blank(monkeypatch):
+    """Rule 14: a blank gap is ambiguous between "no body" and "the read broke"."""
+    _faucet(monkeypatch, _http_error(409, b""))
+    stream = io.StringIO()
+    tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
+    out = stream.getvalue()
+    assert "EMPTY for this chain" in out, "the status sentence still prints"
+    assert "sent no body" in out, "and the absence of a body is itself reported"
+
+
+def test_the_ok_false_200_path_READS_THE_SAME_RENDERER_as_the_4xx_one(monkeypatch):
+    """One refusal, two transports, and for one commit two different renderings.
+
+    urllib raises HTTPError for a 4xx, so a 429 arrives as an exception -- but the
+    faucet can answer `{"ok": false}` with a 200, which raises nothing and lands in
+    the SUCCESS branch. That branch had its own rendering: `payload["error"]` into a
+    console column (or, absent that key, the whole dict), and no body printed at all.
+    So the identical refusal reported two different ways depending on a status code
+    the operator never sees, and only one of the two told them how long to wait.
+
+    Rule 8, and the drift was present on the day the second copy was written. This
+    seeds the real 429 body behind a 200 and asserts it renders the same way.
+    """
+    _faucet(monkeypatch, _REAL_429)
+    stream = io.StringIO()
+    row = tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
+    out = stream.getvalue()
+    assert row["ok"] is False and row["why"] == "rate_limited"
+    assert "HTTP 200 and still refused" in out, "a 200 that does not pay is named as such"
+    assert "You have already claimed within the current window." in out
+    assert "1526.1µfn (1846.0s)" in out, (
+        "the SAME wait figure the 4xx path prints -- that is the point of the merge"
+    )
+    assert "2026-10-10T14:22:28+00:00" in out
+
+
+def test_the_ok_false_200_column_NAMES_THE_REFUSAL_and_never_dumps_the_whole_dict(monkeypatch):
+    """A body with no `error` key used to put the entire payload into a status column.
+
+    `payload.get("error", payload)` -- the default was the dict itself, so a refusal
+    the faucet did not label printed a Python repr of every field into a column sized
+    for a word. The fallback is a word now, and the fields go through refusal_lines()
+    where they are read.
+    """
+    _faucet(monkeypatch, {"ok": False, "message": "no reason given, but no."})
+    stream = io.StringIO()
+    row = tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
+    out = stream.getvalue()
+    assert row["ok"] is False and row["why"] == "refused"
+    assert "ok=false" in out, "the column says what happened"
+    assert "'ok': False" not in out, "and does not contain a repr of the payload"
+    assert "no reason given, but no." in out, "the message still reaches the operator"
+
+
+def test_the_faucets_OWN_CODE_is_reported_when_its_message_does_not_contain_it(monkeypatch):
+    """`error` is the machine-readable handle, and it is what a bug report needs.
+
+    Printed only when the human message does not already carry it, so the real 429 --
+    whose message is prose and whose code is `rate_limited` -- shows both, while a
+    faucet that puts the code in the sentence does not say it twice.
+    """
+    _faucet(monkeypatch, _http_error(429, _REAL_429))
+    stream = io.StringIO()
+    tw.claim_from_faucet(Console(1, stream=stream), "BTC", valid_addresses.BTC_PARTICIPANT)
+    assert "'rate_limited'" in stream.getvalue()
+
+    _faucet(monkeypatch, _http_error(409, {"error": "dry", "message": "the faucet is dry"}))
+    stream = io.StringIO()
+    tw.claim_from_faucet(Console(1, stream=stream), "LTC", valid_addresses.LTC_PARTICIPANT)
+    out = stream.getvalue()
+    assert "the faucet is dry" in out
+    assert "its own code for this" not in out, "the sentence already carries it"
+
+
+def test_a_test_that_FORGETS_to_patch_urlopen_FAILS_instead_of_reaching_the_faucet(monkeypatch):
+    """The guard that makes this file's "nothing opens a socket" promise mechanical.
+
+    It was false for one commit and nothing noticed, because the container that wrote
+    the file is denied every faucet host -- so the stray live call raised URLError,
+    `claim_from_faucet` caught it as a transport failure, and the test discarded the
+    row. Green here, a real claim on the operator's host, once per suite run.
+
+    SO THE GUARD MUST NOT BE CATCHABLE BY THE CODE UNDER TEST. AssertionError is
+    deliberately outside `claim_from_faucet`'s `except (URLError, TimeoutError,
+    JSONDecodeError)` tuple; if that tuple ever widened to `Exception`, this guard
+    would be swallowed and the promise would quietly lapse again. That is what this
+    test pins -- the fixture firing is visible from the outside.
+    """
+    with pytest.raises(AssertionError, match="reached the REAL network"):
+        tw.claim_from_faucet(Console(1, stream=io.StringIO()), "BTC",
+                             valid_addresses.BTC_PARTICIPANT)
