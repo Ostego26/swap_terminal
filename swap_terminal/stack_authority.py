@@ -1622,6 +1622,46 @@ def _wrap(text: str, width: int) -> list[str]:
 _NETWORK_COLUMN_MAX = 12
 
 
+#: How a network value separates its NAME from an explanation of itself.
+#:
+#: network_target.solana_cluster() answers with "UNRECOGNIZED -- a local validator has
+#: its own genesis, so this is expected for solana-test-validator" -- a name, then a
+#: reason, 95 characters in one string. That is the SAME SHAPE probe_chain() was fixed
+#: for on 2026-09-30, where a sentence explaining the absence of a network name was
+#: interpolated into "it reports its network as <sentence>". A value doing double duty
+#: reads fine where it was written and overflows wherever it is rendered.
+#:
+#: The authority already uses this separator, so the split uses its convention rather
+#: than inventing one, and the name is never TRUNCATED -- the tail moves to its own
+#: line. A network name is a measurement.
+_NETWORK_REASON_SEPARATOR = " -- "
+
+#: What a network value looks like when it means REAL MONEY, per vocabulary.
+#:
+#: TWO VOCABULARIES AND ONE QUESTION (rule 11). Bitcoin-family daemons answer "main";
+#: network_target.solana_cluster() answers "MAINNET-BETA  <- REAL MONEY". A check for
+#: `== "main"` is correct for three chains and silently wrong for the fourth, and the
+#: one it is wrong about is the one whose name already contains the words REAL MONEY --
+#: so the row would shout and the structured warning above it would not, which is the
+#: kind of disagreement on one screen that teaches a reader to trust neither.
+_MAINNET_MARKERS = ("main", "mainnet")
+
+
+def reports_mainnet(network: str) -> bool:
+    """Does this network value mean real money? Across both vocabularies.
+
+    A FUNCTION BECAUSE THE QUESTION IS SAFETY-RELEVANT AND HAS TWO ANSWERS. Exact match
+    on the bitcoin word, prefix match on Solana's, and the comparison is case-folded
+    because the two vocabularies disagree on case as well as on spelling.
+
+    Deliberately NOT a substring search for "main": "domain" and "remaining" are not
+    network names today, and a check that would match them is a check somebody has to
+    reason about later.
+    """
+    first = network.split(_NETWORK_REASON_SEPARATOR, 1)[0].strip().casefold()
+    return any(first == marker or first.startswith(f"{marker}-") for marker in _MAINNET_MARKERS)
+
+
 def _sync_lines(asset: str, sync: object) -> list[str]:
     """Whether this daemon is caught up, under its network row. Empty when not asked.
 
@@ -1732,7 +1772,7 @@ def chain_network_lines(rows: object) -> list[str]:
         # reach it without a second pass over `rows`. probe_chain() puts None here for
         # an adapter with no local chain (XRP), which _sync_lines() renders as nothing.
         by_asset[asset] = row.get("sync")
-        if str(network) == "main":
+        if reports_mainnet(str(network)):
             mainnet_seen.append(asset)
     # COLUMN WIDTH FROM THE ROWS IN HAND, BUT CAPPED, and the cap is the second
     # correction to this one line in one day.
@@ -1748,13 +1788,25 @@ def chain_network_lines(rows: object) -> list[str]:
     # unbounded version traded one row's alignment for every row's width. Capped, a
     # long name pushes only its OWN note right, which costs nothing when that note
     # is short or empty, and every row that fits stays aligned with the others.
-    width = min(max((len(network) for _asset, network in named), default=0), _NETWORK_COLUMN_MAX)
+    width = min(
+        max(
+            (len(network.partition(_NETWORK_REASON_SEPARATOR)[0]) for _asset, network in named),
+            default=0,
+        ),
+        _NETWORK_COLUMN_MAX,
+    )
     # rstrip BECAUSE A NOTE MAY BE EMPTY. CHAIN_NOT_IN_TABLE renders as "" on
     # purpose, and without this the XRP row ends in the padding of a column whose
     # content is absent -- trailing whitespace in a block the operator pastes back.
     lines = []
     for asset, network in named:
-        lines.append(f"  {asset:<5} {network:<{width}}  {_prefix_note(asset, network)}".rstrip())
+        # NAME ON THE ROW, REASON ON ITS OWN LINE. See _NETWORK_REASON_SEPARATOR: a
+        # value that carries both would otherwise put 123 columns on a 96-wide report,
+        # and the one value that does this is Solana's UNRECOGNIZED answer -- the case
+        # an operator running solana-test-validator sees every time.
+        name, _, reason = network.partition(_NETWORK_REASON_SEPARATOR)
+        lines.append(f"  {asset:<5} {name:<{width}}  {_prefix_note(asset, network)}".rstrip())
+        lines.extend(f"  {'':<5}   {chunk}" for chunk in (_wrap(reason, 70) if reason else ()))
         lines.extend(_sync_lines(asset, by_asset.get(asset)))
     lines.extend(unnamed)
     if not lines:

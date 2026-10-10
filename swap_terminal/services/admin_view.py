@@ -69,6 +69,12 @@ from chains.daemon_network import chain_network, is_named, sync_verdict
 from chains.registry import why_cannot_pay_out, why_unconfigured
 from microfortnights import format_duration
 from modules.htlc_assets import settlement_verdict
+
+# THE AUTHORITY ON WHAT A SOLANA GENESIS HASH MEANS (rule 8). Its own comment
+# records that the table was MOVED out of solana_chain_check.py precisely so a
+# second reader would not have to write the three hashes out again -- and this is
+# that second reader arriving nine days later.
+from network_target import solana_cluster
 from services.deadline import MINIMUM_USEFUL_CALL_SECONDS, call_timeout
 from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
 
@@ -211,10 +217,38 @@ _PROBE_METHOD = "getblockchaininfo"
 #                     that returns a `chain` field naming the network.
 #   XRP               chains/xrp.XRPAdapter.network(), which asks the server for
 #                     its network_id.
-#   SOL               NO PROBE. chains/solana.py has no method that names the
-#                     cluster; solana_chain_check.py does it with getGenesisHash,
-#                     which the adapter does not expose. Adding one is an adapter
-#                     change and is not this surface's to make.
+#   SOL               chains/solana.SolanaAdapter.genesis_hash(), turned into a
+#                     cluster name by network_target.solana_cluster(). A genesis
+#                     hash is what a cluster CANNOT lie about, which makes this the
+#                     most exact of the five -- the others read a self-reported
+#                     field or a port convention.
+#
+#                     THIS COMMENT SAID "NO PROBE" UNTIL 2026-10-10 AND THAT WAS
+#                     WRONG. It read: "chains/solana.py has no method that names
+#                     the cluster; solana_chain_check.py does it with
+#                     getGenesisHash, which the adapter does not expose. Adding one
+#                     is an adapter change and is not this surface's to make."
+#                     Every clause was false by then. genesis_hash() is at
+#                     chains/solana.py:1527 and its own docstring says it is "kept
+#                     as a method so the payout path and ANY DIAGNOSTIC ask the same
+#                     question the same way" -- and the one diagnostic that needed
+#                     it was being told by this comment that it did not exist.
+#                     network_target.solana_cluster() had the hash table. No adapter
+#                     change was needed; the only thing missing was this surface
+#                     believing its own tree. Rule 16: a wrong comment is a bug, and
+#                     this one cost a chain its probe for as long as it stood.
+#
+#   ICP               NO PROBE THROUGH THE ADAPTER, and this one is accurate.
+#                     chains/icp.py has no method naming the replica or the network:
+#                     it reaches the ledger by shelling out to `dfx`, so there is no
+#                     endpoint here to ask "which IC is this". Adding one IS an
+#                     adapter change.
+#
+#                     BUT THE REPLICA IS PROBED, JUST NOT HERE, and the per-asset
+#                     reason says so rather than leaving a reader to conclude
+#                     nothing checks it: swap_stack.py's `up` reads
+#                     stack_authority.REPLICA_STATUS_URL (/api/v2/status) and
+#                     refuses to report SERVING until it answers 200.
 #
 # Named here as a capability rather than tested by asset string, so a probe is
 # attempted only where one is actually implemented.
@@ -222,6 +256,29 @@ _NO_PROBE_REASON = (
     "no read-only network probe is implemented for this adapter in this application -- "
     "run its chain-check script from the repository root instead"
 )
+
+#: WHY A PARTICULAR ASSET HAS NO PROBE, where the general sentence above understates
+#: it. One shared reason for two assets whose reasons differ is the same collapse this
+#: probe has produced four times already, and here it would read as "nothing checks
+#: ICP" when something does.
+_NO_PROBE_DETAIL: dict[str, str] = {
+    "ICP": (
+        "no read-only probe through this adapter: chains/icp.py reaches the ledger by "
+        "shelling out to `dfx` and has no method naming the replica or the network, so "
+        "there is no endpoint here to ask. THE REPLICA IS CHECKED ELSEWHERE, though -- "
+        "`swap_stack.py up` reads /api/v2/status and refuses to report SERVING until it "
+        "answers 200, so a dead replica is caught, just not on this row."
+    ),
+}
+
+
+def no_probe_reason(asset: str) -> str:
+    """Why this asset has no probe. The per-asset sentence where one exists.
+
+    A FUNCTION SO THE FALLBACK HAS ONE SPELLING, and so a new asset added to
+    _NO_PROBE_DETAIL needs no change at the call site (rule 8).
+    """
+    return _NO_PROBE_DETAIL.get(asset, _NO_PROBE_REASON)
 
 
 def freshness(timestamp: str | None, now_iso: str, stale_after_seconds: float) -> dict:
@@ -1432,7 +1489,7 @@ def probe_chain(asset: str, adapter) -> dict:
             "probed": False,
             "reachable": None,
             "network": None,
-            "detail": _NO_PROBE_REASON,
+            "detail": no_probe_reason(asset),
         }
     try:
         network, chain_info = _ask_network(adapter)
@@ -1471,7 +1528,7 @@ def probe_chain(asset: str, adapter) -> dict:
 
 
 def probe_kind(adapter) -> str:
-    """Which read-only probe this adapter supports: network_method, bitcoin_rpc, none.
+    """Which read-only probe this adapter supports. One of PROBE_KINDS.
 
     Decided by what the adapter HAS rather than by its asset string, so a new
     chain does not have to be added to a second list here (rule 8). An adapter
@@ -1480,6 +1537,11 @@ def probe_kind(adapter) -> str:
     """
     if callable(getattr(adapter, "network", None)):
         return "network_method"
+    # SOLANA, BY GENESIS HASH. Checked after network() and before RPCAdapter purely
+    # so the order reads from most-specific to least; no adapter has two of these and
+    # tests/test_admin_view.py asserts each real one maps to exactly a single kind.
+    if callable(getattr(adapter, "genesis_hash", None)):
+        return "solana_genesis"
     if isinstance(adapter, RPCAdapter):
         return "bitcoin_rpc"
     return "none"
@@ -1509,8 +1571,16 @@ def _ask_network(adapter) -> tuple[str, object]:
     network is unknown", which are different facts and only one of them means
     a daemon is down.
     """
-    if probe_kind(adapter) == "network_method":
+    kind = probe_kind(adapter)
+    if kind == "network_method":
         return str(adapter.network()), None
+    if kind == "solana_genesis":
+        # ONE READ, AND THE ANSWER IS EXACT RATHER THAN SELF-REPORTED. solana_cluster()
+        # is the authority on what a hash means and already carries the "<- REAL MONEY"
+        # marker on mainnet-beta, so that warning reaches the screen through the network
+        # name itself. An unrecognized hash reads as UNRECOGNIZED and says why that is
+        # the EXPECTED answer for solana-test-validator -- never as "not mainnet".
+        return solana_cluster(adapter.genesis_hash()), None
     # Reachability, and it is this call raising that reports a chain as down.
     #
     # THE ANSWER IS NOW KEPT. It was called and DISCARDED -- the call was made purely

@@ -80,15 +80,50 @@ REACHABLE   all 4 probeable chain(s) answered: BTC, GRC, LTC, XRP
   XRP   testnet (network_id 1)
 ```
 
-**The remaining LTC blocker is not reachability and never was.** That `pays
-rltc1...` line is the one added on 2026-10-09 when the probe's `network` field was
-found to have zero readers, and it states the wall directly: the operator's
-external wallet is `tltc1q37khgpktccdwpxq6vmkt6gtrnra3x39tvcyx62` on **testnet**
-(confirmed — their `litecoin-qt` holds `127.0.0.1:19332`, the LTC testnet RPC
-port), while the desk's litecoind is `-regtest` on 19443. A regtest node issues
-and accepts `rltc1...` and its coins exist only on that node, so no choice of
-deposit asset changes the outcome. That is a network decision for the operator,
-not a configuration defect.
+**The LTC blocker was never reachability.** That `pays rltc1...` line is the one
+added on 2026-10-09 when the probe's `network` field was found to have zero
+readers, and it stated the wall directly: the operator's external wallet is
+`tltc1q37khgpktccdwpxq6vmkt6gtrnra3x39tvcyx62` on **testnet**, while the desk's
+litecoind was `-regtest` on 19443. A regtest node issues and accepts `rltc1...`
+and its coins exist only on that node, so no choice of deposit asset changed it.
+
+**RESOLVED 2026-10-10 by moving the daemons, at the operator's instruction** —
+"our grc, ltc, and btc daemons should have peers and not be regtest anyone and
+just full testnet now", with the 33-54 hour sync accepted explicitly. All four
+probeable chains are now on a test network and `swapterm chains` exits 0:
+
+```
+BTC   testnet4      pays tb1... addresses, and only those
+GRC   testnet       no bech32 -- base58 only, which names no network
+LTC   test          pays tltc1... addresses, and only those
+XRP   testnet (network_id 1)
+```
+
+Two things the migration cost that were not the sync, and both were section or
+port collisions rather than anything conceptual:
+
+- **BTC needs `[testnet4]`, LTC needs `[test]`.** Core v28.1.0 has two testnets
+  with different flags, data directories and conf section names; Litecoin v0.21.4
+  has one. Using `[test]` for Bitcoin Core 28 would have reproduced finding 2's
+  failure exactly — daemon starts, silently ignores every line under the header,
+  container back to `Connection refused`.
+- **litecoind could not bind Litecoin's testnet P2P port 19335**, held by the
+  operator's `litecoin-qt`: *"Error: Failed to listen on any port."* Nothing to do
+  with RPC — every `[test] rpcport="19443"` line was being read correctly, the
+  daemon just died before it got to serving. `port=19444` inside `[test]` fixed it
+  and leaves the GUI wallet alone.
+
+**The RPC ports did NOT have to change.** 18443 and 19443 are in
+`network_target.CHAIN_PORTS`' *test* sets, not just regtest, so keeping them meant
+no `.env` edit, no ufw change (finding 3's rule 20 already allows them), and no
+collision with `litecoin-qt` on the default testnet RPC port 19332.
+
+**Still owed before a swap can pay out:** neither conf's named wallets
+(`wallet=desk_hot`, `wallet=regtest_htlc_harness`) exist on the fresh testnet
+directories, so both chains need `createwallet` and faucet coins — testnet coins
+cannot be minted, and `fund_testnets.py` refuses at its `assert_regtest` check.
+`regtest_htlc_harness` is now a misnomer in both files and worth dropping: the
+harness cannot run on testnet at all.
 
 ### 2. GRC rejects the container's RPC with 403
 **Measured**: `did not answer: 403 Client Error: Forbidden for url:
@@ -635,16 +670,45 @@ by grepping for the NAME rather than the import graph (rule 2).
   pass touched (rule 12) and the comment should be written by whoever next has a
   reason to be in that file.
 
-- **[PARTLY CLOSED by `swapterm rebuild`, C38]** `up` still reports the code
-  version of the HOST CHECKOUT and still starts the container without rebuilding
-  it — that is unchanged, and deliberate: `up` is the command you run to look at
-  things, and a build on every `up` would be minutes of cold cache for a status
-  check. What is closed is that there is now a safe way to rebuild (`web` only,
-  never the replica). What remains is that `up` cannot DETECT the mismatch: it
-  should read the commit back OUT of the container and say "the container is N
-  commits behind, run `swapterm rebuild`". That needs a commit marker baked at
-  image build time, which is a Dockerfile change, and I would want to watch one
-  real build before claiming it works. Original note follows.
+- **[DETECTION CLOSED 2026-10-10 by `CHAIN_ENVELOPE_VERSION`, and the cost of its
+  absence was measured the same hour.]** The mismatch is now DETECTED, and it is
+  detected without the Dockerfile change this entry had been waiting on.
+
+  **What it cost while open.** The sync lines shipped at 00:30 — `probe_chain()`
+  putting a `sync` field in each row, the report shouting STILL SYNCING with block
+  heights. The operator pulled, ran `swapterm chains`, and a BTC daemon at 74% of
+  its initial block download rendered as a plain healthy chain. No warning, no
+  numbers, nothing. **Nothing on that screen was wrong**: `probe_chain()` runs
+  INSIDE the container, the app is baked into the image, the container had not been
+  rebuilt, so the rows arrived without `sync` and the renderer correctly printed
+  nothing for a field nobody reported. The feature was invisible and so was its
+  absence.
+
+  **Why a version number and not the commit marker this entry asked for.** The
+  question is not "which commit is the container on" but "does the container
+  produce the fields this report reads". A commit hash answers the first and needs
+  a build-arg pipeline to even obtain — which is why this sat open for two days. An
+  integer the PRODUCER owns answers the second, needs no Dockerfile change, and is
+  asserted against the producer by a test so forgetting to bump it is a failure
+  rather than a silent blind spot.
+
+  `envelope_staleness_lines()` renders three outcomes and names the RIGHT remedy
+  for each, which matters because the two are opposite: an older container needs
+  `swapterm rebuild` and says why a `git pull` does not fix it; a newer one needs
+  `git pull`. A missing version key is treated as the OLDER case, not an unknown
+  one — v1 had no such key, so its absence dates the container precisely, and
+  calling it "could not tell" would have put the most likely stale container in the
+  quiet branch. That is the body the operator's container actually served, and the
+  test uses it verbatim.
+
+  **Verified on the real deployment** at 01:04: after `swapterm rebuild`, the
+  report shows the sync blocks for BTC and LTC and prints NO staleness warning —
+  the check passing is the absence of its own output.
+
+  **What is still open, and it is narrower than it was:** this covers
+  `/api/admin/chains` only. `up`'s own `code` line still reports the HOST
+  checkout's commit, and any OTHER container-served surface has no equivalent
+  marker. The general fix is still the baked commit marker. Original note follows.
 
 - **`up` reports the code version of the HOST CHECKOUT and starts the container
   without rebuilding it.** `git_reading()`'s own docstring says it reads "which

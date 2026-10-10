@@ -90,6 +90,7 @@ from swap_terminal.stack_authority import (
     process_name,
     readiness_verdict,
     replica_state_verdict,
+    reports_mainnet,
     serving_verdict,
     stray_verdict,
     surface_map,
@@ -3264,3 +3265,87 @@ def test_a_NON_INTEGER_version_is_not_guessed_at(served):
     body = chain_probe_envelope([], probed_at="t", adapters_configured=0)
     body[CHAIN_ENVELOPE_VERSION_KEY] = served
     assert envelope_staleness_lines(body) == []
+
+
+# ---------------------------------------------------------------------------
+# REAL MONEY, ACROSS TWO VOCABULARIES.
+#
+# Bitcoin-family daemons answer "main". network_target.solana_cluster() answers
+# "MAINNET-BETA  <- REAL MONEY". A check for `== "main"` is correct for three
+# chains and silently wrong for the fourth -- and the one it is wrong about is the
+# one whose own name contains the words REAL MONEY, so the row would shout and the
+# structured warning above it would stay silent. Two things disagreeing on one
+# screen teaches a reader to trust neither.
+#
+# THESE TESTS EXIST BECAUSE A MUTATION SURVIVED. Reverting the check to
+# `== "main"` passed all 155 tests in this file on 2026-10-10 -- the Solana probe
+# had just been added and nothing asserted the mainnet half of it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "network",
+    ["main", "MAIN", "mainnet", "MAINNET-BETA  <- REAL MONEY", "mainnet-beta"],
+)
+def test_every_spelling_of_real_money_is_recognized(network):
+    assert reports_mainnet(network), f"{network!r} means real money and must be caught"
+
+
+@pytest.mark.parametrize(
+    "network",
+    ["test", "testnet", "testnet4", "regtest", "signet", "DEVNET", "TESTNET",
+     "testnet (network_id 1)", "", "domain", "remaining"],
+)
+def test_no_test_network_is_mistaken_for_mainnet(network):
+    """`domain` and `remaining` are in here deliberately.
+
+    A substring search for "main" would match both. They are not network names
+    today, and a check that would match them is one somebody has to reason about
+    later -- so the comparison is exact on the name, not a search.
+    """
+    assert not reports_mainnet(network), f"{network!r} is not mainnet"
+
+
+def test_a_SOLANA_MAINNET_row_fires_the_structured_warning_too():
+    """MUTATION CHECKED, AND THIS IS THE ONE THAT SURVIVED BEFORE.
+
+    Reverting to `str(network) == "main"` leaves the row shouting REAL MONEY while
+    the block above it says nothing -- which is worse than either alone.
+    """
+    row = _answered("SOL", "MAINNET-BETA  <- REAL MONEY")
+    row["sync"] = None
+    blob = "\n".join(chain_network_lines([row]))
+    assert "REPORTS MAINNET" in blob, "the structured warning must fire for Solana too"
+    assert "SOL" in blob
+
+
+def test_a_network_value_carrying_its_own_REASON_puts_the_name_on_the_row():
+    """solana_cluster()'s UNRECOGNIZED answer is a name plus a 95-character reason.
+
+    That is the same shape probe_chain() was fixed for on 2026-09-30, where a
+    sentence explaining the absence of a network name got interpolated into "it
+    reports its network as <sentence>". A value doing double duty reads fine where
+    it was written and overflows wherever it is rendered.
+    """
+    row = _answered(
+        "SOL",
+        "UNRECOGNIZED -- a local validator has its own genesis, so this is expected "
+        "for solana-test-validator",
+    )
+    row["sync"] = None
+    lines = chain_network_lines([row])
+    header = next(line for line in lines if line.startswith("  SOL"))
+    assert header.strip() == "SOL   UNRECOGNIZED", "the NAME goes on the row"
+    assert any("local validator" in line for line in lines), "the reason still prints"
+    assert all(len(line) + 20 <= 96 for line in lines), (
+        "and nothing exceeds the width the caller prints at: " + repr(max(lines, key=len))
+    )
+
+
+def test_the_name_is_never_TRUNCATED_only_moved():
+    """A network name is a measurement; half of one is a new kind of wrong answer."""
+    row = _answered("SOL", "UNRECOGNIZED -- reason here")
+    row["sync"] = None
+    blob = "\n".join(chain_network_lines([row]))
+    assert "UNRECOGNIZED" in blob
+    assert "UNRECOGNIZ\n" not in blob and "UNRECOGN " not in blob

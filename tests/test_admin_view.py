@@ -33,6 +33,7 @@ from services.admin_view import (
     config_echo,
     freshness,
     inventory_rows,
+    no_probe_reason,
     overview,
     pair_rows,
     probe_chain,
@@ -1025,3 +1026,144 @@ def test_a_payout_whose_swap_has_no_audit_row_reports_None_rather_than_breaking(
     db.commit()
     row = next(r for r in admin_view.payout_rows(db) if r["swap_id"] == "s_silent")
     assert row["failure_reason"] is None
+
+
+# ---------------------------------------------------------------------------
+# SOLANA HAS A PROBE, AND A COMMENT CLAIMING OTHERWISE IS WHAT STOPPED IT.
+#
+# Operator, 2026-10-10: "twat about solana though?" -- asked because the report
+# said `not asked: ICP, SOL`. The reason given in this module read:
+#
+#   SOL  NO PROBE. chains/solana.py has no method that names the cluster;
+#        solana_chain_check.py does it with getGenesisHash, which the adapter does
+#        not expose. Adding one is an adapter change and is not this surface's to
+#        make.
+#
+# Every clause was false. genesis_hash() is at chains/solana.py:1527 and its own
+# docstring says it is kept as a method "so the payout path and ANY DIAGNOSTIC ask
+# the same question the same way". network_target.solana_cluster() had the hash
+# table, moved there on 2026-10-01 specifically so a second reader would not have
+# to write the hashes out again. No adapter change was needed.
+# ---------------------------------------------------------------------------
+
+
+class _GenesisOnly:
+    """A Solana-shaped adapter: genesis_hash() and nothing else a probe would want."""
+
+    def __init__(self, genesis: str):
+        self._genesis = genesis
+        self.asked = []
+
+    def genesis_hash(self) -> str:
+        self.asked.append("getGenesisHash")
+        return self._genesis
+
+
+_DEVNET = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
+_MAINNET_BETA = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+
+
+def test_an_adapter_with_genesis_hash_gets_the_solana_probe():
+    """MUTATION CHECKED: removing the genesis_hash branch from probe_kind() sends
+    SOL back to `none` and the row back to "not asked"."""
+    assert probe_kind(_GenesisOnly(_DEVNET)) == "solana_genesis"
+
+
+def test_SOL_is_PROBED_and_names_its_cluster_exactly():
+    """A genesis hash is what a cluster CANNOT lie about.
+
+    The other four read a self-reported field or a port convention; this one is
+    exact, which makes it the strongest of the five rather than the missing one.
+    """
+    adapter = _GenesisOnly(_DEVNET)
+    row = probe_chain("SOL", adapter)
+    assert row["probed"] is True
+    assert row["reachable"] is True
+    assert row["network"] == "DEVNET"
+    assert adapter.asked == ["getGenesisHash"], "exactly one read, and that one"
+
+
+def test_a_MAINNET_genesis_carries_REAL_MONEY_in_the_network_name_itself():
+    """network_target's table puts the warning in the value, so it cannot be dropped
+    by a renderer that does not know about Solana."""
+    row = probe_chain("SOL", _GenesisOnly(_MAINNET_BETA))
+    assert "MAINNET-BETA" in row["network"]
+    assert "REAL MONEY" in row["network"]
+
+
+def test_an_unrecognized_genesis_is_EXPECTED_and_not_a_failure():
+    """solana-test-validator generates its own genesis.
+
+    Reported as UNRECOGNIZED with the reason, never as "not mainnet" -- the same
+    judgment classify() makes for an unrecognized port, and for the same reason: a
+    private fork of mainnet reads identically.
+    """
+    row = probe_chain("SOL", _GenesisOnly("whateverTheLocalValidatorMade"))
+    assert row["reachable"] is True
+    assert "UNRECOGNIZED" in row["network"]
+    assert "solana-test-validator" in row["network"]
+
+
+def test_a_genesis_read_that_RAISES_reports_unreachable_like_any_other_chain():
+    """The probe must not treat Solana's failure differently from a daemon's."""
+
+    class Dead:
+        def genesis_hash(self):
+            raise OSError("connection refused")
+
+    row = probe_chain("SOL", Dead())
+    assert row["probed"] is True
+    assert row["reachable"] is False
+    assert "connection refused" in row["detail"]
+
+
+def test_ICP_says_WHERE_IT_IS_CHECKED_instead_of_implying_nothing_checks_it():
+    """Operator, same minute: "twap about icp?"
+
+    ICP genuinely has no probe through its adapter -- chains/icp.py shells out to
+    dfx and has no method naming the replica. But `swap_stack.py up` reads
+    /api/v2/status and refuses to report SERVING until it answers 200, so a dead
+    replica IS caught. One shared no-probe sentence for two assets whose reasons
+    differ would have read as "nothing checks ICP".
+    """
+
+    class Icp:
+        pass
+
+    row = probe_chain("ICP", Icp())
+    assert row["probed"] is False
+    assert row["reachable"] is None
+    assert "dfx" in row["detail"], "it must say WHY this adapter cannot be asked"
+    assert "/api/v2/status" in row["detail"], "and where the replica IS checked"
+
+
+def test_an_asset_with_no_recorded_detail_falls_back_to_the_shared_sentence():
+    """The fallback has one spelling, so a new asset needs no call-site change."""
+    assert no_probe_reason("SOMETHING_NEW") == no_probe_reason("ANOTHER")
+    assert no_probe_reason("ICP") != no_probe_reason("SOMETHING_NEW")
+
+
+def test_each_real_adapter_shape_maps_to_exactly_ONE_probe_kind():
+    """Two matching branches would make the order load-bearing and silent.
+
+    Asserted over the shapes rather than the classes, because that is what
+    probe_kind() actually inspects.
+    """
+
+    class HasNetwork:
+        def network(self):
+            return "testnet"
+
+    class HasBoth:
+        def network(self):
+            return "testnet"
+
+        def genesis_hash(self):
+            return _DEVNET
+
+    assert probe_kind(HasNetwork()) == "network_method"
+    assert probe_kind(_GenesisOnly(_DEVNET)) == "solana_genesis"
+    # An adapter with BOTH is not a shape any chain has today; the assertion records
+    # which branch wins so a future adapter growing a second method is a decision
+    # somebody made rather than one the branch order made for them.
+    assert probe_kind(HasBoth()) == "network_method"
