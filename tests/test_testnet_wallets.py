@@ -665,7 +665,10 @@ def test_a_SUCCESSFUL_claim_reports_the_amount_the_currency_and_the_TXID(monkeyp
 @pytest.mark.parametrize(("status", "must_say"), [
     (400, "rejected the address"),
     (409, "EMPTY for this chain"),
-    (429, "rate limited"),
+    # "rate limited" alone passed on the inferred sentence too. The scope is the half
+    # that was WRONG -- it read as a global per-IP window and it is per network -- so
+    # the assertion names it. See FAUCET_ERRORS[429] for the two measurements.
+    (429, "per IP PER NETWORK"),
     (503, "node is busy"),
     (418, "undocumented status 418"),
 ])
@@ -767,7 +770,19 @@ def test_the_PAID_faucet_entry_no_longer_claims_to_be_untested():
     assert len(cypher) == 2, "one entry per chain"
     for faucet in cypher:
         assert faucet.evidence == tw.PAID
-        assert "MEASURED" in faucet.evidence and "it paid" in faucet.evidence
+        assert "MEASURED" in faucet.evidence
+        # IT NAMES WHICH CLIENT PAID, which the first wording did not. "it paid both
+        # chains" was true of `curl` before it was true of this file, and this file
+        # then failed its own first attempt on a Cloudflare 1010 that curl never hit.
+        # An evidence field that cannot tell those apart is the thing rule 17 is about.
+        assert "claim_from_faucet()" in faucet.evidence, (
+            "the evidence must say that THIS CLIENT paid, not merely that the endpoint "
+            "works -- the two were separately measured and the second is the one that "
+            "makes --faucet a tested path"
+        )
+        assert "curl proved the endpoint separately" in faucet.evidence, (
+            "and it must keep the curl measurement distinct rather than merging the two"
+        )
     others = [f for entries in tw.FAUCETS.values() for f in entries
               if "cypherfaucet.com" not in f.url]
     assert others, "the unverified rows are still there as fallbacks"

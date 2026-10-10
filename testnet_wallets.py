@@ -159,7 +159,23 @@ SEARCHED_NOT_TESTED = "listed 2026-10-10; UNREACHABLE from this container (403 a
 #: verbatim responses. This is the difference the evidence field exists to carry, and
 #: the first version of this table could not express it because nothing had been
 #: tested. Now one entry has been.
-PAID = "MEASURED 2026-10-10: it paid both chains, txids in claim_from_faucet()"
+#:
+#: AND IT IS THIS CLIENT THAT PAID, NOT ONLY `curl`, which is a distinction rule 17
+#: asks for and the first wording blurred. The two responses in FAUCET_CLAIM_URL's
+#: comment came from the operator running curl by hand: they proved the ENDPOINT was
+#: live and the slug correct, and said nothing about the code in this file -- which
+#: then got a Cloudflare 1010 on its first real attempt, for a User-Agent reason curl
+#: never had. claim_from_faucet() has since paid both chains itself, same day, and the
+#: four txids are two different measurements:
+#:
+#:     curl, by hand         ee8e14c6...  (tBTC)   6889177c...  (tLTC)
+#:     claim_from_faucet()   314f1815...  (tBTC)   9fd7927e...  (tLTC)
+#:
+#: The second pair is the one that makes --faucet a tested path rather than a plausible
+#: one, and it is the pair that would have stayed hypothetical if "the endpoint works"
+#: had been allowed to stand in for "this client works".
+PAID = ("MEASURED 2026-10-10: claim_from_faucet() itself paid both chains "
+        "(txids 314f1815, 9fd7927e), after curl proved the endpoint separately")
 
 
 @dataclass(frozen=True)
@@ -269,7 +285,27 @@ FAUCET_ERRORS = {
           "by signature before the faucet sees the request. Use the ?address= link printed "
           "below, which goes through a browser and is one click"),
     409: "the faucet is EMPTY for this chain -- nothing was sent and this is not your fault",
-    429: "rate limited: one claim per address and one per IP per window. Wait it out",
+    # THE SCOPE OF THE PER-IP LIMIT IS PER NETWORK, AND THIS SENTENCE SAID OTHERWISE
+    # UNTIL IT WAS MEASURED. It read "one claim per address and one per IP per window",
+    # which I took from the faucet's README and which reads as a GLOBAL per-IP window.
+    # It is not: on 2026-10-10 a single `testnet_wallets.py --btc --ltc --faucet` run
+    # claimed btc-testnet and then ltc-testnet SEVEN SECONDS apart from one IP, and
+    # both paid (txids 314f1815... and 9fd7927e...). The operator's first manual curl
+    # pair did the same earlier, so it is measured twice rather than once.
+    #
+    # It matters because the two scopes imply different advice. Under a global window,
+    # funding the second chain means waiting half an hour; under a per-network one it
+    # is the next line of the same run -- which is what this tool does, and what it
+    # would have been wrong to tell an operator not to.
+    #
+    # THE WINDOW ITSELF IS ~1846s, from the faucet's own `retry_after` on a 429, and
+    # the `next_claim` it sent WAS ACCURATE: it named 2026-10-10T14:22:28+00:00 and the
+    # run at 14:22 succeeded. That is the measurement that makes refusal_lines()
+    # reporting those two fields useful rather than decorative.
+    429: ("rate limited. MEASURED 2026-10-10: the window is per ADDRESS and per IP PER "
+          "NETWORK -- a claim for the other chain is not blocked by this one, and the "
+          "window ran ~1846s (1526.1µfn). The faucet's own retry_after and next_claim "
+          "are printed below and were accurate to the second"),
     503: "the faucet's own node is busy. Nothing was sent; try again shortly",
 }
 
