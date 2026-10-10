@@ -544,8 +544,13 @@ _RAIL_NO_RPC: tuple[Rail, ...] = (
 #: Window -> Node window. A rail that listed Peers alongside Overview would be a
 #: borrowed layout that misdescribes the thing it borrowed from, which is the failure
 #: mode this whole module is written against.
+#: "Rail" AND NOT "Wallet" FOR THE FIRST ONE, which looks like a nothing choice and is
+#: not. The template renders a label above every group, including the first, and the
+#: heading immediately above it already says "<ASSET> wallet" -- so "Wallet" there would
+#: be the same word twice in two lines, which reads as a rendering fault rather than as
+#: two labels. "Rail" is what Qt calls the strip.
 RAIL_GROUP_LABELS = {
-    "rail": "Wallet",
+    "rail": "Rail",
     "node": "Node window (Qt: Window → Node window)",
 }
 

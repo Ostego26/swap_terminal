@@ -328,10 +328,14 @@
       the reader who depends on the description most. -#}
   <nav class="cw-rail" aria-label="{{ data.asset }} wallet panes">
     <p class="cw-rail-title">{{ data.asset }} wallet</p>
+    {#- EVERY GROUP IS LABELED, INCLUDING THE FIRST. It used to be suppressed on the
+        first one as redundant with the heading above it, and that left
+        services/chain_wallet_layout.RAIL_GROUP_LABELS["rail"] produced in the data and
+        rendered nowhere -- rule 9's orphan, and the hard-to-see kind, because the page
+        looks right. The label is "Rail", which is what Qt calls the strip, so it is not
+        the heading said twice. -#}
     {%- for group in data.qt.rail_groups %}
-    {%- if not loop.first %}
-    <p class="cw-rail-group">{{ group.label }}</p>
-    {%- endif %}
+    <p class="cw-rail-group{% if loop.first %} cw-rail-group-first{% endif %}">{{ group.label }}</p>
     <ul class="cw-rail-list" role="list">
       {%- for entry in data.qt.rail if entry.group == group.key %}
       <li>

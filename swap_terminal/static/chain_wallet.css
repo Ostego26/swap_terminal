@@ -141,6 +141,16 @@
   padding-top: var(--s2);
 }
 
+/* THE FIRST GROUP'S RULE IS A SEPARATOR THAT SEPARATES NOTHING. The border exists to
+ * divide one group from the one above it, and the first has only the rail's own heading
+ * above it -- which already has its own spacing. A rule there reads as the top edge of
+ * a box that does not exist. */
+.cw-rail-group-first {
+  border-top: 0;
+  margin-top: 0;
+  padding-top: 0;
+}
+
 .cw-rail-list {
   list-style: none;
   margin: 0;
