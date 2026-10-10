@@ -63,6 +63,7 @@ from workers.common import (
     install_stop_handler,
     root_tool_command,
     sleep_until_next_cycle,
+    unreachable_note,
 )
 
 WORKER_NAME = "deposit_watcher"
@@ -213,7 +214,15 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
                     # cycle did, and workers/common.STANDING_COUNTS names it as one.
                     # Counted as work, it made every cycle print WORKED for as long as
                     # a single swap sat halted -- see that constant for the measurement.
-                    notes=halted_note(halted),
+                    # TWO NOTES, JOINED, because they answer different questions and
+                    # either one alone leaves the other invisible: halted_note() is a
+                    # standing condition a person must clear, unreachable_note() is
+                    # which chains this cycle could not reach. A cycle can be both.
+                    notes="  ".join(
+                        note for note in (halted_note(halted),
+                                          unreachable_note(getattr(processed, "unreachable", ())))
+                        if note
+                    ),
                 ),
                 flush=True,
             )

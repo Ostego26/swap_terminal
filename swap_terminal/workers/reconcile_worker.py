@@ -108,6 +108,7 @@ from workers.common import (
     get_config_dict,
     install_stop_handler,
     sleep_until_next_cycle,
+    unreachable_note,
 )
 
 WORKER_NAME = "reconcile_worker"
@@ -319,11 +320,18 @@ def run_cycle(db, config: dict, adapters: dict, cycle: int, started: float) -> s
         # is the one where ZERO and NON-ZERO read completely differently -- see that
         # function, and services/late_deposit_service.py's header for the measurement that
         # made the field necessary at all.
-        notes=(
+        # FOUR NOW. unreachable_note() is first when it fires, because it changes how
+        # EVERY other count on the line should be read: `refreshed_swaps` short by the
+        # swaps on a dead chain is a different fact from `refreshed_swaps` short because
+        # nothing is open, and a reader who sees the backstop note first has already
+        # formed the wrong one. Empty string on a clean cycle, which is the normal case,
+        # so the line does not grow a permanent fourth clause.
+        notes=" ".join(part for part in (
+            unreachable_note(getattr(processed, "unreachable", ())),
             f"{backstop_note(written, len(processed))}. "
             f"{late_note(late.recorded, late.targets)}. "
-            f"{inventory_note(adapters, present)}"
-        ),
+            f"{inventory_note(adapters, present)}",
+        ) if part),
     )
 
 

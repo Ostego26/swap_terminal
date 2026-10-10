@@ -542,6 +542,50 @@ def shared_scan_targets(swaps, config, adapters: dict) -> list[tuple[str, str]]:
     return sorted(targets)
 
 
+class CycleRefresh(list):
+    """The swaps refreshed this cycle, plus the ones that could not be. A list.
+
+    A list SUBCLASS for the same reason SharedScanResult is a dict subclass: every
+    existing consumer reads this with len() or iterates it -- workers/deposit_watcher.py,
+    workers/reconcile_worker.py and six tests -- and a NamedTuple would have meant
+    editing all of them for a field only the cycle line reads.
+
+    `unreachable` IS (asset, swap_id_or_address, exception) PER ENTRY and is empty on a
+    clean cycle, which is the normal case. A class-level default means a plain list
+    returned by an older code path, or a hand-built one in a test, never raises on the
+    attribute.
+
+    WHY A COUNT OF REFRESHED SWAPS WAS NOT ENOUGH, which is the thing to understand
+    before simplifying this away. The watcher printed `active_swaps=N refreshed=N` and
+    the two numbers were equal on a clean cycle. With one chain down the comprehension
+    raised, the watcher caught it one level up and printed FAILED -- so there WAS a
+    signal, but it said "the cycle failed" when what was true was "four of six assets
+    were refreshed and two were not". An operator cannot act on the first and can act
+    on the second.
+    """
+
+    #: Set by process_active_swaps(). See the class docstring.
+    unreachable: tuple = ()
+
+
+class SharedScanResult(dict):
+    """The per-target scan results, plus the targets that could not be scanned.
+
+    A dict SUBCLASS so that every existing consumer is untouched. `scans` is read with
+    `.get((asset, address))` in refresh_swap_from_chain() and reconcile_shared_accounts()
+    and passed around as a plain mapping; making it a NamedTuple or a pair would have
+    meant editing each of those plus the tests that build one by hand, for a field only
+    the cycle line reads. Rule 10: orchestration grew a report, not a new contract.
+
+    `unreachable` IS A TUPLE OF (asset, address, exception) and is empty on a clean
+    cycle -- which is the normal case, so the common path allocates nothing extra.
+    """
+
+    #: Set by scan_shared_accounts(). A class-level default so a hand-built
+    #: SharedScanResult (or a plain dict, through .get()) never raises on the attribute.
+    unreachable: tuple = ()
+
+
 def scan_shared_accounts(db, config, adapters: dict, swaps) -> SharedScans:
     """Scan every shared deposit account ONCE and keep the result for the whole cycle.
 
@@ -651,7 +695,13 @@ def scan_shared_accounts(db, config, adapters: dict, swaps) -> SharedScans:
     previous code recorded the same drops N times per cycle for N swaps, so recording them
     once is the same rows with fewer writes.
     """
-    scans: SharedScans = {}
+    scans = SharedScanResult()
+    # THE TARGETS THAT COULD NOT BE SCANNED, as (asset, address, exception). Appended to
+    # rather than returned separately so the caller can report the partition on its cycle
+    # line: rule 14's "make did-nothing look different from did-work", at the level of a
+    # whole chain. A cycle that skipped three assets and one that had nothing to do must
+    # not print the same thing.
+    unreachable: list[tuple[str, str, BaseException]] = []
     # ONE SQL READ PER ASSET, NOT PER TARGET. skip_txids() is two SELECTs against
     # swap_terminal.db and costs no network call, but it answers the same question for every
     # address on an asset, so asking it twice would be two copies of one answer (rule 8).
@@ -666,8 +716,49 @@ def scan_shared_accounts(db, config, adapters: dict, swaps) -> SharedScans:
         if (asset, address) not in skips:
             skips[(asset, address)] = skip_txids(db, asset, address=address)
         adapter = adapters[asset]
-        scans[(asset, address)] = adapter.find_deposits_to_address(address, skip_txids=skips[(asset, address)])
-        record_what_nobody_can_claim(db, asset, adapter)
+        # ===================================================================
+        # GUARDED PER TARGET SINCE 2026-10-10, AND THIS IS THE WORSE OF THE TWO HALVES
+        # ===================================================================
+        #
+        # This loop runs BEFORE the per-swap refresh in process_active_swaps(), so one
+        # unreachable tag-attributed endpoint here meant NOT ONE SWAP IN THE CYCLE WAS
+        # REFRESHED, on any chain -- including a BTC deposit already sitting at its
+        # confirmation threshold with nothing left to do but be credited.
+        #
+        # MEASURED on this host: OPEN_FINDINGS.md finding 1 recorded `BTC did not
+        # answer: ... port=18443 ... [Errno 111] Connection refused`, and the daemons
+        # are bound loopback-only. A dead or unconfigured endpoint is the ordinary
+        # state here, not an exotic one.
+        #
+        # `except Exception` AND NOT BaseException, which is rule 12's legitimate broad
+        # catch with its stated test met: the caller CAN tell this failure from a real
+        # answer, because the target is recorded in `unreachable` and the cycle line
+        # names it. A KeyboardInterrupt still ends the process -- a watcher the
+        # operator cannot stop is worse than the crash this replaces (rule 13).
+        #
+        # NO ENTRY IS WRITTEN TO `scans` ON FAILURE, deliberately. An empty list would
+        # be indistinguishable from "this account received nothing", and
+        # refresh_swap_from_chain() would then credit nothing while reading as a clean
+        # scan -- which is the silent half of the very defect this guard closes.
+        # A MISSING key makes the per-swap path fall through to its own scan, where its
+        # own guard catches the same failure and reports it per swap.
+        try:
+            scans[(asset, address)] = adapter.find_deposits_to_address(
+                address, skip_txids=skips[(asset, address)]
+            )
+            record_what_nobody_can_claim(db, asset, adapter)
+        except Exception as exc:  # noqa: BLE001 -- see the block above; recorded, named and reported
+            unreachable.append((asset, address, exc))
+            logger.warning(
+                "%s shared deposit account %s could NOT be scanned this cycle: %s: %s. "
+                "Every OTHER asset in this cycle is still being refreshed -- before 2026-10-10 "
+                "this raise aborted the whole cycle and no swap on any chain was credited "
+                "while one endpoint was down. No scan result was recorded for this target, so "
+                "each swap on it falls through to its own scan rather than reading an empty "
+                "list as `nothing arrived`.",
+                asset, address, type(exc).__name__, exc,
+            )
+            continue
         # RULE 14: THE WORK THAT STOPPED HAPPENING STILL HAS TO BE VISIBLE. Four scans printed
         # four adapter lines; one prints one, and an operator reading the log would otherwise
         # watch the count fall with nothing saying why. This line is what the three removed
@@ -692,6 +783,7 @@ def scan_shared_accounts(db, config, adapters: dict, swaps) -> SharedScans:
             "so this line is not a tree-wide total.",
             asset, address, _process_name(), sharing, sharing + 1, sharing,
         )
+    scans.unreachable = tuple(unreachable)
     return scans
 
 
@@ -1020,7 +1112,57 @@ def process_active_swaps(db, config, adapters: dict) -> list[dict]:
     # the loop alone would have left the reconciler making the fifth scan, which is the one
     # that runs even when nothing is open -- i.e. it would have fixed the N and left the +1.
     scans = scan_shared_accounts(db, config, adapters, swaps)
-    processed = [refresh_swap_from_chain(db, config, adapters, swap, scans=scans) for swap in swaps]
+
+    # =========================================================================
+    # A GUARDED LOOP AND NOT A LIST COMPREHENSION, SINCE 2026-10-10
+    # =========================================================================
+    #
+    # It was `[refresh_swap_from_chain(...) for swap in swaps]` with nothing around it,
+    # and refresh_swap_from_chain() calls adapter.find_deposits_to_address() directly.
+    # So one raise aborted the comprehension and EVERY SWAP POSITIONED AFTER IT was
+    # never refreshed -- on any chain. The SELECT above is `ORDER BY created_at ASC`,
+    # which is stable, so it was the SAME swaps every cycle, deterministically, for as
+    # long as one daemon was down.
+    #
+    # MEASURED by running this function against a throwaway database with two
+    # awaiting_deposit swaps -- an older BTC one whose adapter raised
+    # ConnectionRefusedError and a newer LTC one holding a deposit at 6 confirmations.
+    # The LTC swap was never looked at. On this host that is not hypothetical:
+    # OPEN_FINDINGS.md finding 1 recorded BTC and LTC bound loopback-only and answering
+    # `[Errno 111] Connection refused` from the container.
+    #
+    # THE ALTITUDE IS THE WHOLE FIX. workers/deposit_watcher.py already wraps the cycle
+    # in `except Exception` and prints FAILED with a consecutive-failure count, so the
+    # process did not die -- it printed a failed cycle and tried again, and failed again,
+    # forever, while swaps behind the dead chain were never credited. The catch was not
+    # missing; it was one level too high to isolate anything.
+    #
+    # PER SWAP AND NOT PER ASSET, because the unit of work is a swap: two swaps on one
+    # chain can fail for different reasons (one address unindexed, one endpoint down),
+    # and grouping by asset would hide the second behind the first.
+    #
+    # `except Exception` AND NOT BaseException -- rule 12's legitimate broad catch, with
+    # its test met: the caller can tell this from a real answer because the swap is
+    # absent from `processed`, present in `unreachable`, and named on the cycle line.
+    processed = CycleRefresh()
+    unreachable: list[tuple[str, str, BaseException]] = []
+    for swap in swaps:
+        try:
+            processed.append(refresh_swap_from_chain(db, config, adapters, swap, scans=scans))
+        except Exception as exc:  # noqa: BLE001 -- see the block above; recorded, named and reported
+            unreachable.append((swap["from_asset"], swap["id"], exc))
+            logger.warning(
+                "swap %s (%s) could NOT be refreshed this cycle: %s: %s. Every OTHER swap in "
+                "this cycle is still being refreshed -- before 2026-10-10 this raise discarded "
+                "every swap created after it, the same ones every cycle, for as long as the "
+                "chain was unreachable. Nothing was written for this swap, so its deposit is "
+                "neither credited nor declared absent; the next cycle tries again.",
+                swap["id"], swap["from_asset"], type(exc).__name__, exc,
+            )
+    # BOTH HALVES IN ONE PLACE, so the caller reports one partition rather than two.
+    # The shared-scan failures come first because they are the earlier and broader
+    # failure -- a dead shared account can be the REASON a swap on it then fails.
+    processed.unreachable = tuple(scans.unreachable) + tuple(unreachable)
     # AFTER THE LOOP, STILL, AND WITH THE SAME SCAN. Only the network read moved up; the
     # reconciler's `claimed` and `credited` sets are deliberately still computed from the
     # database down there, because computing them from PRE-LOOP state would call a freshly
