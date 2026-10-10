@@ -2207,7 +2207,17 @@ WEB_SURFACES = (
     # deployment this file cannot read (rule 17).
     ("ADMIN", "/admin/wallets", "chain wallets, first chain's panel (routes/admin.py)"),
     ("ADMIN", "/admin/wallets/<id>", "one chain's wallet panel -- <id> is a ticker, six of them; ?ask makes the read-only calls (routes/admin.py)"),
-    ("ADMIN", "/admin/controls", "the kill switch -- the only operator route taking a POST (routes/kill_switch.py)"),
+    ("ADMIN", "/admin/controls", "the kill switch -- chain daemon controls, POST (routes/kill_switch.py)"),
+    # ADDED 2026-10-10, WITH THE CORRECTION ABOVE IT. /admin/controls' entry said "the
+    # only operator route taking a POST", which this row made false the moment it
+    # existed -- rule 16: a wrong comment is a bug, and a surface map that mis-describes
+    # the surface beside it is the version of that bug an operator reads first.
+    #
+    # It is the ONE route in the tree that can move a swap out of a terminal state, so
+    # it is named here rather than left to be found: services/payout_rescue.py refuses
+    # unless the failure happened BEFORE signing, which is what makes it safe to expose
+    # at all.
+    ("ADMIN", "/admin/swaps/<id>/rescue", "POST: re-queue a swap whose payout failed before signing (routes/admin.py)"),
     ("JSON", "/api/rates", "the rate table (routes/rates.py)"),
     ("JSON", "/api/quotes", "POST: price one pair (routes/quotes.py)"),
     ("JSON", "/api/swaps", "POST: create a swap (routes/swaps.py)"),

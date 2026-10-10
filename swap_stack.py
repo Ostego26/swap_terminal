@@ -80,6 +80,13 @@ import supervisor  # noqa: E402  -- after the sys.path.insert above, same as eve
 from config import Config  # noqa: E402
 from microfortnights import format_duration  # noqa: E402  -- same sys.path.insert
 
+# HOST-SIDE ON PURPOSE. The markers that identify a cloud-sync share live above the
+# database on the HOST; inside the web container it is /data, the far end of a bind
+# mount, so the container cannot see them. swap_stack.py is the only thing in this
+# tree that runs on the host and knows the real path. See
+# swap_terminal/sync_share_guard.py for what a sync client does to a WAL database.
+from sync_share_guard import share_lines  # noqa: E402  -- same sys.path.insert
+
 from swap_terminal.stack_authority import (  # noqa: E402
     CANDID_UI_CANISTER_NAME,
     DECLARED_BRIDGE_SUBNET,
@@ -597,6 +604,11 @@ def cmd_status(files: tuple[str, ...]) -> int:
     code = _say_code_version()
     say(f"  repository        {REPO_ROOT}")
     say(f"  database          {Config.DB_PATH}  <- SWAP_DB_PATH")
+    # `status` AND `up` BOTH, because the question is "what is wrong with my terminal"
+    # as often as it is "start my terminal", and a share is the kind of fault that is
+    # invisible until it has already cost something. Same call, same module (rule 8).
+    for line in share_lines(Path(Config.DB_PATH).parent):
+        say(line)
     # WHAT THIS LINE READ BEFORE 2026-10-10 WAS THE WHOLE STACK, AND NOW IT IS NOT.
     # It printed three filenames, so an operator could read the services from the
     # files named. Since docker-compose.yml declares `include:`, one name stands for
@@ -1675,6 +1687,11 @@ def _say_up_banner() -> tuple[str, str]:
     say("swap_stack: UP")
     code = _say_code_version()
     say(f"  database          {Config.DB_PATH}  <- SWAP_DB_PATH")
+    # BESIDE THE PATH, NOT IN A SECTION OF ITS OWN. The question "is something else
+    # writing this file" is only ever asked about a specific path, so the answer has to
+    # be on the next line down from it or it is a thing to go and look up.
+    for line in share_lines(Path(Config.DB_PATH).parent):
+        say(line)
     say(f"  services          {', '.join(UP_SERVICES)}  <- named, and as of 2026-10-10 also what a")
     say("                    bare `docker compose up` starts: docker-compose.yml includes the icp")
     say("                    and web files, and `abstergo` and `harness` are behind profiles of")
