@@ -15,7 +15,6 @@ diverged an operator would fund an address the harness refuses to spend from (ru
 from __future__ import annotations
 
 import ast
-import importlib.util
 import inspect
 import json
 import re
@@ -29,6 +28,7 @@ from time import time as _now
 from types import ModuleType
 
 import pytest
+from conftest import root_entry_point
 from regtest import daemons, funding_steps, steps
 from regtest import operator_panel as decisions
 from regtest.daemons import RegtestSetupError
@@ -45,33 +45,41 @@ from services.swap_service import create_swap  # isort: skip -- same
 
 
 def _entry() -> ModuleType:
-    """Import operator_panel.py, the root entry point, the way the other entry-point tests do.
+    """Import operator_panel.py, the root entry point, through the one copy of the loader.
 
-    BOTH FAILURES OF THE LOAD ARE NAMED, which they were not. `spec_from_file_location()`
-    returns None when the path does not exist or no loader claims it, and `spec.loader` is
-    None for a spec that carries no loader -- so a missing or renamed operator_panel.py
-    arrived at every one of the ~25 tests below as `AttributeError: 'NoneType' object has no
-    attribute 'loader'`, which names neither the file nor the reason. The panel is the file
-    with the buttons that spend coin; "the suite could not find it" has to read as that.
+    conftest.root_entry_point() is that copy and its docstring carries the reasoning. This
+    file held the FIRST of the five hand-written ones -- test_solana_payout.py names it in a
+    comment as the thing it was copied from -- so the fourteen lines of loader this replaces
+    (`git show HEAD~1:tests/test_operator_panel.py`, lines 61-74) are where the duplication
+    started.
 
-    They are raises rather than asserts because this runs OUTSIDE a test body as well (it is
-    called from module-level-ish helpers) and because the condition is a broken checkout, not
-    a failed expectation.
+    THE NAME IS PASSED EXPLICITLY, and it is not decoration: test_solana_payout.py loads THIS
+    SAME FILE as "operator_panel_entry_sol" on purpose, so the two test files get independent
+    module objects. The helper keeps that distinction rather than flattening both to the
+    path's stem.
+
+    TWO LINES ARE GONE RATHER THAN MOVED. `sys.path.insert(0, root / "swap_terminal")` was
+    dead -- conftest.py already does it at import, before any test module is loaded -- and
+    the unchecked-`spec.loader` guard is now in one place instead of five.
+
+    THE EXCEPTION TYPE CHANGES, RegtestSetupError -> ImportError/FileNotFoundError, and
+    nothing pins it: the ONE `pytest.raises(RegtestSetupError)` in this file is about a panel
+    FUNCTION -- `assert_loopback_only` refusing a non-loopback bind -- never about a failure
+    of this load. RegtestSetupError was this copy's own choice because the file already
+    imported it for the harness; the five copies raised three different types for one
+    condition ("the checkout is broken"), which is the drift rule 8 describes rather than a
+    distinction anyone designed. What the message has to say is unchanged and the helper says
+    it: the panel is the file with the buttons that spend coin, so "the suite could not find
+    it" has to read as that.
+
+    "THE ONE" IS COUNTED. The first version of that sentence said "the four", because I had
+    counted four in test_reclaim_funding.py and carried the number across without recounting
+    -- there is one here. That is the habit `522fead` built suite_baseline.py for, and I did
+    it again inside the commit consolidating five copies of one loader. The number is
+    `grep -c "pytest.raises(RegtestSetupError)"`, which takes less time than typing the
+    sentence did.
     """
-    root = Path(__file__).resolve().parent.parent
-    sys.path.insert(0, str(root / "swap_terminal"))
-    source = root / "operator_panel.py"
-    spec = importlib.util.spec_from_file_location("operator_panel_entry", source)
-    if spec is None:
-        raise RegtestSetupError(
-            f"no import spec for {source} -- the panel entry point is missing or unreadable, so "
-            f"nothing in this file can be checked against it"
-        )
-    if spec.loader is None:
-        raise RegtestSetupError(f"the import spec for {source} carries no loader, so it cannot be executed")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return root_entry_point("operator_panel.py", "operator_panel_entry")
 
 
 def _entry_source(entry: ModuleType | None = None) -> str:

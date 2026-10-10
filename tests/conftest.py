@@ -203,19 +203,31 @@ def root_entry_point(relative_path: str, module_name: str | None = None):
 
     Rule 10 puts entry points at the project root, and they are not importable as
     package members from there -- so a test that wants one has to load it by path.
-    Five tests did, with five copies of this function:
+    Five tests did, with five copies of this function. ALL FIVE ARE MIGRATED ONTO THIS
+    ONE as of 2026-10-10 (C47), and these are the surviving call sites:
 
-        test_operator_panel.py:50       _entry()
-        test_solana_payout.py:1199
-        test_grc_htlc_verify.py:58
-        test_reclaim_funding.py:43
-        test_icp_replica_entrypoint.py:34
+        test_operator_panel.py:73       _entry()        "operator_panel_entry"
+        test_solana_payout.py:1228      teller_entry()  "operator_panel_entry_sol"
+        test_grc_htlc_verify.py:69      _entry()
+        test_reclaim_funding.py:57      _entry()
+        test_icp_replica_entrypoint.py:49               at COLLECTION time
+        test_daemon_capabilities.py:129-131             three in one dict
+        test_suite_baseline.py:32
 
-    test_solana_payout.py names test_operator_panel.py::_entry() in a comment as
+    test_solana_payout.py named test_operator_panel.py::_entry() in a comment as
     the thing it was copied from, and ALL FIVE carried the same unchecked
     `spec.loader` hole -- closed separately in four of them. One bug, four
     diagnoses, which is rule 8's cost made explicit. OPEN_FINDINGS.md has recorded
     "One conftest.py helper fixes all five" since; this is that helper.
+
+    ITS OWN TESTS ARE tests/test_root_entry_point.py, written in the same commit as the
+    migration and for a reason worth stating: the survivor of a merge becomes the single
+    thing every caller depends on, so leaving it untested means a mutation here reports
+    as thirty AttributeErrors in files about the ICP replica and the GRC HTLC harness --
+    which is exactly the mechanism by which one bug in five copies came to be diagnosed
+    four separate times. Six mutations of this function, six caught. The
+    `spec.loader is None` branch below is the one thing NOT covered, and that file says
+    so with the measurement rather than leaving it as a gap.
 
     It exists because I nearly wrote the SIXTH copy 2026-10-09, in the test for a
     commit about consolidating duplicated knowledge, twenty minutes after

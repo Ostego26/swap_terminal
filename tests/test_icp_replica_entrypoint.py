@@ -27,29 +27,27 @@ function a test can call against a tree it built.
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 
-_SOURCE = Path(__file__).resolve().parents[1] / "docker" / "icp_replica_entrypoint.py"
-_SPEC = importlib.util.spec_from_file_location("icp_replica_entrypoint", _SOURCE)
-# BOTH FAILURES OF THE LOAD ARE NAMED, and this one runs at COLLECTION time.
-# spec_from_file_location() returns None when the path does not exist or no
-# loader claims it, and a spec can carry no loader -- so moving or renaming
-# docker/icp_replica_entrypoint.py made every test in this file fail with
-# `AttributeError: 'NoneType' object has no attribute 'loader'` during
-# collection, naming neither the file nor the reason (pyright
-# reportArgumentType + reportOptionalMemberAccess x2, 2026-10-09). The file
-# lives in the Docker image's build context, so "it moved" is the realistic
-# cause. Same guard, same words, as tests/test_operator_panel.py::_entry and
-# tests/test_solana_payout.py's teller_entry().
-if _SPEC is None or _SPEC.loader is None:
-    raise ImportError(
-        f"could not load {_SOURCE} as a module: spec_from_file_location gave spec={_SPEC!r}. "
-        f"This file tests the replica container's entrypoint by location, so if that script "
-        f"moved this path moves with it."
-    )
-entrypoint = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(entrypoint)
+from conftest import root_entry_point
+
+# LOADED THROUGH conftest.root_entry_point(), THE ONE COPY OF THIS LOADER, whose docstring
+# carries the reasoning for all nine call sites. Two things are specific to this one:
+#
+#   - IT RUNS AT COLLECTION TIME rather than inside a test body, so a path that has gone
+#     stale takes out every test in this file at once. Before the shared helper that read as
+#     `AttributeError: 'NoneType' object has no attribute 'loader'` with the path nowhere in
+#     it (pyright reportArgumentType + reportOptionalMemberAccess x2, 2026-10-09).
+#   - IT IS NOT A ROOT FILE. docker/icp_replica_entrypoint.py lives in the Docker image's
+#     build context, which is why the helper takes a RELATIVE PATH rather than a bare name:
+#     a helper that could not say this would have left this copy behind, and five copies is
+#     how five copies happen.
+#
+# The helper also adds the guard no copy here had -- it checks the file EXISTS first, which
+# is the realistic failure. A path that does not exist still produces a perfectly good spec
+# (measured in test_solana_payout.py 2026-10-09), so the `spec is None` check that used to
+# be on this line never fired for a move.
+entrypoint = root_entry_point("docker/icp_replica_entrypoint.py")
 
 
 def test_it_finds_the_pid_file_at_any_depth(tmp_path):

@@ -21,11 +21,10 @@ pass, would be worse than no harness.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import io
-from pathlib import Path
 
 import pytest
+from conftest import root_entry_point
 from modules import script_chain as chain
 from modules.htlc_timelock import ROLE_INITIATOR, contract_locktime
 from regtest.console import FAIL, OK, SKIP, Console
@@ -57,26 +56,17 @@ class _SilentRun:
 def _entry():
     """grc_htlc_verify.py loaded from its path, because it is an entry point and not a module.
 
-    BOTH Nones ARE REFUSED BY NAME, and the reason is rule 2's: this loads a file by PATH,
-    so nothing in the import graph points at it and a rename or a move is invisible until
-    here. `spec_from_file_location` returns None for a path it cannot build a spec for, and
-    `spec.loader` is Optional on ModuleSpec in its own right -- so the unchecked version
-    fails with "'NoneType' object has no attribute 'loader'" (or 'exec_module'), which
-    names neither the file nor the fact that the file is the thing that is missing. Every
-    test in this module calls this first, so one bad path reports as thirty identical
-    AttributeErrors with no path in any of them.
+    Through conftest.root_entry_point(), the one copy of this loader, whose docstring carries
+    the reasoning -- including the reason rule 2 gives for why this file needs the guard at
+    all: it names its target by PATH, so nothing in the import graph points at it and a
+    rename is invisible until this line. Every test in this module calls this first, so one
+    bad path used to report as thirty identical AttributeErrors with no path in any of them.
+
+    THE EXCEPTION TYPE CHANGES, AssertionError -> ImportError/FileNotFoundError, and nothing
+    pins it: the one `pytest.raises` in this file that mentions RegtestSetupError reaches it
+    through `entry.RegtestSetupError`, which is the loaded module's own, not this load's.
     """
-    entry_point = Path(__file__).resolve().parents[1] / "grc_htlc_verify.py"
-    spec = importlib.util.spec_from_file_location("grc_htlc_verify_under_test", entry_point)
-    if spec is None or spec.loader is None:
-        raise AssertionError(
-            f"{entry_point} could not be loaded as a module (spec={spec!r}). This file is named "
-            f"by PATH rather than imported, so a rename or a move does not break an import -- it "
-            f"breaks here, and every test in this file with it."
-        )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return root_entry_point("grc_htlc_verify.py", "grc_htlc_verify_under_test")
 
 
 # THE CRUX OF THE HARNESS, IN ONE ASSERTION, and a mutant swapping it SURVIVED until this

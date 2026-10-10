@@ -589,14 +589,17 @@ by grepping for the NAME rather than the import graph (rule 2).
   that would otherwise become false — it wants to be one commit by someone who can
   touch both.
 - **The five existing `spec_from_file_location` copies are not migrated yet.**
-  `conftest.root_entry_point()` exists and absorbs all five, and the new test
-  uses it, but `test_operator_panel.py:50`, `test_solana_payout.py:1199`,
-  `test_grc_htlc_verify.py:58`, `test_reclaim_funding.py:43` and
-  `test_icp_replica_entrypoint.py:34` still carry their own. Each differs in a
-  real way — two insert `sys.path` (redundantly), three raise different exception
-  types, one runs at COLLECTION time, one loads out of `docker/` — so it is five
-  careful edits rather than a find-and-replace, and it is next rather than
-  deferred. Named here so it is work, not a baseline.
+  **CLOSED 2026-10-10 — all five are migrated, and the helper now has tests (C47).**
+  It was five careful edits rather than a find-and-replace, as this entry said: the
+  two redundant `sys.path.insert` lines are gone, the three exception types collapsed
+  to the helper's `ImportError`/`FileNotFoundError` (nothing pinned any of them —
+  checked, not assumed), the collection-time site still loads at collection time, and
+  the `docker/` one still works because the helper takes a relative path. Measured on
+  the diff rather than estimated: **144 lines removed, 105 added, net −39** across the
+  five files, and the five loader bodies became five one-line calls — most of what is
+  added back is comment, because each site now has to say what is specific to it and
+  what the helper owns (rule 8's harder half). The entry below is the same finding seen
+  from the other end.
 
 - **Four copies of the console recorder in tests** (`test_chain_balances.py:74`,
   `test_xrp_balances.py:240`, `test_atomic_swap_xrp_driver.py:302`, `_QuietConsole:178`),
@@ -607,6 +610,7 @@ by grepping for the NAME rather than the import graph (rule 2).
   `test_solana_payout.py` names `test_operator_panel.py::_entry()` in a comment as
   the thing it copied — and all five carried the same unchecked-`spec.loader` hole,
   now closed in four of them separately. One `conftest.py` helper fixes all five.
+  **CLOSED 2026-10-10 (C47). It did.**
 - **Two classes are named `Console`** (`step_console.py` and `regtest/console.py`),
   and their `check()` disagrees about whether the verdict is a `bool` or a string.
   Not merged — they are genuinely different consoles — but `step_console.check` now
@@ -739,6 +743,8 @@ by grepping for the NAME rather than the import graph (rule 2).
 
 | | what | commit |
 |---|---|---|
+| C47 | **The survivor of a five-copy merge was the one thing with no tests.** `conftest.root_entry_point()` absorbed five hand-written `spec_from_file_location` loaders and **nine call sites across seven files** now depend on it — and nothing asserted on any of its guards, so a mutation in it would have reported as thirty `AttributeError`s in files about the ICP replica, the GRC HTLC harness and the teller pane. That is precisely how the unchecked-`spec.loader` hole survived in all five copies long enough to be **diagnosed four separate times**. Six mutations, six caught: dropping the existence check, the `spec is None` guard, the `sys.modules` registration, the cleanup on a failed exec, the two deliberate module names, and re-adding the dead `sys.path.insert`. **The `spec.loader is None` branch is NOT covered and the module docstring says so** with the measurement — a directory, `README.md` and a nonexistent `.py` reach the other two branches, and nothing in this tree produces a spec carrying no loader; a test asserting the SOURCE contains the check would be "the SQL text contains X", which the behavioral-verification principle forbids | `this commit` |
+| C48 | **And my first version of the `sys.path` test was wrong for the reason the whole file is about.** It loaded the REAL `suite_baseline.py` and asserted `sys.path` was unchanged — but every root entry point in this tree does its own `sys.path.insert(0, <root>/swap_terminal)` as its first statement (`suite_baseline.py:80`, `operator_panel.py:59`, `reclaim_funding.py:52`, `grc_htlc_verify.py:79`), because a rule 10 root file cannot import this repository's modules without it. So the assertion measured the MODULE, not the loader, and failed on the first run. It now loads a synthetic entry point that touches nothing, and the comment carries the measurement rather than the assumption | `this commit` |
 | C45 | **The window icon starts a DIFFERENT deployment and said it was "Swap Terminal".** Clicked on the operator's host: gunicorn on **:5000**, host database, `swap workers NOT STARTED HERE`, and **all five chains NOT CONFIGURED** on a machine whose `.env` is fully configured. `config.py:17` records why, deliberately: nothing in the serving path loads a `.env`, because `load_dotenv()` at import makes every later import order-dependent (rule 12). `docker compose` reads `.env` by itself, so the containerized stack gets the chain ports and a host gunicorn gets none. Two deployments, one blind to the operator's config, and the only thing that said so was five lines offering the remedy for a *different* problem ("set BTC_RPC_PORT", when what they have is a `.env` this server does not read). Icon renamed to **Swap Terminal: Window (dev server)** with a Comment naming the port, the reason, and `swapterm up` | `this commit` |
 | C46 | And the launcher now prints the actual remedy when nothing is reachable — naming `swapterm up`, both ports, and the warning that both servers can run at once over one database. The count comes back from the child as a **sentinel line**, stripped before display, rather than being recovered by searching the rendered text for `NOT CONFIGURED` — the same read-a-fact-out-of-prose defect removed from `serving_verdict()` and from three assertions in `test_desktop_launcher.py` today. `-1` means NOT ESTABLISHED and stays silent; only an actual `0` prints the remedy, and the first version got that right by accident (`if configured:` is false only for 0, and -1 is truthy) | `this commit` |
 | C42 | **The icons did nothing when clicked. `StartupNotify=true` was why.** Diagnosed from the operator's OWN machine: `~/Desktop/mammon-restart.desktop` has worked since September and differs in exactly two ways — `StartupNotify=false`, and `Exec` invoking `/bin/bash` explicitly. With `StartupNotify=true` the desktop waits for a startup-notification completion that a terminal emulator opening a shell script never sends, so the launch sits pending and silently gives up. `Terminal=true` and `StartupNotify=true` are near mutually exclusive, and every working launcher on that desktop says false. Both now match the measured pattern, on both templates | `this commit` |

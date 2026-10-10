@@ -24,13 +24,12 @@ The two properties worth pinning are not "it builds a transaction". They are:
 
 from __future__ import annotations
 
-import importlib.util
 import io
 from pathlib import Path
 
 import base58
 import pytest
-from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER
+from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER, root_entry_point
 from modules import network_selection
 from modules import script_chain as chain
 from regtest import funding_steps
@@ -40,32 +39,22 @@ from regtest.keys import generate_key
 
 
 def _entry():
-    """Load reclaim_funding.py, the root entry point, by location.
+    """Load reclaim_funding.py, the root entry point, through the one copy of the loader.
 
-    BOTH FAILURES OF THE LOAD ARE NAMED. spec_from_file_location() returns None
-    when the path does not exist or no loader claims it, and a spec can carry no
-    loader -- so a renamed or missing reclaim_funding.py arrived at every test
-    below as `AttributeError: 'NoneType' object has no attribute 'loader'`,
-    which names neither the file nor the reason (pyright reportArgumentType +
-    reportOptionalMemberAccess x2, 2026-10-09). It is a root entry point (rule
-    10), so "it moved" is the realistic cause and is exactly what the message
-    has to say.
+    conftest.root_entry_point() is that copy and its docstring carries the reasoning. The
+    docstring this replaces already said this was "the third site of one idiom rather than a
+    new invention" -- which is the sentence rule 8 asks you to act on rather than write.
 
-    The same guard, in the same words, is at tests/test_operator_panel.py::_entry
-    and tests/test_solana_payout.py's teller_entry(); this is the third site of
-    one idiom rather than a new invention.
+    IT IS A ROOT ENTRY POINT (rule 10), so "it moved" is the realistic cause of a failure
+    here, and that is the guard the five copies all LACKED: a path that does not exist still
+    produces a perfectly good spec, so `spec is None` never fired for a move. The helper
+    checks the file exists first.
+
+    THE EXCEPTION TYPE CHANGES, AssertionError -> ImportError/FileNotFoundError. Nothing
+    pins it -- the four `pytest.raises(RegtestSetupError)` below are about reclaim_funding's
+    own refusals, never about the load.
     """
-    source = Path(__file__).resolve().parents[1] / "reclaim_funding.py"
-    spec = importlib.util.spec_from_file_location("reclaim_funding_under_test", source)
-    if spec is None or spec.loader is None:
-        raise AssertionError(
-            f"could not load {source} as a module: spec_from_file_location gave spec={spec!r}. "
-            f"reclaim_funding.py is a root entry point (rule 10) and this file loads it by "
-            f"location, so if it moved this path moves with it."
-        )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return root_entry_point("reclaim_funding.py", "reclaim_funding_under_test")
 
 
 def _run(monkeypatch, node=None) -> tuple[funding_steps.Run, io.StringIO]:

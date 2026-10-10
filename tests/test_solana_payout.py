@@ -99,6 +99,7 @@ from chains.solana_signing import (
 )
 from chains.solana_transaction import parse_transfer_transaction
 from config import Config
+from conftest import root_entry_point
 from db import SCHEMA, apply_migrations, connect_db, db_session, dict_factory
 from network_target import GENESIS_HASHES
 from services import quote_service
@@ -1192,54 +1193,39 @@ def test_a_key_file_that_cannot_be_read_says_so_rather_than_printing_nothing(tmp
 
 
 def teller_entry():
-    """operator_panel.py, the root entry point, loaded the way tests/test_operator_panel.py does.
+    """operator_panel.py, the root entry point, through the one copy of the loader.
 
-    By file location rather than by import, because it is a rule 10 entry point
-    at the project root and the suite puts swap_terminal/ on sys.path, not the
-    root. The helper is a copy of that file's _entry() on purpose: importing a
-    test module from another test module to share four lines would make the two
-    files' collection order matter.
+    By file location rather than by import, because it is a rule 10 entry point at the
+    project root and the suite puts swap_terminal/ on sys.path, not the root.
+
+    THE REASON THE OLD DOCSTRING GAVE FOR COPYING IT IS GONE, and it was the right reason
+    for the wrong destination. It said: "The helper is a copy of that file's _entry() on
+    purpose: importing a test module from another test module to share four lines would make
+    the two files' collection order matter." True, and that is why the survivor is
+    conftest.py -- pytest imports a conftest BEFORE collecting anything beside it, so
+    `from conftest import root_entry_point` depends on no other test module and on no
+    collection order. `from test_operator_panel import _entry` would have.
+
+    A DISTINCT MODULE NAME, DELIBERATELY. This loads the same file as
+    test_operator_panel.py::_entry() and wants an independent module object, which is why
+    the helper takes `module_name` at all rather than always using the path's stem.
+
+    WHAT THIS COPY MEASURED AND THE SHARED HELPER NOW ACTS ON, kept because it is the one
+    fact that made the merge better than any of the five (rule 17: measured, not assumed --
+    the first version of this comment claimed the opposite and was wrong):
+
+        spec_from_file_location("x", "/nonexistent/operator_panel.py")
+          -> ModuleSpec(name='x', loader=<SourceFileLoader>, origin=...)
+        spec_from_file_location("y", "/tmp")           # a directory
+          -> None
+
+    A path that does not exist still produces a perfectly good spec, so `spec is None` never
+    fires for a MOVED entry point -- which is the realistic failure for a rule 10 file named
+    by path. root_entry_point() therefore checks the file exists FIRST; the two None guards
+    all five copies argued about are for the case where the path is not loadable as a source
+    module at all.
     """
-    import importlib.util  # noqa: PLC0415 -- checked: used by this helper alone, exactly as tests/test_operator_panel.py::_entry() does it
-    import sys  # noqa: PLC0415 -- checked: same
-    from pathlib import Path  # noqa: PLC0415 -- checked: same
-
-    root = Path(__file__).resolve().parent.parent
-    sys.path.insert(0, str(root / "swap_terminal"))
-    entry_point = root / "operator_panel.py"
-    spec = importlib.util.spec_from_file_location("operator_panel_entry_sol", entry_point)
-    # REFUSED BY NAME RATHER THAN DEREFERENCED. Both of these are declared
-    # optional -- spec_from_file_location() -> ModuleSpec | None, and
-    # ModuleSpec.loader -> Loader | None -- and until this check existed the two
-    # Nones were read straight through, so the symptom would have been
-    # `AttributeError: 'NoneType' object has no attribute 'exec_module'` raised
-    # inside a helper called teller_entry(), naming neither the file nor the
-    # reason. With it, the one thing a reader needs is on the screen (rule 14).
-    #
-    # WHAT IT DOES *NOT* CATCH, measured 2026-10-09 rather than assumed, because
-    # the first version of this comment claimed the opposite and was wrong
-    # (rule 16: a wrong comment is a bug, and rule 17: run the thing that would
-    # show it false). A path that does not exist still produces a perfectly good
-    # spec:
-    #
-    #     spec_from_file_location("x", "/nonexistent/operator_panel.py")
-    #       -> ModuleSpec(name='x', loader=<SourceFileLoader>, origin=...)
-    #     spec_from_file_location("y", "/tmp")           # a directory
-    #       -> None
-    #
-    # So operator_panel.py MOVING off the repository root does not reach this
-    # branch -- it reaches exec_module() and comes back as FileNotFoundError
-    # naming the path, which is already a legible failure. This branch is for the
-    # case where the path is not loadable as a source module at all.
-    if spec is None or spec.loader is None:
-        raise AssertionError(
-            f"could not load {entry_point} as a module: spec_from_file_location gave "
-            f"spec={spec!r}, so that path is not a loadable source module. The teller "
-            f"pane is a root entry point (rule 10) and this test loads it by location."
-        )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return root_entry_point("operator_panel.py", "operator_panel_entry_sol")
 
 
 def test_the_teller_pane_PASSES_its_adapters_so_it_cannot_disagree_with_the_web_form(tmp_path, monkeypatch):
