@@ -402,8 +402,8 @@ _RAIL_EXTRA: dict[str, tuple[Rail, ...]] = {
              RAIL_LIVE, "",
              "rail",
              "Qt also shows staking WEIGHT, NET WEIGHT and EXPECTED TIME TO STAKE on this line "
-             "and none of the three is read by anything in this repository. What is below is the "
-             "half that is: the wallet lock, which on Gridcoin is the fact that decides whether "
+             "and none of the three is read by anything in this repository. What this pane DOES "
+             "carry is the half that is read: the wallet lock, which on Gridcoin is the fact that decides whether "
              "the wallet is staking at all -- a wallet unlocked FOR STAKING is a different state "
              "from one unlocked for spending, and chains/gridcoin_wallet_lock.py exists because "
              "a payout here has to put the wallet back the way it found it"),
@@ -466,8 +466,8 @@ _RAIL_EXTRA: dict[str, tuple[Rail, ...]] = {
              "rail",
              "the per-swap allocation is in the database and this page does not read the "
              "database -- deliberately, because every swap-level fact is already on /admin and "
-             "this page is about the DAEMONS. What is below is the desk's own account and the "
-             "derivation check; which index belongs to which swap is /admin's deposit table"),
+             "this page is about the DAEMONS. What this pane DOES carry is the desk's own account "
+             "and the derivation check; which index belongs to which swap is /admin's deposit table"),
         Rail("cw-blockindex", "Block index",
              "the ledger block index an ICRC-1 transfer returns, which is this chain's "
              "equivalent of a txid",
