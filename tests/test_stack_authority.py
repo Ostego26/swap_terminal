@@ -3189,9 +3189,31 @@ def test_the_producer_and_the_version_constant_agree():
     """
     produced = chain_probe_envelope([], probed_at="t", adapters_configured=0)
     assert produced[CHAIN_ENVELOPE_VERSION_KEY] == CHAIN_ENVELOPE_VERSION
-    assert CHAIN_ENVELOPE_VERSION >= 2, (
-        "v2 is the shape with `network` and `sync` in the rows; anything lower cannot "
-        "be what this file's renderers read"
+    assert CHAIN_ENVELOPE_VERSION >= 3, (
+        "v2 added `network` and `sync` to the rows; v3 added the Solana probe. Anything "
+        "lower cannot be what this file's renderers read"
+    )
+
+
+def test_the_version_tracks_container_BEHAVIOR_and_not_just_key_names():
+    """The bump rule was too narrow for two hours and the next commit proved it.
+
+    v2's note said "bump when a key is added". 2e5a70c then gave Solana a probe --
+    probe_chain() went from `probed: False` to reading genesis_hash() -- and added
+    no key, because every row already carried `network`. By the letter of that rule,
+    no bump; in practice an operator who pulled without rebuilding would see SOL
+    still "not asked" with nothing saying the checkout disagreed with the container.
+
+    This cannot be asserted mechanically -- a test cannot know what a future change
+    means -- so it asserts the RULE IS WRITTEN DOWN where somebody about to change
+    the probe will read it.
+    """
+    source = Path(stack_authority.__file__).read_text()
+    marker = source[source.index("#: BUMP THIS"):source.index("CHAIN_ENVELOPE_VERSION = ")]
+    assert "wider than" in marker, "the rule must say it is wider than key names"
+    assert "Adding a chain to the probe set" in marker, (
+        "and must name the case that broke it, because that is the one a reader will "
+        "otherwise decide is not a bump"
     )
 
 
@@ -3349,3 +3371,43 @@ def test_the_name_is_never_TRUNCATED_only_moved():
     blob = "\n".join(chain_network_lines([row]))
     assert "UNRECOGNIZED" in blob
     assert "UNRECOGNIZ\n" not in blob and "UNRECOGN " not in blob
+
+
+def test_the_none_asked_branch_ALSO_reports_a_stale_container():
+    """THE BRANCH WHERE A STALE CONTAINER IS MOST LIKELY WAS THE ONE WITHOUT THE CHECK.
+
+    "No chain in this deployment has a read-only probe" is exactly what a container
+    old enough to predate the probes reports. Found 2026-10-10 by rendering a v2 body
+    to show the operator what a pull-without-rebuild would look like, and getting one
+    bare line back with no warning at all.
+
+    MUTATION CHECKED: dropping the staleness lines from this branch fails here, and
+    the quietest possible screen goes back to saying nothing about why it is quiet.
+    """
+    body = {
+        "probed_at": "2026-10-10T01:30:00Z",
+        CHAIN_ENVELOPE_VERSION_KEY: 2,
+        "adapters_configured": 6,
+        "probes_attempted": 0,
+        CHAIN_PROBE_ROWS_KEY: [
+            {"asset": "SOL", "probed": False, "reachable": None, "network": None, "detail": "d"},
+        ],
+    }
+    status, _headline, detail = chain_reachability_verdict(body)
+    assert status == "none_asked"
+    blob = "\n".join(detail)
+    assert "OLDER CODE" in blob
+    assert "swapterm rebuild" in blob
+
+
+def test_a_CURRENT_container_with_no_probes_stays_quiet():
+    """The branch must not grow a warning that fires on a legitimately probe-less
+    deployment -- that is the "a check that fires on ordinary work is one somebody
+    deletes" failure."""
+    body = chain_probe_envelope(
+        [{"asset": "SOL", "probed": False, "reachable": None, "network": None, "detail": "d"}],
+        probed_at="t",
+        adapters_configured=1,
+    )
+    _status, _headline, detail = chain_reachability_verdict(body)
+    assert "OLDER CODE" not in "\n".join(detail)

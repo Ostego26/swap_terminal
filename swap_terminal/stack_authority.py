@@ -1247,13 +1247,32 @@ CHAIN_PROBE_ROWS_KEY = "chains"
 #: the same defect class this probe has now produced four times -- `network`, the
 #: envelope counts, `sync`, and now the envelope itself.
 #:
-#: BUMP THIS when a key is added to chain_probe_envelope() or to a row that the
-#: report reads. tests/test_stack_authority.py asserts the producer and this constant
-#: agree, so forgetting is a test failure rather than a silent blind spot.
+#: BUMP THIS whenever the CONTAINER-SIDE probe changes in a way this report would
+#: misreport if the container were older. That is wider than "a key was added", and
+#: the narrower rule was wrong within two hours of being written.
+#:
+#: IT SAID "when a key is added to chain_probe_envelope() or to a row that the report
+#: reads", and the very next commit broke it. 2e5a70c gave Solana a probe --
+#: probe_chain() went from `probed: False` to reading SolanaAdapter.genesis_hash() --
+#: and added NO key, because every row already carried `network`. By the letter of the
+#: old rule, no bump. In practice: an operator who pulls without rebuilding sees SOL
+#: still reported as "not asked", with no indication that the checkout disagrees with
+#: the container, which is precisely the blind spot this constant exists to remove.
+#:
+#: So the question it answers is "is the container running the probe this report
+#: expects", not "do the key names match". Adding a chain to the probe set, changing
+#: what a row's field can contain, or changing a probe's method all count.
+#:
+#: tests/test_stack_authority.py asserts the producer and this constant agree, so
+#: forgetting to bump is a test failure. It cannot assert you bumped it for a
+#: BEHAVIOR change, which is why the rule is written out here at length rather than
+#: left to be inferred from the list below.
 #:
 #:   1  the original shape: probed_at, adapters_configured, probes_attempted, chains
 #:   2  rows gained `network` (2026-10-09) and `sync` (2026-10-10)
-CHAIN_ENVELOPE_VERSION = 2
+#:   3  SOL became probeable via genesis_hash, and ICP gained a per-asset no-probe
+#:      reason (2026-10-10). No new key -- see above for why that is still a bump.
+CHAIN_ENVELOPE_VERSION = 3
 
 #: The key it travels under.
 CHAIN_ENVELOPE_VERSION_KEY = "envelope_version"
@@ -1878,9 +1897,19 @@ def chain_reachability_verdict(body: object, trouble: str = "") -> tuple[str, st
     refused = [row for row in rows if row.get("reachable") is False]
     not_asked = [row["asset"] for row in rows if row.get("reachable") is _NOT_ASKED]
 
+    stale = envelope_staleness_lines(body)
     if not answered and not refused:
+        # THE STALENESS CHECK BELONGS HERE MOST OF ALL, and it was the one branch
+        # without it. "No chain has a read-only probe" is exactly what a container
+        # old enough to predate the probes would report -- so the branch where a
+        # stale container is MOST likely was the branch that could not say so. Found
+        # 2026-10-10 by rendering a v2 body with an unprobed SOL row to show the
+        # operator what a pull-without-rebuild would look like, and getting one bare
+        # line back. Same shape as the network lines needing to be in the `reachable`
+        # branch rather than only the loud one.
         return "none_asked", "no chain in this deployment has a read-only probe", [
             f"{', '.join(not_asked) or '(none)'} -- nothing was established about reachability.",
+            *(["", *stale] if stale else []),
         ]
     if not refused:
         return "reachable", f"all {len(answered)} probeable chain(s) answered: {', '.join(answered)}", [
