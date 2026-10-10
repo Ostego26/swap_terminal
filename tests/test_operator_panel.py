@@ -2553,3 +2553,125 @@ def test_every_wallet_state_is_in_the_published_tuple():
         for answers in ({}, {"listwallets": []}, _MODERN)
     }
     assert reached == set(decisions.WALLET_STATES)
+
+
+# ---------------------------------------------------------------------------
+# WHO OWNS THE DAEMON, DERIVED FROM WHAT IT SAYS RATHER THAN FROM THE TABLE.
+#
+# Operator, 2026-10-10: "our grc, ltc, and btc daemons should have peers and not
+# be regtest anyone and just full testnet now." DAEMON_CONTROL grants BTC and LTC
+# full start/stop keyed on `tab.kind`, a literal "regtest" in the CHAINS table, and
+# the justification written above that policy is entirely about the CHAIN:
+# "Nothing is at stake: the coins are minted on demand and the datadir is
+# disposable." On testnet not one clause of that survives.
+# ---------------------------------------------------------------------------
+
+
+_BTC_TAB = next(c for c in decisions.CHAINS if c.asset == "BTC")
+_GRC_TAB = next(c for c in decisions.CHAINS if c.asset == "GRC")
+
+
+def test_an_UNREACHABLE_regtest_tab_keeps_full_control():
+    """The ordinary case, and the one START exists for.
+
+    A stopped daemon reports no network. If an empty string demoted the tab, the
+    button that starts a regtest daemon could never be pressed -- so this is the
+    half that must NOT change.
+    """
+    assert decisions.effective_control_kind(_BTC_TAB, "") == "regtest"
+    assert decisions.refuse_daemon_control(_BTC_TAB, "start", "") == ""
+    assert decisions.refuse_daemon_control(_BTC_TAB, "stop", "") == ""
+
+
+def test_a_daemon_CONFIRMING_regtest_keeps_full_control():
+    assert decisions.effective_control_kind(_BTC_TAB, "regtest") == "regtest"
+    assert decisions.refuse_daemon_control(_BTC_TAB, "start", "regtest") == ""
+
+
+@pytest.mark.parametrize("network", ["test", "testnet", "main", "signet"])
+def test_a_BTC_daemon_on_ANY_OTHER_network_becomes_the_operators_own(network):
+    """THE DEFECT. start_daemon() has `-regtest` as a literal with no override.
+
+    So on a testnet daemon this button would not restart what the operator is
+    looking at -- it would spawn a SECOND, regtest daemon inside their testnet
+    datadir, binding whatever rpcport a leftover [regtest] section still named.
+
+    MUTATION CHECKED: reverting refuse_daemon_control to key on `tab.kind` fails
+    here, and the panel goes back to offering START on a testnet daemon.
+    """
+    assert decisions.effective_control_kind(_BTC_TAB, network) == "operator"
+    refusal = decisions.refuse_daemon_control(_BTC_TAB, "start", network)
+    assert refusal, "START must be refused once the daemon is not on regtest"
+    assert "-regtest" in refusal, "the refusal must name WHY -- the literal in the argv"
+    assert "SECOND" in refusal, "and what pressing it would actually do"
+    assert network in refusal
+
+
+def test_the_two_START_refusals_are_told_apart():
+    """Both say "will not start"; they are refusals for different reasons.
+
+    GRC was never this panel's to start. A moved-to-testnet BTC daemon WAS, and what
+    the panel can still start is no longer the thing the operator is looking at.
+    Collapsing them sends somebody looking for a flag that does not exist.
+    """
+    moved = decisions.refuse_daemon_control(_BTC_TAB, "start", "test")
+    never_ours = decisions.refuse_daemon_control(_GRC_TAB, "start", "testnet")
+    assert moved != never_ours
+    assert "-regtest" in moved and "-regtest" not in never_ours
+    assert "service manager" in never_ours and "service manager" not in moved
+
+
+def test_STOPPING_a_moved_BTC_daemon_needs_the_SAME_opt_in_as_GRC(monkeypatch):
+    """THE SECOND HALF OF THE DEFECT, and it was the dangerous half.
+
+    DAEMON_CONTROL["operator"]["stop"] is True, so the policy ALLOWS stop and the
+    environment variable is what gates it. That gate read `tab.kind == "operator"`,
+    so a BTC daemon moved to testnet -- effective kind `operator`, policy allows
+    stop -- would have been stoppable from an unauthenticated browser button with no
+    opt-in anywhere. That daemon is the one the payout path reads.
+    """
+    monkeypatch.delenv(decisions.MAY_STOP_VARIABLE, raising=False)
+    refusal = decisions.refuse_daemon_control(_BTC_TAB, "stop", "test")
+    assert decisions.MAY_STOP_VARIABLE in refusal
+    assert "live service" in refusal
+    monkeypatch.setenv(decisions.MAY_STOP_VARIABLE, "1")
+    assert decisions.refuse_daemon_control(_BTC_TAB, "stop", "test") == ""
+
+
+def test_the_GRC_stop_refusal_still_says_STAKING_YOUR_WALLET(monkeypatch):
+    """It stopped saying it when the sentence was generalized, and a test caught that.
+
+    For Gridcoin that phrase is not colour: it stakes continuously, so a stop
+    forfeits research reward that starting it again does not recover. Neither of the
+    other two chains has that property, which is why the clause is derived per chain
+    rather than shared (rule 8: a real difference belongs at the site).
+    """
+    monkeypatch.delenv(decisions.MAY_STOP_VARIABLE, raising=False)
+    refusal = decisions.refuse_daemon_control(_GRC_TAB, "stop", "testnet")
+    assert "STAKING YOUR WALLET" in refusal
+    btc = decisions.refuse_daemon_control(_BTC_TAB, "stop", "test")
+    assert "STAKING YOUR WALLET" not in btc, "and it must not be claimed of a chain that does not"
+
+
+def test_a_refused_pair_with_no_recorded_sentence_FAILS_CLOSED():
+    """An unmapped (kind, action) must not return "" -- that reads as PERMITTED.
+
+    The empty string is this function's "go ahead", so a missing sentence would throw
+    the switch rather than refuse it. This is the same fail-closed shape
+    chain_exit_code() and refuse_unless_read_only() use.
+    """
+    unknown = decisions.ChainTab("ZZZ", "nonsense-kind", False, "a kind no policy covers")
+    for action in ("start", "stop"):
+        refusal = decisions.refuse_daemon_control(unknown, action, "test")
+        assert refusal, f"{action} on an unknown kind must be refused, not permitted"
+        assert "no reason is recorded" in refusal
+        assert "defect, not a policy" in refusal
+
+
+def test_a_foreign_tab_is_unaffected_by_the_network_argument():
+    """XRP and SOL have no lifecycle here regardless of what anything reports."""
+    xrp = next(c for c in decisions.CHAINS if c.asset == "XRP")
+    for network in ("", "testnet", "main"):
+        assert decisions.effective_control_kind(xrp, network) == "foreign"
+        assert decisions.refuse_daemon_control(xrp, "start", network)
+        assert decisions.refuse_daemon_control(xrp, "stop", network)

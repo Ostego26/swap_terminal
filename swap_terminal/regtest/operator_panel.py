@@ -593,60 +593,213 @@ DAEMON_CONTROL = {
 MAY_STOP_VARIABLE = "ST_PANEL_MAY_STOP_DAEMONS"
 
 
-def refuse_daemon_control(tab: ChainTab, action: str) -> str:
+def effective_control_kind(tab: ChainTab, network: str) -> str:
+    """Which DAEMON_CONTROL policy applies, given what the daemon says it is.
+
+    `tab.kind` IS A LITERAL IN THE CHAINS TABLE AND THAT IS THE DEFECT THIS CLOSES.
+    BTC and LTC are written `"regtest"` there, and the policy keyed on that word grants
+    full start/stop. Read the justification above DAEMON_CONTROL and notice that every
+    clause of it is a claim about the CHAIN, not about the tab:
+
+        "Throwaway chains whose daemons regtest_htlc_verify.py already starts and
+         stops ... Nothing is at stake: the coins are minted on demand and the datadir
+         is disposable. Full control."
+
+    Move that daemon to testnet -- which the operator asked for on 2026-10-10, "our
+    grc, ltc, and btc daemons should ... not be regtest anyone and just full testnet
+    now" -- and not one of those clauses survives. The coins come from a faucet. The
+    datadir is a multi-gigabyte sync that fund_testnets.py measured at 33-54 hours. And
+    the swap terminal's own payout path depends on that daemon being up, so stopping it
+    from a browser button is stopping a live service.
+
+    WHAT THE UNFIXED VERSION WOULD HAVE DONE, and it is worse than a stale label:
+    daemons.start_daemon() builds its argv with `-regtest` as a LITERAL
+    (regtest/daemons.py, base_argv) and no environment override. So the panel would have
+    shown the tab's network as `test`, still offered START, and pressing it would have
+    spawned a SECOND daemon -- a regtest one -- inside the testnet datadir tree, binding
+    whatever rpcport the leftover [regtest] section still named. A button that reads as
+    "start the thing I am looking at" would have started something else.
+
+    THREE CASES, AND THE MIDDLE ONE IS WHY THIS TAKES THE NETWORK AS AN ARGUMENT RATHER
+    THAN ASKING:
+
+      ""            not established -- the daemon did not answer, which is the ORDINARY
+                    state for a regtest tab and the exact case START exists for. Keeps
+                    the tab's own kind, so starting a stopped daemon still works.
+      "regtest"     the daemon confirms what the tab claims. Full control, as before.
+      anything else the daemon is on a network this panel did not create and cannot
+                    recreate. It is the OPERATOR's daemon now, whatever the table says,
+                    so it gets the operator policy: START refused outright, STOP behind
+                    MAY_STOP_VARIABLE.
+
+    PURE, so a test can call it with a string instead of standing up a daemon (rule 10).
+    The caller passes what network_the_daemon_says() already read for the tab -- no
+    second connection, and no second place that decides what a network name means.
+    """
+    if tab.kind != "regtest" or not network:
+        return tab.kind
+    return "regtest" if network == "regtest" else "operator"
+
+
+def _what_is_at_stake(tab: ChainTab, network: str) -> str:
+    """Why stopping THIS daemon matters. Per chain, because the reason differs.
+
+    THE GENERAL SENTENCE LOST INFORMATION AND A TEST CAUGHT IT. When this refusal
+    started covering BTC and LTC as well as GRC on 2026-10-10, the clause was
+    generalized to "that daemon is the one this desk reads" -- and
+    test_STOPPING_the_operators_own_daemon_is_armed_OUTSIDE_the_browser failed on the
+    missing words STAKING YOUR WALLET. The test was right: for Gridcoin that is not
+    colour, it is the specific reason a stop is worse than a restart. Gridcoin stakes
+    continuously, so stopping it forfeits research reward the operator cannot get back
+    by starting it again, which is not true of either of the others.
+
+    So the clause is derived rather than shared. Two chains, two genuinely different
+    stakes, and rule 8's test applies: these are not duplicates to merge, they are a
+    difference that belongs at the site.
+    """
+    if tab.kind == "operator":
+        return "That daemon is STAKING YOUR WALLET"
+    return (
+        f"That daemon is on {network!r} and is the one this desk's payout path reads -- "
+        f"stopping it is stopping a live service, and its datadir is a sync measured in "
+        f"tens of hours rather than a disposable regtest directory"
+    )
+
+
+def _refuse_start_moved_off_regtest(tab: ChainTab, network: str) -> str:
+    """A BTC/LTC tab whose daemon says it is NOT on regtest. Added 2026-10-10.
+
+    This is the one the table existed without. start_daemon() builds its argv with
+    `-regtest` as a literal and no override, so on a testnet daemon this button would
+    not restart what the operator is looking at -- it would spawn a SECOND, regtest
+    daemon inside their testnet datadir.
+    """
+    return (
+        f"this panel will not START {tab.asset}: the daemon says it is on {network!r}, and the "
+        f"only daemon this panel knows how to start is a REGTEST one -- `-regtest` is a literal "
+        f"in its argv with no override. Pressing this would spawn a SECOND, regtest daemon "
+        f"inside your {network} datadir rather than restarting the one you are looking at. "
+        f"Start it the way you started it."
+    )
+
+
+def _refuse_start_operators_own(tab: ChainTab, network: str) -> str:
+    """GRC. This panel never started it and cannot invent its command line."""
+    del network
+    return (
+        f"this panel will not START {tab.asset}: it never started that daemon, so it has no "
+        f"binary, no datadir flags and no idea whether it runs under a service manager. "
+        f"Inventing a command line for the process that stakes your wallet is a guess, and 'it "
+        f"did not come back up' is the worst time to find that out."
+    )
+
+
+def _refuse_start_foreign(tab: ChainTab, network: str) -> str:
+    """XRP, SOL.
+
+    NOT "THERE IS NO LIFECYCLE", WHICH IS A CLAIM ABOUT THE CHAIN AND IS FALSE. Until
+    2026-09-28 both buttons on a foreign tab said this panel had no daemon lifecycle for
+    that chain and could not even probe it -- and the operator read it beside a tab that
+    had just told them exactly which variable was unset. Every foreign chain here HAS a
+    daemon: rippled is one, a Solana validator is one. What is true is the same thing
+    that is true of GRC -- THIS PANEL DOES NOT KNOW YOUR COMMAND LINE -- and it is true
+    here for a stronger reason: nothing in this tree has ever started one.
+    regtest/daemons.py owns every Popen here and knows bitcoind and litecoind only.
+    """
+    del network
+    return (
+        f"this panel will not START {tab.asset}: nothing in this tree has ever started one, so "
+        f"it has no binary, no wallet file, no port and no network flag to start it with. On "
+        f"{tab.asset} that command line would choose WHICH WALLET is opened, which is a custody "
+        f"decision and is yours -- start it in a shell and this tab will say so."
+    )
+
+
+def _refuse_stop_no_handle(tab: ChainTab, network: str) -> str:
+    """A STOP NEEDS A HANDLE, AND THERE IS NONE.
+
+    Rule 13 prefers a pid file to a `pgrep -f` pattern for exactly this case: the only
+    way to find a daemon this panel did not spawn is to match its command line, and that
+    pattern matches EVERY daemon of that kind on the host -- including one serving a
+    different wallet the operator is mid-transfer on. A kill that cannot say which
+    process it hit is not a stop, it is a guess with a signal attached.
+    """
+    del network
+    return (
+        f"this panel will not STOP {tab.asset}: it did not start that process, so it holds no "
+        f"pid for it. The only way to find one is to match a command line, and that pattern "
+        f"hits every {tab.asset} daemon on this host -- including one serving a different "
+        f"wallet. Rule 13 wants a pid file, and there is not even a pattern worth having here."
+    )
+
+
+#: WHICH SENTENCE A REFUSED SWITCH GETS, keyed by (effective kind, action, was-the-tab-a-
+#: regtest-one). A TABLE RATHER THAN AN IF-CHAIN, and this file has already made that
+#: argument once about itself: answer_a_get()'s docstring in operator_panel.py says the
+#: route dispatch "was an if-chain until the controls route made it seven deep and
+#: PLR0911 fired -- which is rule 12's reading of that code: a dispatch that has
+#: swallowed a decision per branch." This one fired the same lint for the same reason
+#: when the moved-off-regtest case was added, so it takes the same shape.
+#:
+#: THE THIRD KEY ELEMENT IS WHAT DISTINGUISHES THE TWO "operator" START REFUSALS. Both
+#: are "this panel will not start it", and they are refusals for DIFFERENT reasons that
+#: an operator needs told apart: GRC was never this panel's to start, while a
+#: moved-to-testnet BTC daemon WAS and the thing the panel can still start is no longer
+#: the thing they are looking at. Collapsing them would send somebody looking for a flag.
+_CONTROL_REFUSALS = {
+    ("operator", "start", True): _refuse_start_moved_off_regtest,
+    ("operator", "start", False): _refuse_start_operators_own,
+    ("foreign", "start", False): _refuse_start_foreign,
+    ("foreign", "stop", False): _refuse_stop_no_handle,
+}
+
+
+def refuse_daemon_control(tab: ChainTab, action: str, network: str = "") -> str:
     """"" if this switch may be thrown, else why not. THE decision, apart from the plumbing.
 
-    THREE REFUSALS AND THEY ARE NOT INTERCHANGEABLE, which is why each carries its own sentence
-    rather than a shared "not allowed". An operator refused a START on GRC needs to know this
-    panel does not know their command line, because they will otherwise look for a flag. One
-    refused a STOP needs to know an environment variable arms it. One on a foreign tab needs
-    to know there is no lifecycle here at all.
+    FOUR REFUSALS AND THEY ARE NOT INTERCHANGEABLE, which is why each carries its own
+    sentence rather than a shared "not allowed". An operator refused a START on GRC needs
+    to know this panel does not know their command line, because they will otherwise look
+    for a flag. One refused a START on a BTC daemon they moved to testnet needs to know
+    something different -- that the panel CAN start a daemon and it would be the wrong
+    one. One refused a STOP needs to know an environment variable arms it. One on a
+    foreign tab needs to know there is no lifecycle here at all.
+
+    `network` IS WHAT THE DAEMON SAID, and passing it in rather than asking keeps this
+    pure and keeps the meaning of a network name in one place (see
+    effective_control_kind). Empty means not established, which is the ordinary state for
+    a stopped daemon and is exactly when START should work.
     """
     if action not in ("start", "stop"):
         return f"{action!r} is not start or stop"
-    policy = DAEMON_CONTROL.get(tab.kind, {"start": False, "stop": False})
+    # THE EFFECTIVE KIND, NOT tab.kind. See effective_control_kind(): a BTC or LTC daemon
+    # that says it is on anything but regtest is the operator's own daemon whatever the
+    # CHAINS table calls it, because start_daemon() can only ever make a regtest one.
+    kind = effective_control_kind(tab, network)
+    policy = DAEMON_CONTROL.get(kind, {"start": False, "stop": False})
     if not policy.get(action):
-        if tab.kind == "operator" and action == "start":
+        refusal = _CONTROL_REFUSALS.get((kind, action, tab.kind == "regtest"))
+        # A KIND/ACTION PAIR WITH NO SENTENCE IS A GAP, AND IT SAYS SO rather than
+        # returning "" -- which would read as PERMITTED and throw the switch. Fail
+        # closed, and name the pair so the gap is fixable from the screen.
+        if refusal is None:
             return (
-                f"this panel will not START {tab.asset}: it never started that daemon, so it "
-                f"has no binary, no datadir flags and no idea whether it runs under a service "
-                f"manager. Inventing a command line for the process that stakes your wallet is "
-                f"a guess, and 'it did not come back up' is the worst time to find that out."
+                f"this panel will not {action.upper()} {tab.asset}: the policy refuses it and no "
+                f"reason is recorded for ({kind!r}, {action!r}). Refusing without a reason is "
+                f"still a refusal -- but the missing sentence is a defect, not a policy."
             )
-        if action == "start":
-            # NOT "THERE IS NO LIFECYCLE", WHICH IS A CLAIM ABOUT THE CHAIN AND IS FALSE.
-            # Until 2026-09-28 both buttons on a foreign tab said this panel had no daemon
-            # lifecycle for that chain and could not even probe it -- and the operator read it
-            # beside a tab that had just told them exactly which variable was unset. Every
-            # foreign chain here HAS a daemon: rippled is one, a Solana validator is one. What
-            # is true is the same thing that is true of GRC one branch up -- THIS PANEL DOES
-            # NOT KNOW YOUR COMMAND LINE -- and it is true here for a stronger reason: nothing
-            # in this tree has ever started one. `regtest/daemons.py` owns every Popen here and
-            # knows bitcoind and litecoind only.
-            return (
-                f"this panel will not START {tab.asset}: nothing in this tree has ever started "
-                f"one, so it has no binary, no wallet file, no port and no network flag to "
-                f"start it with. On {tab.asset} that command line would choose WHICH WALLET is "
-                f"opened, which is a custody decision and is yours -- start it in a shell and "
-                f"this tab will say so."
-            )
-        # A STOP NEEDS A HANDLE, AND THERE IS NONE. Rule 13 prefers a pid file to a `pgrep -f`
-        # pattern for exactly the case this is: the only way to find a daemon this panel did
-        # not spawn is to match its command line, and that pattern matches EVERY daemon of that
-        # kind on the host -- including one serving a different wallet the operator is
-        # mid-transfer on. A kill that cannot say which process it hit is not a
-        # stop, it is a guess with a signal attached.
-        return (
-            f"this panel will not STOP {tab.asset}: it did not start that process, so it holds "
-            f"no pid for it. The only way to find one is to match a command line, and that "
-            f"pattern hits every {tab.asset} daemon on this host -- including one serving a "
-            f"different wallet. Rule 13 wants a pid file, and there is not even a pattern worth "
-            f"having here."
-        )
-    if tab.kind == "operator" and action == "stop" and not os.environ.get(MAY_STOP_VARIABLE):
+        return refusal(tab, network)
+    # ARMED BY THE EFFECTIVE KIND TOO, AND THIS WAS THE SECOND HALF OF THE SAME DEFECT.
+    # This read `tab.kind == "operator"` until 2026-10-10, so a BTC or LTC daemon moved to
+    # testnet -- whose effective kind is now `operator` and whose DAEMON_CONTROL policy
+    # therefore ALLOWS stop -- would have been stoppable from an unauthenticated browser
+    # button with no opt-in anywhere. That daemon is the one the swap terminal's payout
+    # path reads, so stopping it is stopping a live service, which is precisely what
+    # MAY_STOP_VARIABLE exists to make a deliberate act.
+    if kind == "operator" and action == "stop" and not os.environ.get(MAY_STOP_VARIABLE):
         return (
             f"stopping {tab.asset} is armed by {MAY_STOP_VARIABLE} in the environment that "
-            f"starts this panel, and it is not set. That daemon is STAKING YOUR WALLET, and "
+            f"starts this panel, and it is not set. {_what_is_at_stake(tab, network)}, and "
             f"this page is unauthenticated behind a loopback bind -- so the decision to arm a "
             f"browser button that stops it should be made in a shell, deliberately, and not by "
             f"anything that merely reaches this port."
