@@ -92,21 +92,27 @@
 # TWO THINGS ARE NOT ESTABLISHED AND BOTH ARE NAMED RATHER THAN LEFT TO BE FOUND
 # (rule 17: say which you have).
 #
-# FIRST, WHETHER dfx TOLERATES A READ-ONLY DFX_CONFIG_ROOT. It has no reason to
-# write one for `canister call --network <url> --identity <name>` -- the identities
-# are already there, so the first-run bootstrap that generates a key and echoes its
-# mnemonic has nothing to do -- but "has no reason to" is a reading of its behavior
-# and not a measurement. dfx is not installed in the environment this file was
-# written in, so it could not be run. CHECK IT BEFORE YOU RELY ON IT, with one
-# read-only command on your own host:
+# FIRST, WHETHER dfx TOLERATES A READ-ONLY DFX_CONFIG_ROOT -- MEASURED 2026-10-11 AND
+# IT DOES. This block said it could not be run, because dfx is not installed in the
+# environment the file was written in. The operator ran it on their host:
 #
-#     docker compose -f docker-compose.yml -f docker-compose.web.armed-icp.yml #             run --rm --entrypoint sh web -c 'dfx identity list'
+#     docker compose -f docker-compose.yml -f docker-compose.web.armed-icp.yml \
+#             run --rm --entrypoint sh web -c 'dfx identity list'
+#     anonymous
+#     default *
+#     minter
 #
-# `default` and `minter` in that output means the read-only mount is enough. A
-# permission or "failed to create" error means dfx wants to write, and the fix is to
-# drop `:ro` from the mount below -- which is a real widening of what the web
-# container can do to the desk's identity store, so it is a decision rather than a
-# default, and it belongs to whoever runs this.
+# So `web`'s dfx read the replica's identity store through the read-only mount and
+# found both identities, with `default` already current. The `:ro` stands, and the
+# fallback this block used to describe -- dropping `:ro`, widening what a process
+# holding wallet RPC credentials can do to the desk's identity store -- is not needed.
+#
+# WHAT THAT COMMAND DID NOT ESTABLISH, and the distinction is the whole of rule 17:
+# `identity list` is a READ. The payout does `canister call --network <url>
+# --identity default`, which is a different command and could still want to write
+# something -- a wallet canister record, a networks file. That is now a much smaller
+# gap than it was, and it closes the first time a transfer is attempted, which is the
+# second item below.
 #
 # SECOND, NO ICP PAYOUT HAS EVER BEEN SIGNED OR BROADCAST BY THIS CODE, on any
 # network. The arming path is new, the derivation is unit-tested, and what has NOT
