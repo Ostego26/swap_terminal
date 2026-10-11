@@ -68,6 +68,7 @@ WHAT ICP DOES NOT HAVE, and where each one is handled:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shlex
 import subprocess
@@ -82,6 +83,30 @@ from .icp_account import (
     principal_to_bytes,
     subaccount_from_index,
 )
+
+logger = logging.getLogger(__name__)
+
+#: HOW MANY BLOCKS ONE query_blocks ASKS FOR. The ledger caps a reply and will send
+#: fewer, which find_deposits_to_address() handles by advancing from what came back
+#: rather than from what it asked for -- so this is a request size and not an
+#: assumption about the reply.
+#:
+#: 1000 rather than one call for the whole chain, because a single enormous `length`
+#: is the request a ledger is most likely to refuse or truncate, and a truncation
+#: that went uncounted is the defect this whole function was rewritten for.
+PAGE_BLOCKS = 1000
+
+#: THE CEILING ON BLOCKS ONE SCAN WILL READ, AND EXCEEDING IT RAISES.
+#:
+#: It replaces `tx_limit: int = 500`, which was a trailing WINDOW: the scan read the
+#: last 500 blocks and returned [] for a deposit below them, with no error and no log
+#: line. The number is kept generous rather than tuned because its job changed -- it is
+#: no longer deciding what gets scanned, it is deciding when to REFUSE instead of
+#: silently covering part of the chain. A local replica will not reach it for a very
+#: long time; the ICP mainnet ledger is already far past it, and that is the correct
+#: answer there: scanning it block by block is not a thing this adapter can do, and
+#: saying so beats missing deposits.
+MAX_BLOCKS_SCANNED = 100_000
 
 #: What `dfx canister call` prints for a nat: digits with underscore separators and
 #: a candid type suffix, e.g. `(100_000_000_000 : nat)`. Matched rather than
@@ -822,7 +847,101 @@ class ICPAdapter:
                 f"(this is not an empty result): {error}. Output began {raw[:200]!r}"
             ) from error
 
-    def find_deposits_to_address(self, address: str, tx_limit: int = 500, skip_txids=frozenset()):
+    def _blocks_page(self, start: int, length: int, chain_length: int):
+        """One page of blocks as (first_block_index, blocks). RAISES rather than return a gap.
+
+        BOTH REFUSALS HERE EXIST FOR ONE REASON and it is this adapter's recurring one: a
+        range this scan needed and did not read is indistinguishable, to the caller, from
+        a customer who did not pay. So neither is allowed to become a short list.
+
+          archived_blocks  old blocks migrate off the ledger into separate archive
+                           canisters, and `blocks` then covers only what the ledger still
+                           holds. A scan that read `blocks` and ignored this field would
+                           silently miss deposits. Measured on the local replica
+                           2026-10-06: `archived_blocks = vec {}` with chain_length 2, so
+                           this has never fired here -- which is exactly why it is written
+                           now rather than when it first bites.
+          an empty page    the ledger sent nothing for a range it did not say was archived.
+                           Breaking out of the caller's loop would turn the unread
+                           remainder into an empty list, which is the 500-block trailing
+                           window's defect arriving by a second route.
+
+        A SHORTER-THAN-REQUESTED PAGE IS NOT AN ERROR and is deliberately not refused
+        here: the ledger caps a reply, and the caller advances by `first + len(blocks)`
+        rather than by `length`, so the unread blocks are read by the next iteration
+        instead of being skipped. Refusing a short page would make a legitimate cap fatal;
+        refusing an EMPTY one is different, because there is no progress to make from it
+        and the loop would not terminate.
+
+        EXTRACTED 2026-10-11 for ruff's C901 (rule 12: extract the decision, do not raise
+        the ceiling), behavior unchanged.
+        """
+        page = self._call_json(
+            "query_blocks",
+            f"(record {{ start = {start} : nat64; length = {length} : nat64 }})",
+        )
+        archived = page.get("archived_blocks") or []
+        if archived:
+            raise ICPCallFailed(
+                f"the ledger reports {len(archived)} archived block range(s) overlapping the scan of "
+                f"blocks {start}..{start + length - 1}, so part of the history this scan needs is NOT "
+                f"in the reply. Refusing rather than returning a partial answer: a missing range means "
+                f"a deposit that was made and will never be seen, which is indistinguishable from a "
+                f"customer who did not pay. Reading an archive canister is not implemented."
+            )
+        blocks = page.get("blocks") or []
+        if not blocks:
+            raise ICPCallFailed(
+                f"query_blocks returned no blocks for {start}..{start + length - 1} and reported no "
+                f"archived ranges, so {chain_length - start} block(s) of the history this scan needs "
+                f"went unread for a reason the ledger did not give. Refusing rather than returning a "
+                f"partial answer."
+            )
+        return int(page.get("first_block_index", start)), blocks
+
+    def _deposit_event_from_block(self, block, index: str, target: bytes, address: str):
+        """One block as a deposit event for `address`, or None. THE DECISION, so it is testable.
+
+        FOUR WAYS TO BE NONE and each is an ordinary state rather than an error:
+
+          not a Transfer    the ledger records Mint, Burn and Approve too, and none of
+                            them pays an account identifier.
+          paid someone else the ledger is one shared history, so most blocks in any scan
+                            are other people's. Compared as BYTES against the decoded
+                            target rather than as hex strings, because hex casing is not
+                            normalized by the ledger and a case mismatch would read as a
+                            stranger's payment.
+          amount <= 0       a zero-value Transfer is not a deposit. `<= 0` and not `== 0`
+                            deliberately: a negative would mean the reply is not the shape
+                            this code believes, and crediting it would be worse than
+                            ignoring it.
+          no amount at all  `(transfer.get("amount") or {})` covers a reply missing the
+                            field, which reads as zero and is then declined by the line
+                            above.
+
+        EXTRACTED 2026-10-11 from find_deposits_to_address()' inner loop, unchanged in
+        behavior. The reason is in the call site's comment and in rule 12's reading of
+        C901: the method had grown a paging loop around this filter and the decision could
+        no longer be exercised without seeding a whole ledger.
+        """
+        transfer = transfer_operation(block)
+        if transfer is None:
+            return None
+        if bytes(transfer.get("to") or []) != target:
+            return None
+        e8s = int((transfer.get("amount") or {}).get("e8s", 0))
+        if e8s <= 0:
+            return None
+        return {
+            "txid": index,
+            "vout": 0,
+            "address": address,
+            "amount": e8s / 10**ICP_DECIMALS,
+            "confirmations": self.deposit_confirmations(),
+        }
+
+    def find_deposits_to_address(self, address: str, tx_limit: int = MAX_BLOCKS_SCANNED,
+                                 skip_txids=frozenset(), from_block: int = 0):
         """Every ledger Transfer INTO `address`, as deposit events. THE WATCHER'S JOB.
 
         Returns the shape services/deposit_service.record_deposit_event() consumes --
@@ -855,6 +974,66 @@ class ICPAdapter:
         replica 2026-10-06: `archived_blocks = vec {}` with chain_length 2, so the
         refusal has never fired here and that is precisely why it is written now
         rather than when it first bites.
+
+        =====================================================================
+        IT USED TO SCAN ONLY THE LAST 500 BLOCKS AND RETURN [] FOR ANYTHING OLDER
+        =====================================================================
+
+        The two lines were:
+
+            window = min(int(tx_limit), chain_length)
+            start = chain_length - window
+
+        so blocks [0, chain_length - 500) were never examined, and a Transfer into the
+        swap's subaccount below that was not in the page. The loop never saw it and this
+        returned [] -- with no error and no log line. The swap sat at awaiting_deposit
+        forever while the money was provably in its subaccount.
+
+        AND THE REFUSAL WRITTEN FOR EXACTLY THIS COULD NOT FIRE. The archived_blocks
+        check above exists because "a missing range means a deposit that was made and
+        will never be seen, which is indistinguishable from a customer who did not pay"
+        -- and it was computed over the window that WAS requested, so it reported an
+        empty vec and declined. The identical partial answer produced by this function's
+        own bound was returned as a normal empty list. The same defect, with the guard
+        sitting beside it looking at the wrong range.
+
+        THE BLOCK INDEX IS GLOBAL, which is why 500 is not 500 of this swap's payments.
+        Every ledger transaction advances it: every other swap's deposit, every payout,
+        every fund_desk.py top-up. So the window is consumed by traffic that has nothing
+        to do with this address.
+
+        LATENT UNTIL IT IS NOT. On the operator's replica chain_length was 2 when this
+        was measured, and below 500 the arithmetic is a no-op -- min(500, 2) is 2 and
+        start is 0, so the whole chain was scanned and nothing was dropped. What flips
+        it, in order of likelihood: 500 ledger transactions accumulating locally (one per
+        deposit, payout and top-up, one-way and unmonitored); the watcher being down
+        across 500 blocks; and pointing ICP_LEDGER_CANISTER_ID at the ICP MAINNET ledger,
+        where the index is global across the whole network and 500 blocks is MINUTES.
+
+        =====================================================================
+        IT NOW PAGES FORWARD FROM `from_block` AND REFUSES RATHER THAN TRUNCATES
+        =====================================================================
+
+        FORWARD FROM A FLOOR, not backward from the head, so no block between the floor
+        and the head is ever skipped. `from_block` defaults to 0 -- the whole chain --
+        because that is the only floor this function can establish on its own: it is
+        handed an address and a skip set, and neither says "every block below N has
+        already been examined". A caller that can establish one (a scan cursor in
+        swap_terminal.db, which does not exist yet) can pass it and pay for far less.
+
+        `tx_limit` IS NOW A CEILING ON BLOCKS SCANNED, AND EXCEEDING IT RAISES. That is
+        the symmetry the archived-blocks branch already had and this did not: a partial
+        answer is refused rather than returned, because the caller cannot tell a
+        truncated [] from a customer who did not pay. On a chain longer than the ceiling
+        the watcher now fails loudly for that swap -- and only for that swap, because
+        services/deposit_service.process_active_swaps() gained per-swap isolation the
+        same day, so one raising swap no longer stops the cycle and the cycle line names
+        the asset. That fix had to land first for this one to be safe.
+
+        EVERY SCAN LOGS ITS RANGE (rule 14). A bounded scan and a complete one used to
+        render identically, which is what let this hide: the whole point of the log line
+        is that "scanned 0..1" and "scanned 400000..400500" are visibly different
+        answers to the same question.
         """
         if not self.validate_address(address):
             raise ICPCallFailed(
@@ -871,43 +1050,62 @@ class ICPAdapter:
         if chain_length == 0:
             return []
 
-        window = min(int(tx_limit), chain_length)
-        start = chain_length - window
-        page = self._call_json(
-            "query_blocks",
-            f"(record {{ start = {start} : nat64; length = {window} : nat64 }})",
-        )
-        archived = page.get("archived_blocks") or []
-        if archived:
+        start = max(0, int(from_block))
+        to_scan = chain_length - start
+        if to_scan <= 0:
+            logger.info(
+                "ICP scan of %s: from_block=%d is at or past chain_length=%d, so there is nothing "
+                "new to read. This is a RESULT, not a skipped scan.",
+                address, start, chain_length,
+            )
+            return []
+        if to_scan > int(tx_limit):
             raise ICPCallFailed(
-                f"the ledger reports {len(archived)} archived block range(s) overlapping the scan of "
-                f"blocks {start}..{chain_length - 1}, so part of the history this scan needs is NOT "
-                f"in the reply. Refusing rather than returning a partial answer: a missing range "
-                f"means a deposit that was made and will never be seen, which is indistinguishable "
-                f"from a customer who did not pay. Reading an archive canister is not implemented."
+                f"scanning blocks {start}..{chain_length - 1} for {address} would read {to_scan} "
+                f"blocks, over the ceiling of {tx_limit}. REFUSING rather than scanning a trailing "
+                f"window: until 2026-10-11 this read only the last {tx_limit} blocks and returned [] "
+                f"for a deposit below them -- no error, no log line, and a swap that polled forever "
+                f"with the money provably in its subaccount. A truncated [] is indistinguishable "
+                f"from a customer who did not pay, which is the same reason the archived-block "
+                f"refusal above exists. Remedies: pass from_block, once a scan cursor exists in "
+                f"swap_terminal.db; or raise tx_limit if this chain really is this long and the "
+                f"scan is affordable. On the ICP MAINNET ledger neither is enough and an archive "
+                f"reader is required."
             )
 
-        first = int(page.get("first_block_index", start))
         found = []
-        for offset, block in enumerate(page.get("blocks") or []):
-            index = str(first + offset)
-            if index in skip_txids:
-                continue
-            transfer = transfer_operation(block)
-            if transfer is None:
-                continue
-            if bytes(transfer.get("to") or []) != target:
-                continue
-            e8s = int((transfer.get("amount") or {}).get("e8s", 0))
-            if e8s <= 0:
-                continue
-            found.append({
-                "txid": index,
-                "vout": 0,
-                "address": address,
-                "amount": e8s / 10**ICP_DECIMALS,
-                "confirmations": self.deposit_confirmations(),
-            })
+        scanned_to = start
+        while scanned_to < chain_length:
+            length = min(PAGE_BLOCKS, chain_length - scanned_to)
+            first, blocks = self._blocks_page(scanned_to, length, chain_length)
+            for offset, block in enumerate(blocks):
+                index = str(first + offset)
+                if index in skip_txids:
+                    continue
+                # ONE DECISION, ONE FUNCTION (rule 10). Extracted when ruff's C901 took
+                # this method to 13 -- which rule 12 reads as orchestration having
+                # swallowed decisions, and the decision here is "is this block a payment
+                # to this address, and for how much". It is now callable with a seeded
+                # block and asserted on directly, which the paging loop around it is not.
+                event = self._deposit_event_from_block(block, index, target, address)
+                if event is not None:
+                    found.append(event)
+            # FROM WHAT CAME BACK, not from what was asked for. A ledger that returns a
+            # shorter page than requested must not have the gap counted as scanned --
+            # advancing by `length` would skip exactly the blocks it declined to send.
+            scanned_to = first + len(blocks)
+
+        # RULE 14: THE RANGE IS ON EVERY SCAN, COMPLETE OR NOT. A bounded scan and a
+        # complete one rendered identically before today, which is what let the trailing
+        # window hide for as long as it did. `(none)` is a result and is printed as one.
+        logger.info(
+            "ICP scan of %s: read blocks %d..%d of chain_length=%d (%d block(s)) and found %s. "
+            "The range is printed because a scan that covered part of the chain and one that "
+            "covered all of it used to look the same, and a deposit below the window was returned "
+            "as an empty list.",
+            address, start, chain_length - 1, chain_length, chain_length - start,
+            f"{len(found)} deposit(s)" if found else "(none)",
+        )
         return found
 
     def deposit_confirmations(self) -> int:

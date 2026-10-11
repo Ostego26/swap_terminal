@@ -32,7 +32,12 @@ from chains.gridcoin_wallet_lock import (
     needs_wallet_unlock,
     unlocked_for_payout,
 )
-from chains.registry import unconfigured_chains, why_cannot_pay_out, why_unconfigured
+from chains.registry import (
+    unconfigured_chains,
+    validate_min_confirmations,
+    why_cannot_pay_out,
+    why_unconfigured,
+)
 from modules.address_authority import check_address, check_receive_address, expected_network
 
 from .custody_separation import payout_to_the_desk_refusal
@@ -48,7 +53,25 @@ logger = logging.getLogger(__name__)
 
 
 def get_min_confirmations(config, asset: str) -> int:
-    return int(config[f"{asset}_MIN_CONFIRMATIONS"])
+    """The confirmation threshold that goes onto a swap row, validated for the asset.
+
+    ONE CHOKEPOINT, AND THAT IS WHY THE VALIDATION IS HERE. Every asset's threshold
+    passes through this function on its way onto `swaps.min_confirmations`, so a chain
+    whose adapter never looks at the value is still covered -- which is the case ICP was
+    in. chains/registry.validate_min_confirmations() has the measurement: with
+    ICP_MIN_CONFIRMATIONS=2 a swap sat in `confirming` through forty watcher cycles with
+    its deposit recorded, its amount correct, credited_at NULL, and nothing halted,
+    logged or reported it.
+
+    IT RAISES AT SWAP CREATION, which is the point: before the customer has been handed a
+    deposit address, rather than after they have paid into one.
+
+    XRP and SOL are not covered by this and do not need to be -- their adapters refuse a
+    bad threshold in their constructors, which fires earlier and harder (no adapter is
+    built at all). The difference is written down at both sites per rule 8; see
+    FINAL_AT_ONE_CONFIRMATION.
+    """
+    return validate_min_confirmations(asset, config[f"{asset}_MIN_CONFIRMATIONS"])
 
 
 def set_swap_status(

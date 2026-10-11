@@ -510,3 +510,93 @@ def why_cannot_pay_out(adapters: Mapping[str, object], asset: str) -> str:
         "cannot pay out, and its adapter does not say why -- see chains/base.RPCAdapter.can_spend"
     )
     return f"{asset} {detail}"
+
+
+#: ASSETS WHOSE FINALITY IS AT ONE BLOCK, so there is no depth to accumulate.
+#:
+#: ICP: the ledger does not reorganize. chains/icp.ICPAdapter.deposit_confirmations()
+#: returns a hardcoded 1 and its own docstring calls that "a compatibility value rather
+#: than a chain fact" -- a Transfer is in a block or it is not.
+#:
+#: XRP IS DELIBERATELY NOT LISTED HERE even though it belongs to the same category, and
+#: that is rule 8's "if they genuinely differ, the difference is the point and belongs in
+#: a comment at BOTH sites". chains/xrp_units.validate_min_confirmations() already
+#: refuses a bad XRP_MIN_CONFIRMATIONS inside the ADAPTER's constructor, which fires
+#: earlier and harder: no XRP adapter is built at all. SOL does the same. Listing XRP
+#: here as well would mean two refusals for one fact, and the second would never fire.
+#:
+#: SO WHAT THIS TABLE IS FOR is the chains that have NO such constructor check -- ICP
+#: builds its adapter from a ledger id and a principal and never looks at the threshold.
+#: A chain added here is one whose threshold reaches a swap row unvalidated.
+FINAL_AT_ONE_CONFIRMATION = frozenset({"ICP"})
+
+
+class MinConfirmationsUnreachable(ValueError):
+    """A configured threshold that no deposit on that chain can ever reach.
+
+    ITS OWN TYPE because the remedy is specific and is never "handle the error": the
+    value is wrong in the environment, and every swap created with it would be
+    permanently stuck. Raising at swap CREATION is the whole point -- before a customer
+    has been given a deposit address, rather than after they have paid.
+    """
+
+
+def validate_min_confirmations(asset: str, configured: int) -> int:
+    """`configured` for `asset`, or raise because no deposit could ever satisfy it.
+
+    =========================================================================
+    ICP_MIN_CONFIRMATIONS=2 STRANDED EVERY ICP DEPOSIT IN `confirming` FOREVER
+    =========================================================================
+
+    MEASURED 2026-10-11 by running the real process_active_swaps() forty times over one
+    seeded ICP->GRC swap whose deposit event carried the confirmations the REAL
+    ICPAdapter.deposit_confirmations() returns:
+
+        ICPAdapter.deposit_confirmations() = 1
+        swaps.min_confirmations            = 2
+        after 40 cycles: {'status': 'confirming', 'actual_input_amount': 2.44081155,
+                          'credited_at': None}
+        deposit_events: [{'txid': '2', 'amount': 2.44081155, 'confirmations': 1,
+                          'credited_at': None}]
+        under_review count: 0
+
+    The gate can never close: deposit_service's `confirmed_total` sums only events whose
+    confirmations >= min_confirmations, so it is permanently 0, `_advance_to_detected()`
+    writes `confirming` once and `_settle_confirmed_amount()` returns on
+    `confirmed_total <= 0` on every cycle after that. Nothing halts, nothing logs, and no
+    root tool can move it. The customer has paid and the money is recorded.
+
+    =========================================================================
+    WHY HERE, AT ONE CHOKEPOINT, RATHER THAN IN AN ICP-SHAPED CHECK
+    =========================================================================
+
+    XRP and SOL both refuse this in their adapters' constructors, and ICP has no such
+    check because it builds from a ledger id and a principal and never reads the
+    threshold. Writing an ICP-only validator would be a third copy of one rule and would
+    close it for ICP alone -- so this takes the ASSET and consults
+    FINAL_AT_ONE_CONFIRMATION, and services/swap_service.get_min_confirmations() is the
+    single place every asset's threshold passes through on its way onto a swap row.
+    The next finality-at-one-block chain is a line in that frozenset.
+
+    IT RAISES RATHER THAN CLAMPING, and that is the decision rather than an oversight. A
+    silent clamp to 1 would make the environment's stated intent -- "wait for 2" -- quietly
+    untrue, and an operator who set it on purpose (having misread ICP as a chain with
+    depth) would get a system that behaved differently from its own configuration without
+    saying so. Rule 14: a value that was ignored has to say it was ignored. Here the loud
+    version is a refusal at swap creation, before a customer is handed a deposit address.
+
+    EVERY OTHER ASSET PASSES THROUGH UNTOUCHED. BTC's six confirmations are a real chain
+    fact and this function has no opinion about them.
+    """
+    value = int(configured)
+    if asset in FINAL_AT_ONE_CONFIRMATION and value != 1:
+        raise MinConfirmationsUnreachable(
+            f"{asset}_MIN_CONFIRMATIONS={value} can never be satisfied. {asset} is final at ONE "
+            f"block -- its ledger does not reorganize and its adapter reports a constant 1 -- so "
+            f"there is no depth to accumulate. Measured 2026-10-11: a swap created with 2 sat in "
+            f"`confirming` through forty watcher cycles with its deposit recorded, its amount "
+            f"correct and credited_at NULL, and nothing halted, logged or reported it. A value "
+            f"copied from a Bitcoin-shaped config does this. Set {asset}_MIN_CONFIRMATIONS=1, or "
+            f"leave it unset -- config.py already defaults it to 1."
+        )
+    return value
