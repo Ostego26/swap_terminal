@@ -116,6 +116,7 @@ from chains.registry import why_cannot_pay_out, why_unconfigured
 from chains.solana_signing import CONFIRM_SOL_SEND
 from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR, signing_seed, signing_seed_is_present
 from chains.xrp_signing import CONFIRM_XRP_SEND
+from failure_signature import failure_signature
 from modules.address_authority import check_address
 
 from .helpers import iso_to_epoch_nanos, utc_now_iso
@@ -1478,9 +1479,17 @@ def process_pending_payouts(db, config, adapters: dict, should_stop=None) -> lis
 #
 # Said ONCE per process, and a restart says it again: an operator starting a worker
 # is exactly the person who needs to know an asset's balance is not being polled.
-# Keyed on the asset AND the message, so a DIFFERENT failure for the same asset --
-# a daemon that was up and is now down -- still reports.
-_REPORTED_INVENTORY_FAILURES: set[tuple[str, str]] = set()
+# Keyed on the asset, the EXCEPTION TYPE and the normalized message, so a DIFFERENT
+# failure for the same asset -- a daemon that was up and is now down -- still reports.
+#
+# THAT SENTENCE WAS HERE, UNCHANGED, WHILE THE KEY DID THE OPPOSITE. It read "keyed on
+# the asset AND the message" and the key was `(asset, str(exc)[:200])`, which embedded a
+# per-attempt object address and truncated away the reason -- so every repeat looked new
+# and every genuinely new failure looked the same shape. The intent was right from the
+# start; failure_signature() is the first version that implements it. Rule 16: a wrong
+# comment is a bug, and this one was wrong by being TRUE OF THE INTENT and false of the
+# code, which is the hardest kind to see.
+_REPORTED_INVENTORY_FAILURES: set[tuple[str, str, str]] = set()
 
 
 # Chains whose wallet must be FULLY UNLOCKED to send, and which are left unlocked
@@ -1729,7 +1738,16 @@ def refresh_wallet_inventory(db, adapters: dict, should_stop=None):
         try:
             balance = float(adapter.get_balance())
         except Exception as exc:  # noqa: BLE001 -- checked: one chain being unreachable must not stop the other two from being refreshed, so this continues rather than raising. It is NOT silent: the row for that asset keeps its previous values and the WARNING below says which asset and why, so a stale inventory figure can be traced to the poll that failed instead of looking like a balance that did not move.
-            signature = (asset, str(exc)[:200])
+            # failure_signature() RATHER THAN (asset, str(exc)[:200]), WHICH NEVER MATCHED
+            # ITSELF. Measured over the operator's cycles 69-80 on 2026-10-11: this warning
+            # fired eleven times for LTC and eleven for GRC in fourteen minutes, while
+            # saying in its own text that it is said once per process. str() of a requests
+            # ConnectTimeout embeds the CPython address of a per-attempt HTTPConnection at
+            # index 182 -- inside the slice, new every cycle -- and the 200-char window cut
+            # the reason, which begins at 205. The key kept the only part that changed and
+            # discarded the only part that identified the failure. failure_signature.py has
+            # the measurement and says what it normalizes and what it deliberately keeps.
+            signature = failure_signature(asset, exc)
             if signature not in _REPORTED_INVENTORY_FAILURES:
                 _REPORTED_INVENTORY_FAILURES.add(signature)
                 logger.warning(

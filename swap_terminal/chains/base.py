@@ -489,6 +489,104 @@ class AddressOwnership(NamedTuple):
     account: str = ""
 
 
+def validity_from_reply(method: str, reply: dict) -> tuple[bool, str]:
+    """What one daemon reply says about an address being WELL-FORMED, and why.
+
+    Extracted from RPCAdapter.address_report() because ruff C901 said that method was
+    orchestration at complexity 11, and CLAUDE.md rule 12 is explicit about what that
+    code means: "a main() past the ceiling is orchestration that has swallowed
+    decisions... The fix is to extract the decision so it can be called with seeded
+    inputs, not to raise the ceiling." This is the decision, and
+    tests/test_address_single_pass.py calls it with seeded replies.
+
+    A DICT WITHOUT `isvalid` IS AFFIRMATIVE, and that reading is older than this
+    function: a daemon that answered ABOUT THE ADDRESS at all recognized it, which is
+    what older Gridcoin builds do. Kept verbatim from validate_address() rather than
+    revisited, because changing it would change a verdict on the fund path.
+    """
+    if "isvalid" in reply:
+        return bool(reply["isvalid"]), f"{method} answered isvalid"
+    return True, f"{method} answered about the address without an `isvalid` field"
+
+
+def ownership_from_reply(method: str, reply: dict) -> tuple[bool, str, str] | None:
+    """What one daemon reply says about THIS WALLET holding the key, or None if it is silent.
+
+    None means the reply carried no `ismine` -- a CAPABILITY gap, which reads
+    differently from a connection error and must never be rendered as "not yours".
+    RPCAdapter.address_ownership()'s docstring has the 2026-10-01 measurement where
+    those two were collapsed into one None and I reported a transport failure to the
+    operator as a missing daemon feature.
+
+    Returns (mine, why, account). `account` is the pre-0.17 label the reply may carry;
+    str() and not the raw value, because it is operator-supplied text and a non-string
+    would propagate into a comparison and a report.
+    """
+    if "ismine" not in reply:
+        return None
+    return bool(reply["ismine"]), f"{method} answered ismine", str(reply.get("account") or "")
+
+
+class AddressReport(NamedTuple):
+    """Everything one Bitcoin-style daemon will say about an address, from ONE pass.
+
+    WHY THIS TYPE EXISTS, measured 2026-10-11 on the create_swap path while the
+    operator could not complete a GRC -> LTC swap.
+
+    validate_address() and address_ownership() each loop over the SAME TWO RPC
+    methods -- `validateaddress` and `getaddressinfo` -- in opposite orders, and
+    services/swap_service.refuse_unusable_payout_address() calls both. Counted by
+    instrumenting requests.post on a real LitecoinAdapter:
+
+        validate_address("...")   2 posts: ['validateaddress', 'getaddressinfo']
+        owns_address("...")       2 posts: ['getaddressinfo', 'validateaddress']
+
+    FOUR ROUND TRIPS FOR TWO FACTS THAT ARRIVE IN ONE REPLY. `validateaddress` on
+    a pre-0.17 daemon returns both, which this tree already recorded in
+    address_ownership()'s own docstring:
+
+        validateaddress -> {"address": ..., "ismine": false, "isvalid": true}
+
+    What that cost, with the operator's LTC daemon unreachable: four 30s connect
+    timeouts, 120s, against a gunicorn worker timeout of 60s
+    (gunicorn.conf.py:143). The worker was KILLED after the second post, so the
+    customer got a 500 with no reason instead of the route's own 400 with one, and
+    the GRC `getnewaddress` that mints the deposit address was never reached --
+    which is exactly what the operator saw: a payout-address field, no deposit
+    address, then an internal server error.
+
+    So the pass is now made ONCE and both facts are read off it. On Gridcoin it is
+    also one call rather than three: `getaddressinfo` is ABSENT there (measured,
+    rpc code -32601), and trying `validateaddress` first means the one method that
+    exists on every vintage is the one asked first.
+
+    THREE-VALUED ON PURPOSE, both times. `valid` and `mine` are each True, False or
+    None, and None means NOBODY ANSWERED -- never "no". That distinction is the
+    thing this file has been burned by twice: validate_address() used to return
+    False for a daemon that was down, so an outage read as a bad customer address
+    (rule 12, fixed 2026-09-24), and owns_address() used to return None for both a
+    transport failure and a daemon with no `ismine` field (fixed 2026-10-01). The
+    reasons ride along in `why_valid` and `why_mine` so a caller can tell which it
+    is holding without re-asking.
+    """
+
+    #: True/False from a daemon that answered; None if neither method did.
+    valid: bool | None
+    #: Why `valid` is what it is -- which method answered, or every failure collected.
+    why_valid: str
+    #: True/False from a reply carrying `ismine`; None if no reply carried one.
+    mine: bool | None
+    #: Why `mine` is what it is. "answered, with no `ismine` field" is a CAPABILITY
+    #: gap and reads differently from a connection error -- see address_ownership().
+    why_mine: str
+    #: The pre-0.17 `account`, when a reply carried one. See AddressOwnership.account.
+    account: str = ""
+    #: Every RPC method actually called, in order. Carried so a test can assert on the
+    #: CALL COUNT rather than on a comment claiming it -- rule 17, and the regression
+    #: this type exists to prevent is precisely a call count going back up to four.
+    methods_called: tuple[str, ...] = ()
+
+
 class RPCAdapter:
     asset = ""
 
@@ -639,35 +737,86 @@ class RPCAdapter:
         None by design, because the XRP Ledger has no such question), so a
         warning here always means something is actually wrong.
         """
-        unanswered = []
-        for method in ("getaddressinfo", "validateaddress"):
+        report = self.address_report(address)
+        if report.mine is None:
+            # THE WARNING STAYS AT WARNING, and the sentence is unchanged from the
+            # 2026-10-01 measurement that earned it: a payout-address ownership
+            # check that cannot answer, on a chain whose daemon normally can, is a
+            # condition an operator needs to see. XRP never reaches this code.
+            logger.warning(
+                "address_ownership(%s) on %s: NOT ESTABLISHED -- %s. This is NOT 'not yours'; "
+                "it is 'nobody answered'. If the reasons above are connection errors, the daemon "
+                "endpoint is wrong or down and the question is still answerable.",
+                address,
+                self.asset or "this chain",
+                report.why_mine,
+            )
+            return AddressOwnership(None, report.why_mine)
+        return AddressOwnership(report.mine, report.why_mine, report.account)
+
+    def address_report(self, address: str) -> AddressReport:
+        """Both facts about `address`, from AT MOST TWO RPC calls and often one.
+
+        THE ONE PLACE THAT KNOWS WHICH RPC METHODS CARRY WHICH FIELD, and the
+        reason it is one place is in AddressReport's docstring: the two callers
+        below used to make four round trips for two facts that arrive in a single
+        reply, which on an unreachable daemon was 120s against a 60s gunicorn
+        worker timeout.
+
+        ORDER IS `validateaddress` THEN `getaddressinfo`, and it is not arbitrary.
+        `validateaddress` exists on every vintage this tree talks to -- including
+        Gridcoin, where `getaddressinfo` is ABSENT (measured: rpc code -32601) --
+        and on the older ones it carries `isvalid`, `ismine` and `account`
+        together. So the common case is ONE call, and the second is made only when
+        the first left a question open.
+
+        STOPS AS SOON AS BOTH ARE KNOWN. A modern Bitcoin Core answers `isvalid`
+        from `validateaddress` and moved the wallet fields to `getaddressinfo` in
+        0.18, so there it is two calls -- which is still half of what the two
+        callers cost before.
+
+        NEVER RAISES. Every failure is collected into `why_valid` / `why_mine` and
+        the corresponding fact is None, which is what rule 12 requires of a broad
+        catch: the caller can tell a failure from an answer because None IS the
+        answer. validate_address() turns a None `valid` into the RPCError its
+        contract promises; this method does not, because the UI's in-situ check
+        needs the reason as a value rather than as an exception.
+        """
+        failures: list[str] = []
+        called: list[str] = []
+        valid: bool | None = None
+        why_valid = ""
+        mine: bool | None = None
+        why_mine = ""
+        account = ""
+
+        for method in ("validateaddress", "getaddressinfo"):
+            if valid is not None and mine is not None:
+                break
+            called.append(method)
             try:
                 result = self.call(method, address)
-            except Exception as exc:  # noqa: BLE001 -- checked: one method failing is not an answer, it is a reason to try the other, and `getaddressinfo` is ABSENT on Gridcoin by design (measured: rpc code -32601). The reason is collected and RETURNED in `why`, so the caller can tell a transport failure from a capability gap -- which is what rule 12 asks of a broad catch and what this function previously only whispered at DEBUG.
-                unanswered.append(f"{method}: {exc}")
+            except Exception as exc:  # noqa: BLE001 -- checked: one method failing is not an answer, it is a reason to try the other, and `getaddressinfo` is ABSENT on Gridcoin by design (rpc code -32601). Every reason is collected and RETURNED, so a caller can tell a transport failure from a capability gap.
+                failures.append(f"{method}: {exc}")
                 continue
-            if isinstance(result, dict) and "ismine" in result:
-                # str() AND NOT the raw value: `account` is operator-supplied text
-                # on a pre-0.17 daemon and a non-string would propagate into a
-                # comparison and a report. A daemon with no accounts omits the key
-                # entirely, which .get() renders as "" -- see the field's note on
-                # why empty is ambiguous and who resolves it.
-                return AddressOwnership(
-                    bool(result["ismine"]),
-                    f"{method} answered ismine",
-                    str(result.get("account") or ""),
-                )
-            unanswered.append(f"{method}: answered, with no `ismine` field")
-        why = "; ".join(unanswered)
-        logger.warning(
-            "address_ownership(%s) on %s: NOT ESTABLISHED -- %s. This is NOT 'not yours'; "
-            "it is 'nobody answered'. If the reasons above are connection errors, the daemon "
-            "endpoint is wrong or down and the question is still answerable.",
-            address,
-            self.asset or "this chain",
-            why,
-        )
-        return AddressOwnership(None, why)
+            if not isinstance(result, dict):
+                failures.append(f"{method}: answered with {type(result).__name__}, not an object")
+                continue
+            if valid is None:
+                valid, why_valid = validity_from_reply(method, result)
+            if mine is None:
+                owned = ownership_from_reply(method, result)
+                if owned is None:
+                    failures.append(f"{method}: answered, with no `ismine` field")
+                else:
+                    mine, why_mine, account = owned
+
+        joined = "; ".join(failures)
+        if valid is None:
+            why_valid = joined or "no method returned a usable answer"
+        if mine is None:
+            why_mine = joined or "no method returned a usable answer"
+        return AddressReport(valid, why_valid, mine, why_mine, account, tuple(called))
 
     def validate_address(self, address: str) -> bool:
         """Ask the daemon whether an address is valid.
@@ -693,25 +842,20 @@ class RPCAdapter:
         vintages: `validateaddress` carried `isvalid` on older builds, and
         Bitcoin Core moved wallet-related fields to `getaddressinfo` in 0.18.
         """
-        errors = []
-        for method in ("validateaddress", "getaddressinfo"):
-            try:
-                result = self.call(method, address)
-            except Exception as exc:  # noqa: BLE001 -- checked: a failure of ONE method is not an answer, it is a reason to try the other. It is collected, not discarded, and if both fail the RPCError below carries them. Nothing here can return False because of a transport failure.
-                errors.append(f"{method}: {exc}")
-                continue
-            if isinstance(result, dict) and "isvalid" in result:
-                return bool(result["isvalid"])
-            # A dict without `isvalid` is a daemon that answered about the
-            # address at all, which older Gridcoin builds do for addresses they
-            # recognize. Treat the answer as affirmative rather than inventing
-            # a refusal.
-            if isinstance(result, dict):
-                return True
-        raise RPCError(
-            f"could not validate address with {self.asset or 'this'} daemon at {self.host}:{self.port}; "
-            f"this is NOT a statement about the address: {'; '.join(errors) or 'no method returned a usable answer'}"
-        )
+        report = self.address_report(address)
+        if report.valid is None:
+            # UNCHANGED CONTRACT: unanswerable RAISES, and the message says in so many
+            # words that it is not a statement about the address. That sentence is the
+            # 2026-09-24 fix for `except Exception: return False`, which made an
+            # outage read as a bad customer address, and it is load-bearing -- a
+            # caller that turned a transport failure into "Invalid LTC payout address"
+            # sent the operator to check the customer's spelling during a daemon
+            # outage. Only the number of round trips behind it changed.
+            raise RPCError(
+                f"could not validate address with {self.asset or 'this'} daemon at {self.host}:{self.port}; "
+                f"this is NOT a statement about the address: {report.why_valid}"
+            )
+        return report.valid
 
     def get_balance(self) -> float:
         return float(self.call("getbalance"))

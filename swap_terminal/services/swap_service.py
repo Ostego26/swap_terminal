@@ -26,6 +26,7 @@ is written out at the function.
 import logging
 import os
 
+from chains.base import RPCError
 from chains.gridcoin_wallet_lock import (
     WALLET_UNLOCK_ASSETS,
     WALLET_UNLOCK_ENV_VAR,
@@ -713,6 +714,74 @@ def refuse_unless_the_payout_can_be_funded(adapters, config, quote, from_asset: 
         )
 
 
+def ask_the_chain_once(adapter, to_asset: str, address: str):
+    """The daemon's whole opinion of `address`, from ONE pass. Raises what validate_address would.
+
+    Returns a chains/base.AddressReport, or None for an adapter that has no combined
+    pass -- XRP, SOL and ICP, whose owns_address() answers None WITHOUT an RPC because
+    those ledgers have no `ismine`. On those the two questions were already one call and
+    there is nothing to save, so the caller keeps its old path and behaves as before.
+
+    MEASURED 2026-10-11 by instrumenting requests.post on a real LitecoinAdapter, after
+    the operator could not complete a GRC -> LTC swap:
+
+        validate_address("...")   2 posts: ['validateaddress', 'getaddressinfo']
+        owns_address("...")       2 posts: ['getaddressinfo', 'validateaddress']
+
+    FOUR ROUND TRIPS FOR TWO FACTS THAT ARRIVE IN ONE REPLY. With their LTC daemon
+    unreachable that was four 30s connect timeouts -- 120s against gunicorn's 60s
+    worker timeout (gunicorn.conf.py:143) -- so the worker was KILLED inside this
+    check. The customer got a 500 with no reason instead of the caller's own sentence,
+    and deposit_account() never ran, which is why no GRC deposit address was ever
+    shown. chains/base.AddressReport has the full account.
+
+    EXTRACTED RATHER THAN INLINED because inlining it put
+    refuse_unusable_payout_address() at ruff C901 12, and rule 12 is explicit that the
+    code means orchestration swallowed a decision: "The fix is to extract the decision
+    so it can be called with seeded inputs, not to raise the ceiling."
+    """
+    combined = getattr(adapter, "address_report", None)
+    if not callable(combined):
+        if not adapter.validate_address(address):
+            raise ValueError(f"Invalid {to_asset} payout address")
+        return None
+    report = combined(address)
+    if report.valid is None:
+        # THE SAME CONTRACT validate_address() HAS ALWAYS HAD, word for word:
+        # unanswerable RAISES, and the message says it is not a statement about the
+        # address. That wording is the 2026-09-24 fix for `except Exception: return
+        # False`, which made a daemon outage read as a bad customer address and sent
+        # the operator to check the customer's spelling during an outage.
+        raise RPCError(
+            f"could not validate address with the {to_asset} daemon; this is NOT a statement "
+            f"about the address: {report.why_valid}"
+        )
+    if not report.valid:
+        raise ValueError(f"Invalid {to_asset} payout address")
+    return report
+
+
+def ownership_from_report(adapter, to_asset: str, address: str, report) -> bool | None:
+    """Whether the payout address is OURS, off the single pass when there was one.
+
+    None means NOT ESTABLISHED and never "not yours" -- the pair that were collapsed
+    into one None until 2026-10-01, when a transport failure was reported to the
+    operator as a missing daemon feature. RPCAdapter.address_ownership() logs that case
+    at WARNING when it does the pass itself; reading `mine` off a report nobody logged
+    would lose the line, so it is logged here instead.
+    """
+    if report is None:
+        return adapter.owns_address(address)
+    if report.mine is None:
+        logger.warning(
+            "payout-address ownership for %s was NOT ESTABLISHED -- %s. This is NOT "
+            "'not yours'; it is 'nobody answered'. If that reason is a connection error, "
+            "the daemon endpoint is wrong or down and the question is still answerable.",
+            to_asset, report.why_mine,
+        )
+    return report.mine
+
+
 def refuse_unusable_payout_address(config, adapters: dict, to_asset: str, payout_address: str) -> None:
     """Every refusal a PAYOUT address can earn, in the order that costs least. Raises or returns.
 
@@ -765,8 +834,7 @@ def refuse_unusable_payout_address(config, adapters: dict, to_asset: str, payout
             "daemon's own validate_address(), which is the authority this could not stand in for.",
             to_asset, payout_verdict.state, payout_verdict.why,
         )
-    if not adapters[to_asset].validate_address(payout_address):
-        raise ValueError(f"Invalid {to_asset} payout address")
+    chain_report = ask_the_chain_once(adapters[to_asset], to_asset, payout_address)
     # IS THE PAYOUT ADDRESS OURS? Added 2026-10-04 after swap s_ae76ec53236ffcf6
     # was created with its payout address set to XRP_DEPOSIT_ACCOUNT -- the desk's
     # own account, which the swap page PRINTS because a customer has to send to
@@ -775,11 +843,17 @@ def refuse_unusable_payout_address(config, adapters: dict, to_asset: str, payout
     # whose it is. See services/custody_separation.payout_to_the_desk_refusal()
     # for the incident and for why the two chain families need different questions.
     #
-    # PLACED HERE, which is the same reasoning the comment below gives for the
-    # funding check: the daemon has already been asked once on this line, so a
-    # second read costs nothing new, and this is still BEFORE the balance read and
-    # before deposit_account() derives a key. A swap that is going to be refused
-    # must not leave a derived key behind.
+    # PLACED HERE because this is still BEFORE the balance read and before
+    # deposit_account() derives a key: a swap that is going to be refused must not
+    # leave a derived key behind.
+    #
+    # THIS COMMENT SAID "the daemon has already been asked once on this line, so a
+    # second read costs nothing new", AND THAT WAS MEASURABLY FALSE -- the second read
+    # cost two more round trips, which is half of the 120s that killed the worker on
+    # the operator's host 2026-10-11. It is true NOW, for the first time, because
+    # chain_report above is the single pass and `mine` is read off it rather than
+    # re-asked. Rule 16: a wrong comment is a bug, and this one was load-bearing --
+    # it is the sentence that made four round trips look free.
     #
     # owns_address() IS NOT CALLED ON A TAG CHAIN. chains/xrp.py overrides it to
     # return None by design -- the XRP Ledger has no `ismine` -- so asking it on
@@ -787,7 +861,9 @@ def refuse_unusable_payout_address(config, adapters: dict, to_asset: str, payout
     # established" and never refuse. The account comparison is what works there,
     # and payout_source_account() is already the single reader of that config.
     desk_account = payout_source_account(config, to_asset)
-    owns = None if desk_account else adapters[to_asset].owns_address(payout_address)
+    owns = None if desk_account else ownership_from_report(
+        adapters[to_asset], to_asset, payout_address, chain_report
+    )
     refusal = payout_to_the_desk_refusal(to_asset, payout_address, desk_account, owns)
     if refusal:
         raise ValueError(
