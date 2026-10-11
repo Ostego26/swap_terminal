@@ -69,7 +69,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
-from chains.xrp import XRPAdapter, untagged_payments  # noqa: E402
+from chains.xrp import XRPAdapter, XRPRPCError, untagged_payments  # noqa: E402
 from db import SCHEMA, connect_db  # noqa: E402
 
 from swap_terminal.services import deposit_service  # noqa: E402
@@ -328,7 +328,7 @@ def test_the_why_is_the_adapters_own_reason(db, adapter):
 
 # --- what must NOT become a row --------------------------------------------
 
-def test_a_failed_payment_with_no_tag_gets_no_row(db, adapter):
+def test_a_failed_payment_with_no_tag_gets_no_row(db, adapter, capsys):
     """A tec* code is INCLUDED in a ledger, claims a fee, and transfers NOTHING.
 
     So there is no money to be stranded. Recording one would put a number in the
@@ -348,6 +348,23 @@ def test_a_failed_payment_with_no_tag_gets_no_row(db, adapter):
     )
     assert deposit_service.record_what_nobody_can_claim(db, "XRP", instance) == 0
     assert rows_in(db) == []
+    # AND NO "NOT RECORDED" LINE EITHER, which is the half that catches the guard
+    # itself. MEASURED 2026-10-11: with the tesSUCCESS comparison removed, the row
+    # assertions above STILL PASS -- the tec* entry falls through to
+    # delivered_drops_to(), which refuses it, so it lands in the `unreadable` list
+    # rather than in the drops. Only this assertion fails. Without it this test was
+    # decoration for that line, and the mixed-list test at the bottom was the only
+    # thing catching it.
+    #
+    # The line would be true and still wrong: a tec* code is included in a ledger,
+    # claims a fee and transfers NOTHING, so "no unattributable_deposits row was
+    # written for it" sends an operator looking for coins that do not exist. The
+    # deferred line has already reported the failure.
+    printed = capsys.readouterr().out
+    assert "NOT RECORDED" not in printed, (
+        f"a failed payment moved no money, so there is no row to explain the absence of:"
+        f"\n{printed}"
+    )
 
 
 def test_a_payment_that_DID_carry_a_tag_gets_no_row(db, adapter):
@@ -444,16 +461,60 @@ def test_an_untagged_issued_currency_payment_gets_no_row_but_IS_announced(db, ad
 
 # --- lifetime of the state the recorder reads ------------------------------
 
-def test_the_list_is_cleared_per_call(adapter, monkeypatch):
+def test_a_failed_scan_leaves_no_stale_drops(adapter, monkeypatch):
+    """A scan that RAISES must leave the list empty, not holding the last scan's findings.
+
+    THIS IS THE TEST THE `self.unattributable_drops = []` LINE NEEDED, and the
+    first version of this file did not have it. The test below -- a second scan
+    that finds nothing -- passes WITHOUT that line, measured: deleting it ran 16
+    of 16 green, because the assignment at the end of a successful scan replaces
+    the list anyway. A test that passes both ways is decoration, so the line's
+    real property had to be found rather than asserted around.
+
+    The real property is the FAILURE path. The HTTP call and the response parse
+    both raise, the assignment is then never reached, and
+    services/deposit_service.scan_shared_accounts() catches per target and carries
+    on -- so a caller does read this attribute after a scan that died. Handing it
+    the previous scan's drops, with nothing saying they are old, is the same shape
+    as that function's refusal to record an empty result as "nothing arrived".
+
+    MUTATION: delete `self.unattributable_drops = []` and this fails with one
+    stale drop.
+    """
+    instance = adapter([payment(UNTAGGED_HASH)])
+    instance.find_deposits_to_address(ACCOUNT)
+    assert len(instance.unattributable_drops) == 1, "the first scan found it"
+
+    # A rippled ERROR REPLY, not a socket failure, and that is the more interesting
+    # one: rippled returns errors with HTTP 200 and result.status == "error", which
+    # XRPAdapter.call() checks for by hand. So this is a scan that reached the server,
+    # got a well-formed answer, and still established nothing about the account.
+    def errors(_url, **_kwargs):
+        return _Response({"result": {"status": "error", "error": "actNotFound",
+                                     "error_message": "seeded: account not found"}})
+
+    monkeypatch.setattr("chains.xrp.requests.post", errors)
+    with pytest.raises(XRPRPCError, match="actNotFound"):
+        instance.find_deposits_to_address(ACCOUNT)
+
+    assert instance.unattributable_drops == [], (
+        "a scan that could not read the account established nothing, and must not report "
+        "the previous scan's findings as this one's"
+    )
+
+
+def test_the_list_describes_the_LAST_scan_only(adapter, monkeypatch):
     """A watcher holds one adapter for its life and scans once per active swap.
 
     An accumulating list hands record_what_nobody_can_claim() a payment from an
     hour ago as though it had just been read, and -- worse -- keeps reporting it
     after an operator has resolved it and the money has been moved.
 
-    MUTATION: delete `self.unattributable_drops = []` from the top of
-    find_deposits_to_address and this fails with 1 drop on the second scan, where
-    the account now holds nothing untagged.
+    MUTATION: change the assignment in find_deposits_to_address to
+    `self.unattributable_drops += untagged_payments(...)[0]` and this fails with 1
+    drop on the second scan, where the account now holds nothing untagged. It does
+    NOT fail when the clear at the top of the function is deleted -- see
+    test_a_failed_scan_leaves_no_stale_drops, which is the one that does.
     """
     instance = adapter([payment(UNTAGGED_HASH)])
     instance.find_deposits_to_address(ACCOUNT)

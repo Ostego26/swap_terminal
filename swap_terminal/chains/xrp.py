@@ -217,15 +217,47 @@ from microfortnights import format_duration
 # a record of money" -- which is the kind of change a parallel copy here would not have
 # received. Rule 8: let the survivor own the concept.
 #
-# THE TYPE IS IN THE WRONG FILE AND THAT IS NAMED RATHER THAN GLOSSED (rule 17/19: say
-# what is outstanding, do not baseline it). It is chain-agnostic -- nothing in it is
-# Solana's except the field name `signature`, which on this ledger is a transaction
-# HASH -- so its home is a shared chains/ module that both adapters import, the way
-# chains/base.py is shared by the three UTXO adapters. Moving it is an edit to
-# chains/solana.py and to every one of its importers (two tests and
-# solana_chain_check.py name it directly), so it is named work rather than a change
-# smuggled into a defect fix. Until it moves, THIS import is the thing that keeps one
-# definition rather than two.
+# =============================================================================
+# THE COUPLING THIS IMPORT CREATES, AND THE DECISION NOT TO REMOVE IT YET
+# =============================================================================
+#
+# NAMED HERE SO THE NEXT READER FINDS A DECISION RATHER THAN REDISCOVERING A QUESTION.
+# This line makes the XRP adapter depend on the SOLANA adapter, which is a dependency
+# between two siblings that should not know about each other, and it is deliberate.
+#
+# AS OF 2026-10-11 THE TYPE BELONGS TO NEITHER CHAIN. It used to be Solana's alone:
+# chains/solana.py declared it, recorded drops on itself, and the only consumer was its
+# own diagnostic script. It is now the shared contract between any adapter and
+# services/deposit_service.record_what_nobody_can_claim(), which reads
+# `getattr(adapter, "unattributable_drops", None)` GENERICALLY -- by name, with hasattr
+# semantics, deliberately not by isinstance or a per-chain list, so that a new
+# tag-attributed adapter joins by growing the attribute. A type that two adapters
+# produce and one service consumes is not either adapter's.
+#
+# SO ITS HOME SHOULD BE A SMALL SHARED chains/ MODULE THAT NO CHAIN OWNS, and this tree
+# already has that pattern twice: chains/coin_amounts.py and chains/script_pub_key.py.
+# The second is the closer precedent -- it exists precisely because one fact (how each
+# daemon spells a decoded output's address) was being re-derived per chain, and it was
+# found wrong in a FOURTH place before it got a home. This is the same shape one step
+# earlier: get it a home before there is a third producer.
+#
+# NOT MOVED IN THIS CHANGE, AND THAT IS A CHOICE WITH A REASON RATHER THAN AN OMISSION.
+# The move is not a move: it is a new module, an edit to chains/solana.py (which must
+# re-export or import it so nothing else breaks), and an edit to every importer that
+# names it directly -- solana_chain_check.py plus tests/test_deposit_rate_limit.py,
+# tests/test_solana_chain_check_units.py and tests/test_unattributable_deposits.py. That
+# is a refactor across a fund-moving adapter, and smuggling it inside a defect fix would
+# mean the commit that closes a measured money hole also moves a type across five files
+# -- so a bisect could not tell which half broke anything. It is named work, not a
+# baseline (rule 19).
+#
+# A SECOND NamedTuple WITH THE SAME FIELDS HERE WAS THE OTHER OPTION AND IS WORSE than
+# the coupling, which is the trade this comment exists to record. Rule 8: the copies
+# agree the day they are written and drift from then on, and the drift here lands on the
+# field that says HOW MUCH MONEY IS STRANDED -- UnattributableCredit's own docstring
+# records the version of ITSELF that carried only a count and no amount. A parallel copy
+# in this file would not have received that fix. One definition and an ugly import beats
+# two definitions and a clean one.
 from .solana import UnattributableCredit
 from .xrp_address import describe_address, is_valid_classic_address, looks_like_x_address
 
@@ -236,17 +268,40 @@ from .xrp_address import describe_address, is_valid_classic_address, looks_like_
 # correct home is that file. See that function's docstring for why calling the same
 # public entry point per entry is cheaper to be right about than reading the fields.
 #
-# `_unwrap` IS THE ONE PRIVATE NAME AND IT IS A FIELD LOOKUP, NOT A DECISION.
+# =============================================================================
+# `_unwrap` IS IMPORTED ACROSS A MODULE BOUNDARY BY ITS PRIVATE NAME, AND THAT
+# UNDERSCORE NOW TELLS A READER THE OPPOSITE OF THE TRUTH
+# =============================================================================
+#
+# Said plainly rather than left for someone to notice. A leading underscore means "this
+# module may change this freely"; two modules using it means it cannot be changed freely.
+# One of those two statements is false, and it is the underscore.
+#
+# THE REMEDY IS IN THAT FILE AND IS NAMED WORK, NOT A BASELINE (rule 19). Either
+# `_unwrap` loses its underscore -- it is already the measured answer to a question two
+# callers have -- or chains/xrp_payments.py grows a public `transaction_body(entry)` that
+# returns the same pair, with `_unwrap` becoming its one-line caller. Either settles it;
+# both are edits to that module and belong with its own tests rather than inside this
+# one. Until then THIS COMMENT is the interface declaration the underscore contradicts.
+#
+# WHAT IT IS USED FOR, AND IT IS A FIELD LOOKUP RATHER THAN A DECISION.
 # untagged_payments() needs two values no public function there returns -- the
 # transaction HASH, which becomes the row's identifier, and the TransactionResult, which
 # says which of the classifier's two ordered refusals fired. Both live under a nesting
 # that was MEASURED on rippled 3.4.1 (`account_tx` nests the body under `tx`, `ledger`
 # with expand=true puts it flat beside `metaData`, and the v2 API calls it `tx_json`) and
 # that was MISCHARACTERIZED once already in this tree, which `_unwrap`'s own docstring
-# records against itself. A local copy of that nesting would be a second place to get it
-# wrong, on the value that becomes a money row's primary key; importing the measured
-# reader is strictly safer. It also cannot raise where it is called, because every entry
-# has already been unwrapped once by the whole-list scan.
+# records against itself.
+#
+# THE ALTERNATIVE WAS A LOCAL COPY OF THAT NESTING AND IT IS WORSE, which is the trade
+# being made: a second place to get a measured wire shape wrong, on the value that
+# becomes a money row's primary key, against one honest line of coupling. The copy would
+# also lose `_unwrap`'s RAISE on a shape it does not recognize, which is the behavior
+# that turns an unreadable response into a visible error instead of {} -- and {} reads to
+# a caller as "not a Payment", indistinguishable from a real answer.
+#
+# IT CANNOT RAISE WHERE IT IS CALLED, because every entry reaching it has already been
+# unwrapped once, without raising, by the whole-list scan above it.
 #
 # FIELD_HASH, FIELD_TRANSACTION_RESULT AND SUCCESS_RESULT ARE PUBLIC and are imported for
 # the same reason: so the field names and the one success code live in the module that
@@ -497,6 +552,36 @@ def untagged_payments(
       delivering an ISSUED         whole units of XRP, and a stranger's IOU recorded there
       CURRENCY, or with no         would be a number under the wrong label. There is no
       delivered_amount at all      XRP figure to record, so none is invented (rule 17).
+
+    AND chains/solana.py DECIDED THE WRONG-ASSET CASE THE OTHER WAY ON THE SAME DAY, so
+    the difference is named at this site per rule 8. On 2026-10-11 that adapter stopped
+    letting SOL_SPL_MINT select its DEPOSIT reader -- a SOL deposit is native SOL -- and
+    a configured SPL token arriving instead now gets an UnattributableCredit ROW, with
+    `amount` at the MINT's decimals and a `why` that says in so many words that it is not
+    a SOL deposit. Two tag-attributed chains, one question, two answers, and these are
+    the reasons rather than an oversight:
+
+      what can be read   that adapter already has a measured token reader
+                         (`_spl_credits`, proven against a real devnet response) that
+                         returns a quantity. Here, `meta.delivered_amount` for an IOU is
+                         an OBJECT -- {currency, issuer, value} -- and
+                         chains/xrp_payments.py REFUSES to put a number on it rather than
+                         parsing `value`. Recording one would mean this file growing a
+                         second reader of the field whose single owner is the whole point
+                         of that module's header. That is a bigger rule 8 cost than the
+                         gap it closes.
+      what the number    an SPL mint is a token this terminal is CONFIGURED for, so the
+      would mean         row names a known asset and a known decimals. An XRP IOU is
+                         minted by whoever sent it, in a currency code they chose, and
+                         `SELECT SUM(amount) WHERE asset = 'XRP'` would add it to an XRP
+                         total.
+
+    SO THE REMEDY IS NAMED, NOT BASELINED (rule 19): chains/xrp_payments.py gaining a
+    PUBLIC reader for the issued-currency shape -- currency, issuer and value, returned
+    as what they are rather than as an amount -- after which this case can be recorded
+    with the issuer in `why` and the two chains agree. That is an edit to that module and
+    belongs with its own tests. Until then the console line is the only report, and that
+    is strictly better than the nothing it replaced but it is not the table.
 
     NEITHER OF THOSE IS SILENT, and that is the whole point of returning two lists. A
     bare `except XRPPaymentError: continue` here would be rule 12's forbidden shape -- a
@@ -1145,20 +1230,38 @@ class XRPAdapter:
         of what happened before it did: an untagged payment reached no table in
         swap_terminal.db at all, and the only trace was the print below.
         """
-        # CLEARED BEFORE THE CALL, not after it, and that is the direction that matters.
+        # CLEARED BEFORE THE CALL, NOT AFTER IT, AND THE ONLY THING THAT LINE BUYS IS THE
+        # FAILURE CASE. Worth spelling out, because the obvious reading of it is wrong.
         #
         # The list has to describe THIS scan: a watcher holds one adapter for its whole
-        # life and calls this once per active swap per cycle, so an accumulating list
+        # life and calls this once per active swap per cycle, so a list that accumulated
         # would hand record_what_nobody_can_claim() a payment from an hour ago as though
         # it had just been read. chains/solana.py clears at the same point and for the
-        # same reason; the two adapters answer the same contract and must not differ on
+        # same reason, and the two adapters answer one contract and must not differ about
         # the lifetime of the state that contract reads.
         #
-        # CLEARED FIRST SO A RAISE LEAVES IT EMPTY RATHER THAN STALE. Everything below
-        # can raise -- the HTTP call, and the scan on an unrecognized response shape --
-        # and a caller that then reads this attribute must not be handed the PREVIOUS
-        # scan's findings under the impression they are this one's. Empty is the honest
-        # answer after a failed scan: nothing was established.
+        # BUT ACCUMULATION IS NOT WHAT THIS LINE PREVENTS. The assignment further down
+        # REPLACES the list on every scan that completes, so a successful scan is already
+        # exact without it -- MEASURED 2026-10-11 by deleting this line and running
+        # tests/test_xrp_unattributable_deposits.py, which passed 16 of 16. That is a test
+        # passing both ways, which CLAUDE.md calls decoration, and the fix was to find what
+        # the line actually does rather than to delete it or to keep a green test.
+        #
+        # WHAT IT ACTUALLY DOES: A SCAN THAT RAISES LEAVES THE LIST EMPTY RATHER THAN
+        # STALE. Everything below this line can raise -- the HTTP call on a dead endpoint,
+        # and the scan itself on a response shape chains/xrp_payments.py does not
+        # recognize -- and the assignment is then never reached. Without the clear, a
+        # caller reading this attribute after a failed scan gets the PREVIOUS scan's
+        # findings with nothing saying they are old; and that caller exists:
+        # services/deposit_service.scan_shared_accounts() catches the exception per target
+        # and carries on with the rest of the cycle. Empty is the honest answer after a
+        # failed scan -- nothing was established -- and it is the same direction that
+        # function's own comment argues for when it refuses to record an empty scan
+        # result as "this account received nothing".
+        #
+        # tests/test_xrp_unattributable_deposits.py::test_a_failed_scan_leaves_no_stale_drops
+        # is the test that fails when this line goes.
+        self.unattributable_drops = []
         result = self.call(
             _METHOD_ACCOUNT_TX,
             {"account": address, "ledger_index_min": -1, "ledger_index_max": -1, "binary": False},
