@@ -78,7 +78,7 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _load_entrypoint():
+def load_entrypoint():
     """Import docker/web_workers_entrypoint.py as a module.
 
     BY PATH, because docker/ is not a package and has no __init__.py -- it holds
@@ -89,6 +89,15 @@ def _load_entrypoint():
     TEXT. They are asserting on what it says; this is asserting on what it does, and
     the ordering assertion below cannot be made from source text without becoming the
     thing CLAUDE.md's "verify by behavior, never by reading the code" forbids.
+
+    PUBLIC (no leading underscore) AND IMPORTED BY tests/test_container_stop_fits_its_
+    grace_period.py, which loads the same module to MEASURE its stop. It was renamed
+    rather than copied there: two loaders-by-path for one file would agree today and
+    drift the first time the import needs anything (an env var set before exec, a
+    sys.modules name change), and the copy is the one that would not get the fix.
+    The CALLER sets any environment the module reads at import -- RUN_DIR and both
+    grace constants are module-level in it -- because this function deliberately
+    does not, so a test can choose them.
     """
     path = REPOSITORY_ROOT / "docker" / "web_workers_entrypoint.py"
     spec = importlib.util.spec_from_file_location("web_workers_entrypoint_under_test", path)
@@ -249,7 +258,7 @@ def test_the_container_creates_the_database_before_it_starts_a_single_worker(tmp
     instead of spawning a server. What is asserted is the recorded observation, not
     the order of two lines in a file.
     """
-    entrypoint = _load_entrypoint()
+    entrypoint = load_entrypoint()
     path = tmp_path / "data" / "swap_terminal.db"
     path.parent.mkdir()
 
@@ -304,7 +313,7 @@ def test_the_container_says_already_present_on_a_restart(tmp_path, capsys, monke
     now on line one of the container log instead of invisible for an hour. So the
     restart case has to be visibly different, or the signal is worthless.
     """
-    entrypoint = _load_entrypoint()
+    entrypoint = load_entrypoint()
     path = tmp_path / "data" / "swap_terminal.db"
     path.parent.mkdir()
     db.init_db(path)

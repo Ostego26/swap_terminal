@@ -868,6 +868,171 @@ def status_log_lines(run_dir: Path, name: str, state: str) -> list[str]:
     ]
 
 
+def _stop_candidate(name: str, run_dir: Path) -> dict:
+    """Classify one worker BEFORE anything is signaled.
+
+    Returns either a TERMINAL result -- `outcome` already "not-running" or
+    "stale-pidfile", nothing signaled, pid file removed -- or a candidate whose
+    `outcome` is the sentinel "signal", carrying the pid to signal and the path to
+    unlink once its absence is proven. The sentinel never escapes
+    stop_workers_together(), which rewrites it to "stopped" or "failed".
+
+    IT IS ITS OWN FUNCTION because it is the decision (rule 10) and the group stop
+    below must take it for EVERY worker before it signals ANY of them. Inline in the
+    old per-worker body it could only be reached one worker at a time, and that is
+    precisely what made the stop serial -- see stop_workers_together()'s measurement.
+
+    The guard that matters most is `stale-pidfile`: the pid exists but is no longer
+    the process we started, so signaling it would be the damage rather than the stop.
+    """
+    path = pid_file(run_dir, name)
+    record = read_pid_record(path)
+    if record is None:
+        return {"worker": name, "outcome": "not-running", "pid": None, "signals": []}
+
+    pid, command = record
+    if not process_alive(pid):
+        path.unlink(missing_ok=True)
+        return {"worker": name, "outcome": "not-running", "pid": pid, "signals": [],
+                "note": "pid file was stale"}
+
+    if not pid_is_still_ours(pid, command):
+        path.unlink(missing_ok=True)
+        return {"worker": name, "outcome": "stale-pidfile", "pid": pid, "signals": [],
+                "note": "pid belongs to another process now"}
+
+    return {"worker": name, "outcome": "signal", "pid": pid, "signals": [], "path": path}
+
+
+def _signal_candidate(candidate: dict, sig: int, started: float) -> bool:
+    """Send one signal to one candidate. False means it was ALREADY GONE, which is a win.
+
+    os.kill() raises ProcessLookupError when the pid exited between
+    _stop_candidate() reading the pid file and this call. THAT WINDOW IS WIDER NOW
+    THAN IT WAS: the serial stop read a pid file and signaled it microseconds later,
+    where this one classifies every worker first, so the window is however long the
+    other classifications took. Treating the lookup failure as absence is correct --
+    absence is the thing the caller asked to have proven -- and treating it as an
+    error would report `failed` for a worker that did exactly what was wanted.
+    """
+    try:
+        os.kill(candidate["pid"], sig)
+    except ProcessLookupError:
+        candidate["seconds"] = time.monotonic() - started
+        return False
+    candidate["signals"].append("SIGTERM" if sig == signal.SIGTERM else "SIGKILL")
+    return True
+
+
+def _wait_for_all_absent(candidates: list[dict], timeout_seconds: float, started: float) -> list[dict]:
+    """Poll until every candidate's pid is gone, against ONE shared deadline.
+
+    Returns the candidates still alive when the deadline passed. Each one observed
+    absent gets `seconds` stamped at the moment it was seen gone, so the per-worker
+    figure command_stop() prints survives the move to a shared deadline -- it is now
+    "how long into the stop this worker went", which is what it always read as.
+
+    ONE DEADLINE FOR ALL OF THEM is the entire fix. This REPLACED a single-pid
+    _wait_for_absence(), which was deleted in the same commit rather than left beside
+    this (rule 9): once stop_worker() delegated to the group path, the only thing
+    naming it was a comment, and a dead helper next to its live replacement is what
+    the next person copies from.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    pending = list(candidates)
+    while pending:
+        still = []
+        for candidate in pending:
+            _reap_if_ours(candidate["pid"])
+            if process_alive(candidate["pid"]):
+                still.append(candidate)
+            else:
+                candidate["seconds"] = time.monotonic() - started
+        pending = still
+        # Checked at least once, and once more after the deadline passes. The
+        # deleted single-pid version got that second look from a trailing re-check
+        # after its loop; here the `or` does it, so a timeout of 0 still asks the
+        # operating system once rather than reporting "still alive" without looking.
+        if not pending or time.monotonic() >= deadline:
+            break
+        time.sleep(REAP_POLL_SECONDS)
+    return pending
+
+
+def stop_workers_together(names: list[str], run_dir: Path,
+                          grace_seconds: float = DEFAULT_GRACE_SECONDS) -> list[dict]:
+    """Stop every named worker and PROVE each is gone. The grace is spent ONCE, not per worker.
+
+    Results come back in `names` order, each dict exactly the shape stop_worker()
+    has always returned -- see its docstring for what every `outcome` means.
+
+    WHY THIS EXISTS, AND IT IS A MEASUREMENT RATHER THAN A PREFERENCE. Until
+    2026-10-11 the three callers that stop more than one worker each ran their own
+    serial loop over stop_worker():
+
+        supervisor.command_stop()                   the operator's `stop`
+        services/kill_switch.stop_everything()      /admin's kill switch
+        docker/web_workers_entrypoint.stop_workers() the container's SIGTERM path
+
+    stop_worker() spends up to `grace_seconds` waiting for absence after SIGTERM and
+    up to `grace_seconds` again after SIGKILL, so a serial loop's budget is the
+    number of workers times that. Measured on 2026-10-11 against three real
+    processes that had installed SIG_IGN for SIGTERM and confirmed it by touching a
+    file before any signal was sent -- the confirmation matters, because the FIRST
+    attempt at this measurement signaled a worker during interpreter startup, before
+    its SIG_IGN was installed, killed it with the default disposition, and reported
+    a worker "stopped" by SIGTERM alone in 0.05s. That number was an artifact of the
+    fixture, not a finding (rule 17), and the corrected run says:
+
+        grace=2s   three workers   6.22s total   3.11x one worker's grace
+
+    AND AT THE SHIPPED DEFAULT OF 15s THAT IS 47s FOR THE WORKERS ALONE, against a
+    docker-compose.web.yml `stop_grace_period` of 45s, with gunicorn's own 20s still
+    to come. So `docker compose down` on a container whose workers do not exit
+    promptly was SIGKILLed by the runtime MID-PROOF, and the container then exited
+    reporting success having proven nothing -- which is exactly the failure the 45s
+    was chosen to prevent. The comment choosing it did the arithmetic as "15 plus
+    20", reading the 15 as the total for all three rather than per worker; that
+    comment is corrected in the same commit as this function (rule 16: a wrong
+    comment is a bug).
+
+    WHAT IT COSTS, SAID PLAINLY: the workers are signaled in a batch, so they are no
+    longer stopped in a defined order. Nothing in this tree depends on that order --
+    the three workers hold no lock between them, and each takes the database's one
+    writer lock for the length of a statement. If a future worker ever does need to
+    go before another, it needs its own call, not a reordering of this list.
+
+    WHAT IT DOES NOT CHANGE: the absence is still the assertion (rule 13), still
+    polled from /proc, and still never the exit code of a kill. A worker alive after
+    SIGTERM, the grace, SIGKILL and the grace again is still `failed` and its pid
+    file is still left in place, because a pid file removed for a process that is
+    still running is a stop that lies.
+    """
+    candidates = [_stop_candidate(name, run_dir) for name in names]
+    signalling = [c for c in candidates if c["outcome"] == "signal"]
+    started = time.monotonic()
+
+    alive = [c for c in signalling if _signal_candidate(c, signal.SIGTERM, started)]
+    survivors = _wait_for_all_absent(alive, grace_seconds, started)
+    if survivors:
+        # SIGKILL cannot be caught, so anything surviving THIS window is either a
+        # zombie we cannot reap (not our child any more) or uninterruptible in the
+        # kernel. Either way we must not claim it stopped.
+        alive = [c for c in survivors if _signal_candidate(c, signal.SIGKILL, started)]
+        survivors = _wait_for_all_absent(alive, grace_seconds, started)
+
+    still_alive = {id(c) for c in survivors}
+    for candidate in signalling:
+        path = candidate.pop("path")
+        candidate.setdefault("seconds", time.monotonic() - started)
+        if id(candidate) in still_alive:
+            candidate["outcome"] = "failed"
+        else:
+            candidate["outcome"] = "stopped"
+            path.unlink(missing_ok=True)
+    return candidates
+
+
 def stop_worker(name: str, run_dir: Path, grace_seconds: float = DEFAULT_GRACE_SECONDS) -> dict:
     """Stop one worker and PROVE it is gone.
 
@@ -884,58 +1049,15 @@ def stop_worker(name: str, run_dir: Path, grace_seconds: float = DEFAULT_GRACE_S
       failed          still alive after SIGTERM, the grace period and SIGKILL.
                       The caller must treat this as an error, because the thing
                       the operator asked for did not happen.
+
+    ONE WORKER IS THE DEGENERATE CASE of stop_workers_together(), and this delegates
+    to it rather than keeping a second copy of the signal-and-prove sequence (rule
+    8). Two copies would agree on the day they were written: the group version is
+    the one that gets the next fix, and a caller stopping one worker must not be the
+    caller that misses it. Every behavior documented above is unchanged -- there are
+    20-odd call sites and tests/test_supervisor.py asserts on each outcome string.
     """
-    path = pid_file(run_dir, name)
-    record = read_pid_record(path)
-    if record is None:
-        return {"worker": name, "outcome": "not-running", "pid": None, "signals": []}
-
-    pid, command = record
-    if not process_alive(pid):
-        path.unlink(missing_ok=True)
-        return {"worker": name, "outcome": "not-running", "pid": pid, "signals": [], "note": "pid file was stale"}
-
-    if not pid_is_still_ours(pid, command):
-        path.unlink(missing_ok=True)
-        return {"worker": name, "outcome": "stale-pidfile", "pid": pid, "signals": [], "note": "pid belongs to another process now"}
-
-    signals_sent = []
-    started = time.monotonic()
-
-    os.kill(pid, signal.SIGTERM)
-    signals_sent.append("SIGTERM")
-    if _wait_for_absence(pid, grace_seconds):
-        path.unlink(missing_ok=True)
-        return {
-            "worker": name,
-            "outcome": "stopped",
-            "pid": pid,
-            "signals": signals_sent,
-            "seconds": time.monotonic() - started,
-        }
-
-    os.kill(pid, signal.SIGKILL)
-    signals_sent.append("SIGKILL")
-    # SIGKILL cannot be caught, so a process that survives this window is
-    # either a zombie we cannot reap (not our child any more) or uninterruptible
-    # in the kernel. Either way we must not claim it stopped.
-    if _wait_for_absence(pid, grace_seconds):
-        path.unlink(missing_ok=True)
-        return {
-            "worker": name,
-            "outcome": "stopped",
-            "pid": pid,
-            "signals": signals_sent,
-            "seconds": time.monotonic() - started,
-        }
-
-    return {
-        "worker": name,
-        "outcome": "failed",
-        "pid": pid,
-        "signals": signals_sent,
-        "seconds": time.monotonic() - started,
-    }
+    return stop_workers_together([name], run_dir, grace_seconds)[0]
 
 
 def _reap_if_ours(pid: int) -> None:
@@ -950,18 +1072,6 @@ def _reap_if_ours(pid: int) -> None:
     """
     with contextlib.suppress(ChildProcessError, OSError):
         os.waitpid(pid, os.WNOHANG)
-
-
-def _wait_for_absence(pid: int, timeout_seconds: float) -> bool:
-    """Poll until the pid is gone. True means gone, False means still there."""
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        _reap_if_ours(pid)
-        if not process_alive(pid):
-            return True
-        time.sleep(REAP_POLL_SECONDS)
-    _reap_if_ours(pid)
-    return not process_alive(pid)
 
 
 # ---------------------------------------------------------------------------
@@ -1675,7 +1785,11 @@ def command_stop(names: list[str], run_dir: Path, grace_seconds: float) -> int:
     print(f"  run directory     {run_dir}")
     print(f"  grace             {format_duration(grace_seconds)} on SIGTERM before SIGKILL")
 
-    results = [stop_worker(name, run_dir, grace_seconds) for name in names]
+    # ONE call, not a comprehension over stop_worker(): the grace is spent once for
+    # the whole set rather than once per worker. At the shipped 15s that is the
+    # difference between a 15s worst case and a 47s one -- measured, see
+    # stop_workers_together().
+    results = stop_workers_together(names, run_dir, grace_seconds)
     lines = []
     for result in results:
         signals = "+".join(result["signals"]) or "none"

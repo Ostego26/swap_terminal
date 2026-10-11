@@ -24,7 +24,7 @@ the kill." A test that asserted `"STOPPED" in result["headline"]` would pass
 against a stop that reports success and signals nothing, which is exactly the
 mutation this file is built to kill:
 
-  MUTATION 1  stop_everything() believes stop_worker()'s outcome string instead
+  MUTATION 1  stop_everything() believes stop_workers_together()'s outcome string instead
               of asking the OS again
               -> killed by test_a_stop_that_reports_stopped_over_a_live_process_is_not_proven,
                  which hands it a result dict saying "stopped" about a process
@@ -423,10 +423,10 @@ def test_a_real_stop_proves_absence_by_asking_the_os_again(tmp_path):
 def test_a_stop_that_reports_stopped_over_a_live_process_is_not_proven(tmp_path, monkeypatch):
     """MUTATION 1, AND IT IS THE ONE THIS WHOLE FILE EXISTS FOR.
 
-    If stop_everything() trusted stop_worker()'s outcome string, a stop that
+    If stop_everything() trusted the supervisor's outcome string, a stop that
     signaled nothing -- or signaled and failed -- would report STOPPED, and a
     test asserting on the headline would pass. So: a real live process, and a
-    stop_worker() that lies about it exactly the way a broken reaper would.
+    a supervisor that lies about it exactly the way a broken reaper would.
 
     The verdict must be NOT PROVEN, because absence was asked of the OS and the
     answer was no. If this test ever passes with `verdict == stopped-and-proven`,
@@ -438,16 +438,21 @@ def test_a_stop_that_reports_stopped_over_a_live_process_is_not_proven(tmp_path,
     try:
         assert supervisor.process_alive(child.pid), "setup: the bystander must be alive"
 
+        # THE SEAM IS stop_workers_together(), NOT stop_worker(). It moved on
+        # 2026-10-11 when the serial per-worker loop became one group call -- see
+        # supervisor.stop_workers_together() for the measurement that forced it.
+        # What this test is about has not changed at all: a supervisor that LIES
+        # about an outcome must not get that lie through stop_everything().
         monkeypatch.setattr(
             supervisor,
-            "stop_worker",
-            lambda name, run_dir, grace: {
+            "stop_workers_together",
+            lambda names, run_dir, grace: [{
                 "worker": name,
                 "outcome": "stopped",
                 "pid": child.pid,
                 "signals": ["SIGTERM"],
                 "seconds": 0.01,
-            },
+            } for name in names],
         )
         result = kill_switch.stop_everything(["sleeper"], tmp_path, grace_seconds=1.0)
 
@@ -496,16 +501,18 @@ def test_a_stale_pid_file_is_not_reported_as_a_failed_kill(tmp_path, monkeypatch
     token = f"killsw-stale-{os.getpid()}"
     child = subprocess.Popen(_sleeper(token)["sleeper"])  # sys.executable plus this file's own literal source
     try:
+        # stop_workers_together(), for the reason spelled out at the other patch
+        # of it in this file.
         monkeypatch.setattr(
             supervisor,
-            "stop_worker",
-            lambda name, run_dir, grace: {
+            "stop_workers_together",
+            lambda names, run_dir, grace: [{
                 "worker": name,
                 "outcome": "stale-pidfile",
                 "pid": child.pid,
                 "signals": [],
                 "note": "pid belongs to another process now",
-            },
+            } for name in names],
         )
         result = kill_switch.stop_everything(["sleeper"], tmp_path, grace_seconds=1.0)
 

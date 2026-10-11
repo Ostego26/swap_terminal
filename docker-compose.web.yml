@@ -454,9 +454,34 @@ services:
     # payouts comes up without anyone asking. Left as the operator's (rule 16).
     restart: on-failure:5
 
-    # 45s, which must EXCEED ST_WORKER_GRACE_SECONDS (15) plus the gunicorn grace
-    # (20) with room to spare. The entrypoint stops the three workers FIRST and
-    # proves their absence through /proc before gunicorn is asked to go; a grace
-    # period shorter than that sequence SIGKILLs the entrypoint mid-proof, and the
-    # container then exits reporting success having proven nothing.
+    # 45s. The entrypoint stops the three workers FIRST and proves their absence
+    # through /proc before gunicorn is asked to go; a grace period shorter than that
+    # sequence SIGKILLs the entrypoint mid-proof, and the container then exits
+    # reporting success having proven nothing.
+    #
+    # THIS COMMENT GOT ITS OWN ARITHMETIC WRONG FROM THE DAY IT WAS WRITTEN UNTIL
+    # 2026-10-11, and the number it was defending was too small the whole time. It
+    # said 45s "must EXCEED ST_WORKER_GRACE_SECONDS (15) plus the gunicorn grace
+    # (20)", reading the 15 as the budget for all three workers. It is 15 PER
+    # WORKER: supervisor.stop_worker() polls for absence after SIGTERM and again
+    # after SIGKILL, and docker/web_workers_entrypoint.py ran it in a loop. Measured
+    # against three processes holding SIG_IGN for SIGTERM -- 6.22s at a 2s grace,
+    # 3.11x one worker's grace -- the real worst case was 47s for the workers alone
+    # and ~67s with gunicorn, against this 45s. So `docker compose down` on a
+    # container whose workers do not exit promptly was killed mid-proof: the precise
+    # failure the paragraph above describes, sitting under a number chosen to
+    # prevent it.
+    #
+    # WHAT CHANGED IS THE CODE, NOT THIS NUMBER (rule 19 -- raising the ceiling
+    # stops the symptom, not the cause). supervisor.stop_workers_together() signals
+    # every worker and then proves absence against ONE shared deadline, measured at
+    # 1.05x, so the worst case is ~16s for the workers and ~36s with gunicorn, which
+    # fits here with room to spare. In the ordinary case, where the workers honor
+    # SIGTERM, a `down` now returns in well under a second instead of up to 47s.
+    #
+    # AND IT IS NO LONGER A COMMENT THAT HAS TO BE RIGHT.
+    # tests/test_container_stop_fits_its_grace_period.py measures the multiplier,
+    # reads both grace constants from the entrypoint module and this duration from
+    # THIS LINE, and fails with the arithmetic spelled out if the three stop fitting
+    # together. A fourth worker, a raised grace or a lowered period all trip it.
     stop_grace_period: 45s

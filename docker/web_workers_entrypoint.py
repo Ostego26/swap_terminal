@@ -30,7 +30,7 @@ processes were killed without ever being asked to stop, one of them mid-send.
 
 So the order is explicit and the proof is the existing one:
 
-    SIGTERM -> supervisor.stop_worker() for each worker, which reads the pid file,
+    SIGTERM -> supervisor.stop_workers_together() for all three, which reads each pid file,
                signals, and POLLS FOR ABSENCE -> then gunicorn is asked to stop ->
                then this process exits with what the stop actually established.
 
@@ -86,7 +86,8 @@ from config import Config  # noqa: E402
 #: having one.
 RUN_DIR = Path(os.getenv("ST_WORKER_RUN_DIR", str(BASE_DIR / "swap_terminal" / "runtime")))
 
-#: How long each worker gets to exit before supervisor.stop_worker() escalates.
+#: How long the workers get to exit before the supervisor escalates to SIGKILL. Spent
+#: ONCE for the whole set, not once per worker -- see stop_workers() below.
 #: Must be comfortably INSIDE the compose `stop_grace_period`, or the runtime
 #: SIGKILLs this process mid-stop and the proof is lost -- which would be a stop
 #: that cannot prove it worked, arrived at by a timeout rather than a bug.
@@ -172,14 +173,28 @@ def stop_workers() -> bool:
     """Stop all three and return whether every one was PROVEN gone.
 
     The return value is the absence, not the exit code of a kill -- rule 13's
-    "make the absence the assertion". supervisor.stop_worker() polls /proc; this
-    only reports what it established.
+    "make the absence the assertion". supervisor.stop_workers_together() polls /proc;
+    this only reports what it established.
+
+    ONE CALL FOR ALL THREE, AND THAT IS THE WHOLE OF A FIX measured on 2026-10-11.
+    This was a `for name in worker_commands(): stop_worker(name)` loop, and
+    stop_worker() spends up to WORKER_GRACE_SECONDS proving absence after SIGTERM and
+    again after SIGKILL -- so three workers that do not exit promptly cost three
+    times the grace. Measured against three processes holding SIG_IGN for SIGTERM:
+    6.22s at grace=2s, 3.11x one worker's grace, WHICH AT THE SHIPPED 15s IS 47s FOR
+    THE WORKERS ALONE. compose's stop_grace_period is 45s and gunicorn's own 20s
+    comes after, so `docker compose down` was SIGKILLed mid-proof and this container
+    exited reporting success having proven nothing. The group call spends the grace
+    once: 15s worst case, and in the ordinary case where the workers honor SIGTERM,
+    well under a second.
     """
     all_gone = True
-    for name in supervisor.worker_commands():
-        result = supervisor.stop_worker(name, RUN_DIR, grace_seconds=WORKER_GRACE_SECONDS)
+    results = supervisor.stop_workers_together(
+        list(supervisor.worker_commands()), RUN_DIR, grace_seconds=WORKER_GRACE_SECONDS,
+    )
+    for result in results:
         outcome = result.get("outcome", "unknown")
-        announce([f"  stop {name:18} {outcome}"])
+        announce([f"  stop {result['worker']:18} {outcome}"])
         if outcome not in ("stopped", "not-running", "stale-pidfile"):
             all_gone = False
     # THE ORPHAN SCAN, AND ITS OUTPUT COMES FROM supervisor.unaccounted_lines().

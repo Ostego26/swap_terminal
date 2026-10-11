@@ -37,7 +37,7 @@ Every spawn site in this repository, grepped 2026-10-02 for `Popen`, `os.fork`,
   REACHABLE FROM HERE -- the three supervised workers
     workers/deposit_watcher.py    spawned by supervisor.start_worker(), pid file
     workers/payout_worker.py      in the run directory, reaped by
-    workers/reconcile_worker.py   supervisor.stop_worker(). These are the
+    workers/reconcile_worker.py   supervisor.stop_workers_together(). These are the
                                   "agents, workers, daemons" of the request:
                                   they are the only processes in this repository
                                   that poll on a loop and act on a database
@@ -1207,7 +1207,7 @@ def stop_everything(
 
     So three separate facts go into the verdict, and all three can refuse it:
 
-      per-worker absence   asked of the operating system AFTER stop_worker()
+      per-worker absence   asked of the operating system AFTER the group stop
           returned, not taken from its return value. The field is `gone`, and it
           is a fresh os.kill(pid, 0) rather than a restatement of the outcome
           string.
@@ -1230,10 +1230,16 @@ def stop_everything(
     names = list(supervisor.worker_commands()) if names is None else names
 
     rows = []
-    for name in names:
-        result = supervisor.stop_worker(name, run_dir, grace_seconds)
+    # ONE CALL, NOT A LOOP OVER stop_worker(). Measured 2026-10-11: a serial loop
+    # spends the grace once PER WORKER, so three workers that ignore SIGTERM cost
+    # 3.11x one worker's grace -- 47s at the shipped 15s. /admin's kill switch is
+    # served by a request, so that was 47 seconds of a held HTTP request before the
+    # page could say anything. supervisor.stop_workers_together() signals all three
+    # and then proves absence against one shared deadline.
+    results = supervisor.stop_workers_together(names, run_dir, grace_seconds)
+    for name, result in zip(names, results, strict=True):
         pid = result.get("pid")
-        # THE ABSENCE IS ASKED AGAIN, HERE, OF THE OS. stop_worker() already polls
+        # THE ABSENCE IS ASKED AGAIN, HERE, OF THE OS. The group stop already polls
         # for it and only returns "stopped" when the process is gone -- this is not
         # distrust of that function, it is the difference between a report that
         # repeats a claim and a report that makes one. The page says "pid 1234 is
