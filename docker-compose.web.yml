@@ -155,6 +155,48 @@ services:
     # An unreachable chain is not an error here and must not become one: config.py
     # builds no adapter for an unconfigured chain and the UI lists the pair as
     # unavailable, which is the correct failure for a missing endpoint.
+    #
+    # ===================================================================
+    # extra_hosts IS NECESSARY AND NOT SUFFICIENT, measured 2026-10-11.
+    # ===================================================================
+    #
+    # Two more things have to be true on the HOST, and neither is visible from in
+    # here. Both cost an afternoon, and the symptom of each is the same: every RPC
+    # call ends in ConnectTimeout, which the terminal now records in
+    # chain_reachability and refuses the pair on.
+    #
+    # 1. THE HOST FIREWALL MUST ALLOW THE DOCKER BRIDGE. On Ubuntu, ufw's default
+    #    INPUT policy DROPS traffic arriving from docker0, so the SYN never reaches
+    #    the host's TCP stack. `sudo ufw allow in on docker0` is the fix; `sudo ufw
+    #    status` is how to see it.
+    #
+    #    THE SYMPTOM THAT IDENTIFIES IT, and it is worth knowing because it is
+    #    counter-intuitive: a connect that TIMES OUT rather than being REFUSED. A
+    #    port nothing is listening on answers with RST, so a refusal is instant --
+    #    measured 0.000s on a closed loopback port, against 3.003s on one whose
+    #    SYNs are discarded. So a TIMEOUT means a filter and a REFUSAL means a bind,
+    #    and they send you to different files.
+    #
+    #    This is what hid the second item below: litecoind was bound to loopback
+    #    only, which should have produced an instant refusal from the gateway
+    #    address, and the firewall turned it into a timeout that looked identical to
+    #    the Gridcoin one -- whose daemon WAS listening on every interface.
+    #
+    # 2. EACH DAEMON MUST BIND SOMETHING THE CONTAINER CAN REACH. Measured with
+    #    `ss -ltn` on the host:
+    #
+    #        LISTEN 127.0.0.1:19332  [::1]:19332     litecoind -- LOOPBACK ONLY
+    #        LISTEN          *:25715                 gridcoinresearchd -- all
+    #
+    #    A loopback-only daemon is unreachable from a container however the network
+    #    is configured, because 127.0.0.1 inside the container is the container.
+    #    `rpcbind=0.0.0.0` plus `rpcallowip=172.16.0.0/12` in the daemon's conf, then
+    #    a restart. rpcbind WITHOUT rpcallowip makes a Bitcoin-derived daemon refuse
+    #    to start, deliberately -- it will not listen wide open by accident.
+    #
+    # `ss -ltn` ON THE HOST AND A TCP CONNECT FROM INSIDE THE CONTAINER are the two
+    # readings that separate all of this, and neither needs a credential or an RPC
+    # call. Guessing between them cost four wrong diagnoses in one session.
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
