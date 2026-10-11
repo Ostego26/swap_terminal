@@ -752,7 +752,7 @@ def test_the_arming_block_reports_presence_and_never_a_value(capsys):
     assert its absence.
     """
     required = [variable for _asset, _filename, variable in configure_env.arming_overlays()]
-    configure_env.say_arming(dict.fromkeys(required, LEAK_SENTINEL))
+    configure_env.say_arming(dict.fromkeys(required, LEAK_SENTINEL), {})
     printed = capsys.readouterr().out
 
     assert LEAK_SENTINEL not in printed, "a signing credential was printed by a report"
@@ -778,7 +778,7 @@ def test_the_arming_block_says_whether_the_overlay_is_actually_in_use(capsys):
     assert len(overlays) >= 2, f"fewer than two overlays take a variable: {overlays}"
     first = overlays[0]
 
-    configure_env.say_arming({"COMPOSE_FILE": f"docker-compose.yml:{first[1]}"})
+    configure_env.say_arming({"COMPOSE_FILE": f"docker-compose.yml:{first[1]}"}, {})
     printed = capsys.readouterr().out
     lines = [line for line in printed.splitlines() if first[2] in line]
     assert lines and "named in COMPOSE_FILE" in lines[0], f"the active overlay was not recognized: {lines}"
@@ -804,7 +804,7 @@ def test_an_overlay_that_needs_no_variable_says_so_rather_than_printing_a_blank(
     without = [entry for entry in configure_env.arming_overlays() if not entry[2]]
     assert without, "no overlay requires zero variables; this test has stopped measuring"
 
-    configure_env.say_arming({})
+    configure_env.say_arming({}, {})
     printed = capsys.readouterr().out
 
     assert "needs no variable" in printed
@@ -822,7 +822,7 @@ def test_the_arming_block_is_a_result_when_there_is_no_overlay(env_file, capsys)
     about" for the one condition that disables every payout path at once.
     """
     del env_file
-    configure_env.say_arming({})
+    configure_env.say_arming({}, {})
     printed = capsys.readouterr().out
 
     assert "(none)" in printed
@@ -1681,7 +1681,7 @@ def test_the_arming_block_separates_what_it_can_set_from_what_it_will_not(capsys
     ASKED. An operator reading it goes to edit .env by hand for a path -- which is the
     thing this tool exists to prevent, recommended by the tool itself.
     """
-    configure_env.say_arming({})
+    configure_env.say_arming({}, {})
     printed = capsys.readouterr().out
 
     assert "CAN set" in printed
@@ -1804,3 +1804,74 @@ def test_a_refused_set_exits_nonzero_even_when_another_value_was_written(
     assert "SOL_HOT_WALLET='good'" in written, "the acceptable value was not written"
     assert "SOL_NONSENSE" not in written
     assert "REFUSED" in capsys.readouterr().out
+
+
+def test_the_arming_block_sees_what_the_same_run_just_wrote(
+        env_file_with_overlays, monkeypatch, capsys):
+    """MUTATION: `say_arming(already, {})` on the write paths, or drop the merge.
+
+    =========================================================================
+    THE OUTPUT CONTRADICTED ITSELF FOUR LINES APART, IN THE OPERATOR'S TERMINAL
+    =========================================================================
+
+    Measured 2026-10-11, one run of `--set SOL_PAYOUT_KEYPAIR_HOST_FILE=... --apply`:
+
+        WROTE            2 variable(s) ... SOL_HOT_WALLET, SOL_PAYOUT_KEYPAIR_HOST_FILE
+        ...
+        SOL   needs SOL_PAYOUT_KEYPAIR_HOST_FILE  <- NOT set in .env
+
+    existing_assignments() is read once at the top of main(), BEFORE the write, so every
+    caller after a write handed say_arming() a stale snapshot. The operator read "NOT
+    set" about a variable the same screen had just reported writing -- and the next
+    reasonable thing to do with that is set it again.
+
+    SAME DEFECT AS credentials_from_confs() EARLIER THE SAME DAY ("read from the conf",
+    then "skipped", then "WROTE"), which is rule 13's "treat 'skipped' plus 'success' in
+    the same output as a defect in the output". I reproduced it in new code hours after
+    writing that sentence into a commit message, which is why this test asserts on the
+    WHOLE screen rather than on one block.
+    """
+    env_file_with_overlays.write_text("COMPOSE_FILE=docker-compose.yml\n")
+    monkeypatch.setattr(configure_env, "listening_ports", set)
+    monkeypatch.setattr("sys.argv", [
+        "configure_env.py", "--set",
+        "SOL_PAYOUT_KEYPAIR_HOST_FILE=/home/somebody/.config/solana/hot.json", "--apply"])
+
+    assert configure_env.main() == 0
+    printed = capsys.readouterr().out
+
+    assert "WROTE" in printed and "SOL_PAYOUT_KEYPAIR_HOST_FILE" in printed
+    arming = printed.split("PAYOUTS ARE ARMED SEPARATELY", 1)[1]
+    sol_line = [line for line in arming.splitlines()
+                if "SOL_PAYOUT_KEYPAIR_HOST_FILE" in line and "needs" in line]
+    assert sol_line, f"the SOL row is missing from the arming block:\n{arming}"
+    assert "set in .env" in sol_line[0] and "NOT set in .env" not in sol_line[0], (
+        f"the arming block says a variable this run just WROTE is not set: {sol_line[0]}"
+    )
+
+
+def test_a_dry_run_arming_block_does_not_claim_an_unwritten_value_is_set(
+        env_file_with_overlays, monkeypatch, capsys):
+    """The other half, and the direction that would be WORSE to get wrong.
+
+    MUTATION: pass `values` instead of `{}` at the dry-run call site. A dry run writes
+    nothing, so reporting a discovered-but-unwritten value as "set in .env" would tell
+    an operator a chain is armable when `--arm` will refuse -- a false green rather than
+    a false red, which is the expensive direction.
+    """
+    env_file_with_overlays.write_text("COMPOSE_FILE=docker-compose.yml\n")
+    monkeypatch.setattr(configure_env, "listening_ports", set)
+    monkeypatch.setattr("sys.argv", [
+        "configure_env.py", "--set", "SOL_PAYOUT_KEYPAIR_HOST_FILE=/tmp/not-written.json"])
+
+    assert configure_env.main() == 0
+    printed = capsys.readouterr().out
+
+    assert "Nothing was written" in printed
+    assert "SOL_PAYOUT_KEYPAIR_HOST_FILE" not in env_file_with_overlays.read_text()
+    arming = printed.split("PAYOUTS ARE ARMED SEPARATELY", 1)[1]
+    sol_line = [line for line in arming.splitlines()
+                if "SOL_PAYOUT_KEYPAIR_HOST_FILE" in line and "needs" in line]
+    assert sol_line and "NOT set in .env" in sol_line[0], (
+        f"a dry run reported an unwritten value as set: {sol_line}"
+    )

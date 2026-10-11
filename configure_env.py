@@ -1631,7 +1631,7 @@ def arming_overlays() -> list[tuple[str, str, str]]:
     return sorted(found)
 
 
-def say_arming(already: dict) -> None:
+def say_arming(already: dict, written: dict) -> None:
     """What this tool does NOT set, and what a chain still needs before it can PAY.
 
     =========================================================================
@@ -1664,9 +1664,42 @@ def say_arming(already: dict) -> None:
     SO THIS BLOCK REPORTS AND DOES NOT OFFER. PRESENCE ONLY, NEVER A VALUE -- the same
     rule the "already in .env" line follows, and here it matters more: one of these is a
     wallet passphrase and one is an XRP secret seed.
+
+    =========================================================================
+    `written` IS A SECOND PARAMETER BECAUSE THIS BLOCK CONTRADICTED THE ONE FOUR
+    LINES ABOVE IT, IN THE OPERATOR'S OWN TERMINAL
+    =========================================================================
+
+    Measured on their host 2026-10-11, one run of `--set ... --apply`:
+
+        WROTE            2 variable(s) into .../.env, mode 600
+                         SOL_HOT_WALLET, SOL_PAYOUT_KEYPAIR_HOST_FILE
+        ...
+        SOL   docker-compose.web.armed-sol.yml
+              needs SOL_PAYOUT_KEYPAIR_HOST_FILE  <- NOT set in .env
+
+    existing_assignments() is read ONCE at the top of main(), before anything is
+    written, so `already` is a snapshot of .env as it was when the run started. Every
+    caller after a write was handing this function a stale one. The operator read "NOT
+    set" about a variable the same screen had just reported writing, and the next
+    reasonable thing to do with that is set it again.
+
+    THIS IS THE DEFECT I FIXED IN credentials_from_confs() EARLIER THE SAME DAY, where
+    the output said "LTC_RPC_USER <- read from the conf", then "skipped LTC_RPC_USER",
+    then "WROTE ... LTC_RPC_USER". Rule 13's "treat 'skipped' plus 'success' in the same
+    output as a defect in the output" -- reproduced in new code within hours of my
+    writing that sentence into a commit message.
+
+    REQUIRED RATHER THAN DEFAULTED TO {}, which is the point. A default would let a
+    future call site inherit the bug silently; a required parameter makes every site
+    state what was written, and the dry-run site passing {} is a true statement rather
+    than an omission.
     """
+    # THE STATE AFTER THE WRITE, not the snapshot from before it. `written` wins,
+    # which is the right precedence: it is what is on disk now.
+    current = {**already, **written}
     overlays = arming_overlays()
-    compose = already.get("COMPOSE_FILE", "")
+    compose = current.get("COMPOSE_FILE", "")
     say("")
     say("  PAYOUTS ARE ARMED SEPARATELY, and this tool sets none of it. The variables above")
     say("  configure the DEPOSIT leg; a chain can read deposits and still be unable to send.")
@@ -1687,7 +1720,7 @@ def say_arming(already: dict) -> None:
             say(f"    {'':5} needs no variable -- it mounts a credential the project already")
             say(f"    {'':5} holds, so naming the file IS the arming; overlay {active}")
             continue
-        held = "set in .env" if already.get(variable) else "NOT set in .env"
+        held = "set in .env" if current.get(variable) else "NOT set in .env"
         say(f"    {'':5} needs {variable}  <- {held}; overlay {active}")
     settable = [variable for _asset, _filename, variable in overlays if variable]
     # WHICH OF THESE THIS TOOL CAN SET, and the distinction is value versus location.
@@ -1895,7 +1928,7 @@ def main() -> int:
         if values and args.apply:
             write_env(values)
             say_what_was_written(values, already)
-        say_arming(already)
+        say_arming(already, values if args.apply else {})
         return 1 if refusals else 0
 
     posture = change_posture(args, already)
@@ -1940,7 +1973,8 @@ def main() -> int:
 
     if not args.apply:
         say_dry_run(needed, values, secrets, already)
-        say_arming(already)
+        # NOTHING WAS WRITTEN, and {} says so rather than omitting the argument.
+        say_arming(already, {})
         return 0
 
     values.update(collect_answers(needed, secrets))
@@ -1952,12 +1986,12 @@ def main() -> int:
         # as "nothing to write" on a run where everything was already correct, and those
         # are opposite states (rule 14).
         say_still_unset(values, already)
-        say_arming(already)
+        say_arming(already, {})
         return 0
 
     write_env(values)
     say_what_was_written(values, already)
-    say_arming(already)
+    say_arming(already, values)
     return 0
 
 
