@@ -173,21 +173,37 @@ def missing_identity_refusal() -> str:
     names it -- which is the whole of rule 14's "state what the number means, next
     to the number".
 
-    IT NAMES THREE THINGS BECAUSE THREE ARE NEEDED, and naming one of three sends
-    the reader back for two more rounds. The overlay, because the PEM has to be
-    where dfx looks. The variable, because dfx resolves a NAME. And the network
-    url, because the web image has no docker CLI -- so the compose transport that
-    would use the replica's own default identity cannot run there at all, and the
-    url transport defaults to `--identity anonymous`.
+    IT NAMES ONE THING, AND IT NAMED THREE FOR AN HOUR. The first version told the
+    operator to set ICP_PAYOUT_IDENTITY, add the overlay, AND set ICP_DFX_NETWORK_URL.
+    The third was already supplied -- docker-compose.web.yml:387 carries
+
+        ICP_DFX_NETWORK_URL: "${ICP_DFX_NETWORK_URL:-http://icp-replica:4943}"
+
+    so the url transport is the default. It IS the transport the web container must
+    use: that image has no docker CLI and no compose file mounts the daemon socket, so
+    the compose transport -- the one whose empty identity means the replica's own
+    default, the identity a payout must sign with -- cannot run there at all. Under the
+    url transport an empty identity means `--identity anonymous`, which is why an
+    identity has to be named. But the variable needed no setting, and the overlay sets
+    ICP_PAYOUT_IDENTITY itself from the volume it mounts. So the operator's whole act
+    is adding the overlay to COMPOSE_FILE.
+
+    A REFUSAL THAT ASKS FOR SOMETHING ALREADY SET IS A WRONG COMMENT ON A RENDERED
+    PAGE, and rule 16 is explicit that a wrong sentence is fixed with the same
+    seriousness as wrong code: "a docstring that says a function is testnet-only when
+    it reads a mainnet RPC endpoint will eventually be trusted by someone in a hurry."
+    This one would have had an operator editing .env to set a variable compose was
+    already supplying, then hunting for why it changed nothing.
     """
     return (
         f"cannot pay out from this process: the ledger's `transfer` debits the CALLER, so a payout "
         f"must be signed by the identity whose principal is ICP_OWNER_PRINCIPAL, and no "
         f"{PAYOUT_IDENTITY_VARIABLE} is set in this process -- every ledger call it makes is "
         f"unsigned, which is sufficient for balances, fees and block scans and cannot move funds. "
-        f"This is why ICP -> * works and * -> ICP does not. To arm it: mount that identity's PEM "
-        f"with docker-compose.web.armed-icp.yml, set {PAYOUT_IDENTITY_VARIABLE} to the dfx identity "
-        f"name it is mounted as, and set ICP_DFX_NETWORK_URL (the web image has no docker CLI, so "
-        f"the compose transport cannot run there). Placing that identity is key material and the "
-        f"operator's."
+        f"This is why ICP -> * works and * -> ICP does not. TO ARM IT, add "
+        f"docker-compose.web.armed-icp.yml to COMPOSE_FILE and recreate the web container. That "
+        f"overlay mounts the replica's own dfx identity volume read-only and sets "
+        f"{PAYOUT_IDENTITY_VARIABLE} itself, so nothing is copied and no other variable is needed "
+        f"-- ICP_DFX_NETWORK_URL already defaults to the replica. Naming the overlay is the whole "
+        f"act, which is what keeps a payout path from being armed by inheritance."
     )

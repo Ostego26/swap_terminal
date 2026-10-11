@@ -64,15 +64,17 @@
 # default identity, which is where that principal was read from in the first
 # place. Any other PEM arms the adapter, reaches the ledger, and has no coins.
 #
-# ICP_DFX_NETWORK_URL IS STILL REQUIRED AND IS DELIBERATELY NOT SET HERE, because
-# it is not key material and not a custody decision -- it belongs in .env with the
-# rest of the configuration. Without it the web container uses the compose
-# transport, and docker/web.Dockerfile's runtime stage installs no docker CLI and
-# no compose file mounts the daemon socket, so that transport cannot run there at
-# all. Mounting the socket would fix it and must not be done: it hands a process
-# holding wallet RPC credentials control of the whole Docker daemon.
+# ICP_DFX_NETWORK_URL IS NOT SET HERE AND DOES NOT NEED SETTING ANYWHERE, which this
+# block claimed the opposite of for an hour. docker-compose.web.yml:387 already carries
 #
-#     ICP_DFX_NETWORK_URL=http://icp-replica:4943
+#     ICP_DFX_NETWORK_URL: "${ICP_DFX_NETWORK_URL:-http://icp-replica:4943}"
+#
+# so the url transport is already the default. It IS the transport the web container
+# must use -- docker/web.Dockerfile's runtime stage installs no docker CLI and no
+# compose file mounts the daemon socket, so the compose transport cannot run there at
+# all, and mounting the socket would hand a process holding wallet RPC credentials
+# control of the whole Docker daemon. Set the variable only if the replica is somewhere
+# other than the compose network.
 #
 # NEITHER THIS FILE NOR THE OTHER THREE ARMS ANY CHAIN BUT ITS OWN. Arming is a
 # posture and a posture should take an act to enter; naming this file on the

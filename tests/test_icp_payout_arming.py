@@ -119,19 +119,26 @@ def test_an_unarmed_adapter_names_all_three_things_to_set(monkeypatch):
     pay out, and its adapter does not say why" -- and the fix then written still named
     no setting, "so the page could show `in 0/5` and not say what would change it".
 
-    THREE, BECAUSE THREE ARE NEEDED. The overlay (the PEM must be where dfx looks),
-    the variable (dfx resolves a NAME), and the network url (the web image has no
-    docker CLI, so the compose transport that would use the replica's own default
-    identity cannot run there at all). Naming one of three sends the reader back for
-    two more rounds.
+    ONE, AND IT NAMED THREE FOR AN HOUR. The first version told the operator to set
+    ICP_PAYOUT_IDENTITY, add the overlay, AND set ICP_DFX_NETWORK_URL -- and the third
+    was already supplied: docker-compose.web.yml:387 defaults it to the replica. A
+    refusal that asks for something already set is a wrong comment on a page a customer
+    can load, and it would have had an operator editing .env to no effect and then
+    hunting for why.
+
+    MUTATION: re-add "set ICP_DFX_NETWORK_URL" to the refusal, or drop the overlay's name.
     """
     monkeypatch.delenv(PAYOUT_IDENTITY_VARIABLE, raising=False)
     refusal = why_cannot_pay_out({"ICP": adapter()}, "ICP")
 
     assert refusal.startswith("ICP ")
     for needed in (PAYOUT_IDENTITY_VARIABLE, "docker-compose.web.armed-icp.yml",
-                   "ICP_DFX_NETWORK_URL", "ICP_OWNER_PRINCIPAL"):
+                   "COMPOSE_FILE", "ICP_OWNER_PRINCIPAL"):
         assert needed in refusal, f"the refusal does not name {needed}: {refusal}"
+    assert "already defaults" in refusal, (
+        "the refusal does not say the network url needs no setting, which is the thing it "
+        "used to tell the operator to go and set"
+    )
     # And it still carries the LEDGER reason, which is the durable half: `transfer`
     # debits the caller, which is why ICP -> * works and * -> ICP does not.
     assert "debits the CALLER" in refusal
