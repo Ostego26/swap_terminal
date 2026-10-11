@@ -180,7 +180,14 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
                     # not in a summary line that appears once it has completed.
                     print(f"  {WORKER_NAME} cycle={cycle}: {pending} swap(s) pending payout, broadcasting now", flush=True)
                 refresh_wallet_inventory(db, adapters)
-                completed = process_pending_payouts(db, config, adapters)
+                # should_stop IS PASSED DOWN since 2026-10-11 so a stop lands BETWEEN
+                # swaps rather than at the grace deadline. Finishing the whole cycle was
+                # the design, and a cycle is bounded by the chain RPC timeouts (30s
+                # each) rather than by the poll interval -- so against a 15s grace a
+                # worker waiting on a chain was SIGKILLed EVERY time, which is the one
+                # interruption the payout sequence is built to avoid. A swap that has
+                # started still always finishes; only the next one is not begun.
+                completed = process_pending_payouts(db, config, adapters, should_stop)
                 failed = db.execute("SELECT COUNT(*) AS n FROM swaps WHERE status = 'failed'").fetchone()["n"]
             print(
                 cycle_line(

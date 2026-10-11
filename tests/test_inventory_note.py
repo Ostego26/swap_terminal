@@ -142,7 +142,7 @@ def test_the_reconcile_cycle_LINE_carries_the_derived_note(tmp_path):
         "GRC": Adapter(balance=3780.09),
         "SOL": Adapter(error=RuntimeError("SOL_HOT_WALLET is not set")),
     }
-    line = reconcile_worker.run_cycle(db, {}, adapters, 1, 0.0)
+    line = reconcile_worker.run_cycle(db, {}, adapters, 1)
     assert "inventory_rows=1" in line, "GRC wrote a row, SOL raised, so one row"
     assert "expected 2" in line, "and the line says 2, derived from the adapters"
     assert "Missing: SOL" in line
@@ -155,7 +155,7 @@ def test_a_cycle_where_every_adapter_answers_does_not_print_a_warning_shape(tmp_
     db = connect_db(str(tmp_path / "t.db"), create=True)
     db.executescript(SCHEMA)
     adapters = {"GRC": Adapter(balance=1.0), "SOL": Adapter(balance=2.0)}
-    line = reconcile_worker.run_cycle(db, {}, adapters, 4, 0.0)
+    line = reconcile_worker.run_cycle(db, {}, adapters, 4)
     assert "inventory_rows=2" in line
     assert "nothing is missing" in line
     assert "Missing" not in line

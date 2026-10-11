@@ -255,9 +255,13 @@ def main() -> int:
         f"  run dir         {RUN_DIR}  <- pid files and worker logs; must be a volume",
         f"  SWAP_DB_PATH    {os.getenv('SWAP_DB_PATH', '(unset)')}  <- (unset) means config.py's"
         " BASE_DIR default, which inside a container is the IMAGE and dies with it",
-        f"  worker grace    {WORKER_GRACE_SECONDS}s  <- must be inside compose stop_grace_period",
-        "  starting three workers, then gunicorn. Stop order is the reverse, and the",
-        "  workers' absence is PROVEN by /proc before gunicorn is asked to go.",
+        f"  worker grace    {WORKER_GRACE_SECONDS}s  <- one hung chain call ({stop_budget.LONGEST_RPC_TIMEOUT_SECONDS}s, "
+        f"ICP_CALL_TIMEOUT) plus {stop_budget.RPC_OVERRUN_MARGIN_SECONDS}s. Must be inside compose stop_grace_period",
+        "  starting three workers, then gunicorn.",
+        "  ON STOP: all four get SIGTERM TOGETHER, because pid 1 is dumb-init with no",
+        "  --single-child and gunicorn shares this process's group. gunicorn exits first",
+        "  (~0.1s); the workers finish the unit of work in hand and then exit, and their",
+        "  absence is PROVEN by /proc. A worker is never interrupted mid-payout.",
     ])
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     prepare_database()

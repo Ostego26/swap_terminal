@@ -163,7 +163,10 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
                     f"SELECT COUNT(*) AS n FROM swaps WHERE status IN ({_ACTIVE_PLACEHOLDERS})",  # noqa: S608
                     ACTIVE_STATUSES,
                 ).fetchone()["n"]
-                processed = process_active_swaps(db, config, adapters)
+                # should_stop, for the reason at the payout worker's own call site: the
+                # grace is spent ONCE for all three workers, so one that cannot exit
+                # promptly holds the container's whole stop at the deadline.
+                processed = process_active_swaps(db, config, adapters, should_stop)
                 pending = db.execute("SELECT COUNT(*) AS n FROM swaps WHERE status = 'payout_pending'").fetchone()["n"]
                 # HALTED SWAPS, counted because a halt was invisible until 2026-09-26.
                 #

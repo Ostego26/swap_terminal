@@ -84,7 +84,6 @@ three rather than four.
 from __future__ import annotations
 
 import sys
-import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -216,7 +215,7 @@ def seed_finished_swap(db, *, status="completed", updated_at=None, address=ADDRE
 
 def run_pass(db, adapter, *, cycle=1):
     """The REAL worker cycle, returning its line. Not a paraphrase of it."""
-    return reconcile_worker.run_cycle(db, CONFIG, {"BTC": adapter}, cycle, time.monotonic())
+    return reconcile_worker.run_cycle(db, CONFIG, {"BTC": adapter}, cycle)
 
 
 def late_rows_in(db):

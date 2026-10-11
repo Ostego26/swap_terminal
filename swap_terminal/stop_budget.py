@@ -57,10 +57,73 @@ from __future__ import annotations
 
 import os
 
+#: The longest a SINGLE chain call can block. SIXTY, and the first version of this line
+#: said thirty.
+#:
+#:     BTC_RPC_TIMEOUT  LTC_RPC_TIMEOUT  SOL_RPC_TIMEOUT      30   config.py:1386,
+#:     GRC_RPC_TIMEOUT  XRP_RPC_TIMEOUT                            :1394, :1459,
+#:                                                                 :1471, :1479
+#:     ICP_CALL_TIMEOUT                                      60   config.py:1505
+#:
+#: THE MISS IS WORTH RECORDING BECAUSE IT WAS A GREP FOR A NAMING PATTERN. I searched
+#: `*_RPC_TIMEOUT`, found five chains at 30, and wrote 30. ICP's is spelled
+#: ICP_CALL_TIMEOUT -- `_CALL_`, not `_RPC_`, because a dfx call is not a JSON-RPC post
+#: -- so the sixth chain could not match and the number was wrong by a factor of two, in
+#: the direction that matters. The grace below is derived from this, so a worker waiting
+#: on the ICP ledger would still have been SIGKILLed every time: the exact defect this
+#: constant exists to end, reintroduced by the fix for it.
+#:
+#: What found it was tests/test_a_stop_lands_between_swaps.py asking Config.RPC for every
+#: timeout it actually declares rather than trusting this line, and failing with
+#: "declares 30.0 and Config.RPC has 60.0". That is why the cross-check reads the mapping
+#: instead of a list of variable names: a pattern cannot see a member that does not
+#: follow it (rule 3 -- the denominator is the chains, not the spelling).
+LONGEST_RPC_TIMEOUT_SECONDS = 60.0
+
+#: How much longer than one hung call a worker gets. Covers the poll granularity in
+#: workers/common.sleep_until_next_cycle (0.25s), the database write that follows a send,
+#: and process scheduling on a loaded host.
+RPC_OVERRUN_MARGIN_SECONDS = 5.0
+
 #: How long the workers get, TOGETHER, to exit before the supervisor escalates to
 #: SIGKILL. Spent ONCE for the whole set rather than once per worker, which is what
 #: supervisor.stop_workers_together() changed and what the 3.11x above measured.
-WORKER_GRACE_SECONDS = float(os.getenv("ST_WORKER_GRACE_SECONDS", "15"))
+#:
+#: IT WAS A FLAT 15 UNTIL 2026-10-11, SHORTER THAN ONE CHAIN CALL. Measured on the
+#: operator's host: `docker compose stop web` took 15.5s and the container log showed all
+#: three workers reporting stopped at EXACTLY the grace -- which means they did not exit,
+#: they were SIGKILLed. The workers honor SIGTERM by finishing the current CYCLE
+#: (workers/common.install_stop_handler), and a cycle's length is bounded by the chain
+#: timeouts above, not by the poll interval. So a worker waiting on a chain could NOT
+#: honor SIGTERM inside 15s, ever.
+#:
+#: AND ON THE PAYOUT WORKER THAT IS THE ONE INTERRUPTION THAT MATTERS. Being SIGKILLed
+#: between `sendtoaddress` returning a txid and _record_broadcast() committing it is what
+#: the whole payout sequence is built to avoid. It is not silent loss -- the payouts row
+#: commits BEFORE the send, deliberately -- but rescue_payout.py "refuses every swap it
+#: cannot prove was never broadcast", which is exactly this case, so the swap is not
+#: auto-recoverable: it sits in `paying` and needs an operator reading the chain.
+#:
+#: TWO CHANGES, AND NEITHER ALONE WOULD HAVE DONE IT. The loops now take a should_stop and
+#: check it BETWEEN units of work, so a stop never STARTS another swap
+#: (services/payout_service.process_pending_payouts,
+#: services/deposit_service.process_active_swaps) -- and this grace now covers one hung
+#: call, so the unit already in flight can finish. Without the first, a longer grace only
+#: waits longer before killing; without the second, a swap already sending still dies
+#: mid-sequence.
+#:
+#: WHAT IT STILL DOES NOT COVER, named rather than claimed: a payout already mid-sequence
+#: against a daemon hung on EVERY call -- unlock, send and relock can each burn their own
+#: timeout. Covering that needs a grace of minutes and a `docker compose down` that waits
+#: it out. This covers the single hung call, which is the common stall.
+#:
+#: AND IT COSTS NOTHING WHEN THINGS WORK. An idle worker exits within one 0.25s poll of
+#: SIGTERM; a worker mid-cycle against a responsive daemon finishes its unit in well under
+#: a second. The grace is a CEILING on patience, not a duration anything waits out.
+WORKER_GRACE_SECONDS = float(os.getenv(
+    "ST_WORKER_GRACE_SECONDS",
+    str(LONGEST_RPC_TIMEOUT_SECONDS + RPC_OVERRUN_MARGIN_SECONDS),
+))
 
 #: How long docker/web_workers_entrypoint.py waits for gunicorn to exit, AFTER the
 #: workers are proven gone, before it SIGKILLs gunicorn.

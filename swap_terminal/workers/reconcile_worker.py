@@ -205,7 +205,7 @@ def transitions_written(db, swap_ids, *, since: str) -> int:
     return int(row["n"] or 0)
 
 
-def run_cycle(db, config: dict, adapters: dict, cycle: int, started: float) -> str:
+def run_cycle(db, config: dict, adapters: dict, cycle: int, should_stop=None) -> str:
     """One reconcile cycle: do the work, return the line that describes it.
 
     EXTRACTED SO THE WIRING CAN BE TESTED, and the reason is a mutation that
@@ -227,13 +227,30 @@ def run_cycle(db, config: dict, adapters: dict, cycle: int, started: float) -> s
     is not zero, and claiming otherwise would be the same overstatement the note itself
     was fixing.
     """
+    # `started` IS TAKEN HERE RATHER THAN PASSED IN, since 2026-10-11, and the swap is
+    # deliberate: this function needed a should_stop and `started` was the parameter it
+    # should not have been carrying. ruff's PLR0913 at six arguments is what made me
+    # look, and rule 12's reading of a complexity code applies to an arity one -- find
+    # what the function should not hold, do not raise the ceiling (rule 19).
+    #
+    # main() STILL KEEPS ITS OWN, and that is not duplication. Its copy is taken before
+    # the try: so a cycle that RAISES still reports an elapsed time, which this
+    # function cannot do for a failure it did not return from. The two spans differ by
+    # the try setup -- microseconds -- and both are elapsed-time reports rather than
+    # anything a decision reads.
+    started = time.monotonic()
     # THE WALL CLOCK, not `started`. `started` is time.monotonic(), which is the right
     # thing to measure a duration with and cannot be compared against a timestamp column
     # (rule 6's boundary: seconds where an API demands them, and this one demands an ISO
     # string). Taken BEFORE the work so nothing this cycle writes falls outside it.
     cycle_began = utc_now_iso()
     refresh_wallet_inventory(db, adapters)
-    processed = process_active_swaps(db, config, adapters)
+    # should_stop, for the reason at the payout worker's call site. This worker has the
+    # LONGEST cycle of the three -- a 60s poll, an inventory refresh, this pass and the
+    # late-deposit pass -- and the grace is spent once for all three
+    # (supervisor.stop_workers_together), so this is the one most likely to be holding
+    # the container's stop at the deadline.
+    processed = process_active_swaps(db, config, adapters, should_stop)
     written = transitions_written(db, [row["id"] for row in processed], since=cycle_began)
     # THE LATE-DEPOSIT PASS, AND WHY IT IS IN *THIS* WORKER RATHER THAN IN deposit_watcher.
     #
@@ -366,7 +383,7 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
         try:
             with db_session(Config.DB_PATH) as db:
                 db.executescript(SCHEMA)
-                line = run_cycle(db, config, adapters, cycle, started)
+                line = run_cycle(db, config, adapters, cycle, should_stop)
             print(line, flush=True)
         except Exception as exc:
             print(failures.record(cycle, time.monotonic() - started, exc), flush=True)

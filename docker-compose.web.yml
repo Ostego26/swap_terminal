@@ -484,4 +484,34 @@ services:
     # reads both grace constants from the entrypoint module and this duration from
     # THIS LINE, and fails with the arithmetic spelled out if the three stop fitting
     # together. A fourth worker, a raised grace or a lowered period all trip it.
-    stop_grace_period: 45s
+    #
+    # 45s -> 105s ON 2026-10-11, AND THE TESTS ARE WHY IT MOVED TO THE RIGHT NUMBER
+    # RATHER THAN TO MY FIRST GUESS. The worker grace went from a flat 15 to
+    # LONGEST_RPC_TIMEOUT_SECONDS + RPC_OVERRUN_MARGIN_SECONDS, because 15 was SHORTER
+    # THAN ONE CHAIN CALL -- so a worker waiting on a chain could never honor SIGTERM in
+    # time and was SIGKILLed every time, which the operator measured as a 15.05s stop
+    # with all three workers reporting at exactly the grace.
+    #
+    # I SET THIS TO 75 FIRST, on a worker grace of 35, having read five chains'
+    # `*_RPC_TIMEOUT` at 30 and missed ICP's -- which is ICP_CALL_TIMEOUT at 60
+    # (config.py:1505), `_CALL_` rather than `_RPC_`, so a grep for the pattern could
+    # not see it. tests/test_a_stop_lands_between_swaps.py asks Config.RPC for every
+    # timeout it declares instead of trusting the constant, and failed with
+    # "declares 30.0 and Config.RPC has 60.0". The grace is 65 and the conservative
+    # budget 65 + 20 = 85, so this is 105 -- with the margin over 85 that a loaded host
+    # needs.
+    #
+    # THIS IS A CEILING ON PATIENCE, NOT A DURATION ANYTHING WAITS OUT. An idle worker
+    # exits within one 0.25s poll of SIGTERM, and a worker mid-cycle against a
+    # responsive daemon finishes its unit in well under a second -- the operator's own
+    # `down` was 0.8s for icp-replica. 75s is what the runtime allows before it stops
+    # being patient, and it is only approached when a chain is hung, which is exactly
+    # when being killed mid-send is worst.
+    #
+    # AND THE REAL WORST CASE IS LOWER THAN 55 BECAUSE THE TWO LEGS ARE CONCURRENT:
+    # dumb-init has no --single-child, so gunicorn takes SIGTERM at the same instant as
+    # the entrypoint and is gone in ~0.1s while the workers wind down. The sum is kept
+    # as the budget anyway -- swap_terminal/stop_budget.total_stop_seconds() says why --
+    # because a budget that overstates refuses a configuration that would have fitted,
+    # while one that understates is the defect this whole block exists for.
+    stop_grace_period: 105s

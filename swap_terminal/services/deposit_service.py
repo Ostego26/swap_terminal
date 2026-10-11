@@ -1092,7 +1092,7 @@ def refresh_swap_from_chain(db, config, adapters: dict, swap: dict, scans: Share
     return refreshed
 
 
-def process_active_swaps(db, config, adapters: dict) -> list[dict]:
+def process_active_swaps(db, config, adapters: dict, should_stop=None) -> list[dict]:
     # The f-string interpolates a run of '?' generated from the LENGTH of
     # ACTIVE_STATUSES -- structure, not input. The statuses themselves are
     # bound as parameters on the line below. That is what the suppression
@@ -1147,6 +1147,22 @@ def process_active_swaps(db, config, adapters: dict) -> list[dict]:
     processed = CycleRefresh()
     unreachable: list[tuple[str, str, BaseException]] = []
     for swap in swaps:
+        # THE STOP, BETWEEN SWAPS. Same seam and same reason as
+        # services/payout_service.process_pending_payouts() -- see the long comment
+        # there for the measurement. This worker's exposure is milder: a refresh reads
+        # the chain and credits a deposit, so an interrupted cycle re-reads the same
+        # chain next time and reaches the same answer, where an interrupted PAYOUT can
+        # leave a broadcast nobody recorded. It gets the check anyway, because the
+        # worker grace is spent once for all three (supervisor.stop_workers_together)
+        # and one worker that cannot exit promptly holds the container's whole stop at
+        # the deadline.
+        if should_stop is not None and should_stop():
+            logger.info(
+                "stop requested: %d of %d active swaps were refreshed this cycle; the rest "
+                "are untouched and the next cycle re-reads the same chain state.",
+                len(processed), len(swaps),
+            )
+            break
         try:
             processed.append(refresh_swap_from_chain(db, config, adapters, swap, scans=scans))
         except Exception as exc:  # noqa: BLE001 -- see the block above; recorded, named and reported

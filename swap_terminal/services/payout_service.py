@@ -1369,7 +1369,7 @@ def pay_one_swap(db, config, adapters: dict, swap):
         )
 
 
-def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
+def process_pending_payouts(db, config, adapters: dict, should_stop=None) -> list[dict]:
     """Broadcast the payout for every swap that is waiting for one.
 
     THE ORDERING AROUND THE SEND, AND WHAT IT COSTS.
@@ -1408,6 +1408,49 @@ def process_pending_payouts(db, config, adapters: dict) -> list[dict]:
     ).fetchall()
     completed = []
     for swap in swaps:
+        # THE STOP IS CHECKED HERE, BEFORE A SWAP STARTS, AND NOWHERE INSIDE ONE.
+        #
+        # WHY, measured on the operator's host 2026-10-11. `docker compose stop web`
+        # took 15.5s and the container log showed all three workers reporting stopped
+        # at exactly WORKER_GRACE_SECONDS -- which means they did not exit, they were
+        # SIGKILLed. The workers honor SIGTERM by finishing the current CYCLE
+        # (workers/common.install_stop_handler), and a cycle is this whole function,
+        # whose length is bounded by the chain RPC timeouts rather than by the poll
+        # interval: every *_RPC_TIMEOUT defaults to 30s and the grace was 15.
+        #
+        # SO A WORKER WAITING ON A CHAIN COULD NOT HONOR SIGTERM IN TIME, EVER. And
+        # being SIGKILLed between `sendtoaddress` returning a txid and
+        # _record_broadcast() committing it is the one interruption this whole function
+        # is built to avoid -- rescue_payout.py "refuses every swap it cannot prove was
+        # never broadcast", so such a swap is not auto-recoverable: it sits in `paying`
+        # and needs an operator reading the chain.
+        #
+        # CHECKING BETWEEN SWAPS RATHER THAN INSIDE ONE IS THE WHOLE DESIGN. A stop must
+        # never land mid-sequence -- the payouts row is committed before the send
+        # precisely so a crash leaves evidence, and adding an exit point after that
+        # commit would manufacture the ambiguity on purpose. So a swap that has STARTED
+        # always finishes; what a stop prevents is starting another.
+        #
+        # WHAT THIS DOES NOT FIX, said plainly: a swap already mid-sequence when SIGTERM
+        # arrives, against a daemon hung on every call, can still outlast the grace and
+        # be SIGKILLed. Covering that needs a grace longer than one payout's whole RPC
+        # sequence -- unlock, send, relock, each able to burn its own 30s -- which would
+        # make `docker compose down` wait minutes. stop_budget.WORKER_GRACE_SECONDS
+        # covers ONE hung call, which is the common stall; the rest is named here rather
+        # than claimed.
+        #
+        # should_stop IS OPTIONAL AND DEFAULTS TO None, so every caller that is not a
+        # supervised worker -- the tests, repair_inventory_reservations.py, rescue
+        # paths -- keeps running to completion exactly as before. A default of "never
+        # stop" cannot surprise a caller that did not ask for one.
+        if should_stop is not None and should_stop():
+            logger.info(
+                "stop requested: %d of %d pending payouts were processed this cycle and the "
+                "rest are UNTOUCHED, still 'payout_pending', and will be picked up by the "
+                "next worker to run. Nothing was interrupted mid-send.",
+                len(completed), len(swaps),
+            )
+            break
         # ONE SWAP, ONE FUNCTION (rule 10). This loop is orchestration and holds no
         # decision of its own: pay_one_swap() returns the swap row when it broadcast,
         # and None for every outcome that did not -- each of which it has already

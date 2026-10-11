@@ -129,7 +129,7 @@ def test_the_backstop_credits_a_deposit_when_it_is_the_ONLY_loop_running(db):
     seed_swap(db, "s_only", 11)
 
     line = reconcile_worker.run_cycle(
-        db, CONFIG, {"SOL": DepositAdapter([event("tx_one", 11)])}, 1, 0.0)
+        db, CONFIG, {"SOL": DepositAdapter([event("tx_one", 11)])}, 1)
 
     row = db.execute("SELECT status FROM swaps WHERE id = 's_only'").fetchone()
     assert row["status"] == "payout_pending", (
@@ -154,7 +154,7 @@ def test_a_cycle_that_moved_NOTHING_reads_IDLE_even_with_swaps_open(db):
     """
     seed_swap(db, "s_quiet", 11)
 
-    line = reconcile_worker.run_cycle(db, CONFIG, {"SOL": DepositAdapter()}, 2, 0.0)
+    line = reconcile_worker.run_cycle(db, CONFIG, {"SOL": DepositAdapter()}, 2)
 
     assert "refreshed_swaps=1" in line, f"the open swap is still counted on screen: {line}"
     assert "transitions_written=0" in line
@@ -170,7 +170,7 @@ def test_inventory_rows_alone_cannot_make_the_cycle_claim_it_worked(db):
     non-zero forever. MUTATION: remove "inventory_rows" from STANDING_COUNTS and this
     fails.
     """
-    line = reconcile_worker.run_cycle(db, CONFIG, {"SOL": DepositAdapter(balance=7.0)}, 3, 0.0)
+    line = reconcile_worker.run_cycle(db, CONFIG, {"SOL": DepositAdapter(balance=7.0)}, 3)
 
     assert "inventory_rows=1" in line, f"the standing figure still prints: {line}"
     assert "IDLE" in line, f"a cycle with no swaps and no transitions did nothing: {line}"
@@ -211,7 +211,7 @@ def test_transitions_written_counts_only_the_swaps_THIS_cycle_refreshed(db):
     db.commit()
 
     line = reconcile_worker.run_cycle(
-        db, CONFIG, {"SOL": DepositAdapter([event("tx_mine", 11)])}, 4, 0.0)
+        db, CONFIG, {"SOL": DepositAdapter([event("tx_mine", 11)])}, 4)
 
     assert "transitions_written=2" in line, (
         f"s_theirs is payout_pending, so it is not refreshed and its row is not ours: {line}"
@@ -278,7 +278,7 @@ def test_the_cycle_LINE_carries_both_notes_and_not_just_the_inventory_one(db):
     EIGHT call-site mutations have survived in this session.
     """
     seed_swap(db, "s_note", 12)
-    line = reconcile_worker.run_cycle(db, CONFIG, {"SOL": DepositAdapter()}, 1, 0.0)
+    line = reconcile_worker.run_cycle(db, CONFIG, {"SOL": DepositAdapter()}, 1)
     assert "transitions_written=" in line, "the count"
     assert "HEALTHY" in line or "second look" in line, "and what it MEANS, on the line"
     # BRANCH-AGNOSTIC on purpose. "CONSTRUCTED adapter" appears only in
