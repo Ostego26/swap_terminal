@@ -154,9 +154,13 @@ WHAT IS IMPLEMENTED AND WHAT IS A PROPOSAL (CLAUDE.md rule 16)
                               destination's existence, the rent floor and the
                               balance arithmetic; and the signature happens in
                               chains/solana_signing.py, which this module hands
-                              a plan and gets bytes back from. THE BROADCAST
-                              HAS NEVER RUN AGAINST A CLUSTER -- see the
-                              PROPOSAL note at the end of this header.
+                              a plan and gets bytes back from. THIS SAID "THE
+                              BROADCAST HAS NEVER RUN AGAINST A CLUSTER" UNTIL
+                              2026-10-11 and it had been false since
+                              2026-10-03: two GRC->SOL payouts settled on
+                              devnet and were read back off it. The figures are
+                              in the EXERCISED list below; MAINNET is what is
+                              still a proposal.
 
 **PART OF THIS FILE HAS NOW MET A REAL CLUSTER, AND THE LINE BETWEEN THE TWO
 HALVES IS DRAWN BY METHOD.** This header said "NOTHING IN THIS FILE HAS BEEN
@@ -252,14 +256,31 @@ adapter works" is not a thing a run proves and the list is what a reader needs:
           mint's own traffic; the measurement is the argument for it.
       get_new_address refuses by design and always will -- the shared-account
           deposit strategy has no per-swap address to derive.
-      send_to_address, getLatestBlockhash and sendTransaction. **THE PAYOUT
-          PATH HAS NEVER TOUCHED A CLUSTER.** Every guard on it is tested
-          against seeded responses and the serialization is cross-checked
-          against @solana/web3.js byte for byte (chains/solana_transaction.py's
-          header has the numbers), and NONE of that is a broadcast:
-          api.devnet.solana.com answers 403 at this container's proxy,
-          re-measured 2026-10-02. So the send is a PROPOSAL under rule 16 and
-          the first real one is the operator's run.
+      send_to_address, getLatestBlockhash and sendTransaction. THAT ENTRY SAID
+          "**THE PAYOUT PATH HAS NEVER TOUCHED A CLUSTER**" UNTIL 2026-10-11,
+          AND IT HAD BEEN FALSE FOR EIGHT DAYS. The quoted sentence is kept
+          because the drift is the point (rule 1) and because it is still true
+          of THIS ENVIRONMENT, which is the half that made it defensible:
+          api.devnet.solana.com answers 403 at this container's proxy, so no
+          test in this repository can broadcast and no session here can produce
+          the proof. The proof had to come from the operator's host and it did.
+
+          MEASURED, from their own swap_terminal.db joined against `swaps` and
+          read BACK off the cluster by correct_payout_amounts.py the same day
+          (config.py's ALLOWED_PAIRS block carries the full citation):
+
+              payouts.id=14  GRC->SOL  broadcast 2026-10-03T12:00:27Z
+              payouts.id=15  GRC->SOL  broadcast 2026-10-03T12:15:56Z
+              both 761654 lamports, confirmed through getTransaction's
+              postBalances[1] - preBalances[1]
+
+          So the serialization is cross-checked against @solana/web3.js byte
+          for byte (chains/solana_transaction.py's header has the numbers) AND
+          the broadcast is verified against the cluster, twice. getLatestBlockhash
+          and sendTransaction are therefore EXERCISED. What is still a proposal
+          under rule 16 is MAINNET, which require_devnet() refuses by genesis
+          hash with no flag that turns it off, and that first send is the
+          operator's.
 
 =============================================================================
 IS SOL DONE? NO, AND THE THREE REASONS ARE NOT THE SAME KIND OF THING
@@ -283,10 +304,15 @@ log that nobody reading this file will ever see.
                      never by this module, the transaction is serialized by
                      chains/solana_transaction.py and parsed back out of its
                      own bytes before broadcast, and the settlement is asserted
-                     rather than assumed. What does NOT exist is a run: no
-                     transaction built here has reached any cluster. Rule 16's
-                     line has moved rather than gone -- the first broadcast and
-                     mainnet are still the operator's. "AND FLIPPING can_spend"
+                     rather than assumed. THIS SENTENCE READ "What does NOT
+                     exist is a run: no transaction built here has reached any
+                     cluster" UNTIL 2026-10-11 and it had been false since
+                     2026-10-03T12:00:27Z, when payouts.id=14 settled on devnet
+                     -- 7h58m after the commit that wrote it. Two SOL payouts
+                     have run and both were read back off the cluster; the list
+                     above has the figures. Rule 16's line has moved rather
+                     than gone -- MAINNET is still the operator's, refused here
+                     by genesis hash. "AND FLIPPING can_spend"
                      WAS THE THIRD ITEM IN THAT LIST UNTIL 2026-10-03 and it is
                      no longer one: on the operator's instruction ("whoa we
                      have to be able to swap TO SOL too") can_spend is DERIVED
@@ -385,7 +411,7 @@ from .solana_memo import deposit_tag_from
 # module still holds no keypair, opens no key file and stores neither, which
 # tests/test_solana_adapter.py::test_the_module_references_no_keypair_anywhere
 # and tests/test_solana_payout.py check rather than assume.
-from .solana_payout_keypair import missing_keypair_refusal, payout_keypair_is_present
+from .solana_payout_keypair import missing_keypair_refusal, payout_capability
 from .solana_signing import (
     SolanaSendNotArmed,
     SolanaSplSendRefused,
@@ -750,17 +776,34 @@ class SolanaAdapter:
     #                        not made the custody decision -- can_spend is False and
     #                        services/swap_service.create_swap() refuses a swap whose
     #                        payout leg is SOL, which is the only stage at which
-    #                        nothing has been taken.
-    #   the pair is POSTURE  Config.ALLOWED_PAIRS still names no pair that pays out
-    #                        in SOL (counted 2026-10-03: zero entries with SOL in the
-    #                        second position), so arming this changes what the payout
-    #                        path WOULD do and not what it is asked to do. Enabling
-    #                        such a pair is live posture and is the operator's.
-    #   nothing has SENT     no transaction this path builds has reached any cluster,
-    #                        from any environment, ever. Re-measured 2026-10-03:
-    #                        api.devnet.solana.com answers 403 at this container's
-    #                        proxy. The serialization is cross-checked byte for byte
-    #                        against @solana/web3.js and that is not the same claim.
+    #                        nothing has been taken. SINCE 2026-10-11 THE DEFAULT
+    #                        ALSO REFUSES two states where the path was EXPORTED and
+    #                        the payout still could not be built: no SOL_HOT_WALLET,
+    #                        and a configured SOL_SPL_MINT. Both were measured with
+    #                        can_spend True and the preview raising; see the
+    #                        __init__ call site.
+    #   the pair is POSTURE  THIS SAID "Config.ALLOWED_PAIRS still names no pair that
+    #                        pays out in SOL (counted 2026-10-03: zero entries with
+    #                        SOL in the second position)" AND IT IS NOW WRONG BY FIVE.
+    #                        Re-counted 2026-10-11 by importing the real Config: 30
+    #                        allowed pairs over six assets, TEN of them with SOL in
+    #                        them, and FIVE with SOL in the second position --
+    #                        BTC->SOL, GRC->SOL, ICP->SOL, LTC->SOL, XRP->SOL. The
+    #                        operator enabled the first three on 2026-10-03 and
+    #                        XRP->SOL on 2026-10-04. So arming this now changes what
+    #                        the payout path IS ASKED to do, which is the clause that
+    #                        died, and that is exactly why the capability below had to
+    #                        stop answering a narrower question than its callers ask.
+    #   it HAS SENT          THIS SAID "nothing has SENT -- no transaction this path
+    #                        builds has reached any cluster, from any environment,
+    #                        ever. Re-measured 2026-10-03". False since
+    #                        2026-10-03T12:00:27Z: payouts.id=14 and id=15, GRC->SOL,
+    #                        761654 lamports each, read back off devnet through
+    #                        getTransaction. The 403 clause is still true of THIS
+    #                        container and is kept where it is useful -- no test here
+    #                        can broadcast -- but it was never a statement about the
+    #                        operator's host, and the sentence it was attached to was
+    #                        scoped to the world. See this module's header.
     #   every guard STANDS   devnet by genesis hash in the preview as well as the
     #                        send, the exact arming token, derive-and-compare against
     #                        the announced payer, the rent floor, the lamport
@@ -813,13 +856,46 @@ class SolanaAdapter:
         # shell that started it supplied.
         #
         # NO PATH AND NO KEY IS STORED, ONLY A BOOLEAN AND A SENTENCE.
-        # payout_keypair_is_present() returns bool(...) and never opens the file;
-        # missing_keypair_refusal() names the VARIABLES an operator exports and never
-        # a value. tests/test_solana_payout.py walks vars() on a constructed
+        # payout_capability() reads ONE environment variable through
+        # keypair_path_from_environment() and never opens the file it names; every
+        # sentence it can return names the VARIABLES an operator exports and never a
+        # value. tests/test_solana_payout.py walks vars() on a constructed
         # instance against a sentinel path value and asserts the path appears in no
         # attribute, no rendered page, no log record and no exception message.
-        self.can_spend = payout_keypair_is_present()
-        self.payout_refusal = "" if self.can_spend else missing_keypair_refusal()
+        #
+        # IT WAS `payout_keypair_is_present()` ALONE UNTIL 2026-10-11, AND THAT
+        # ANSWERED A NARROWER QUESTION THAN EVERY CALLER WAS ASKING. The old pair of
+        # lines read:
+        #
+        #     self.can_spend = payout_keypair_is_present()
+        #     self.payout_refusal = "" if self.can_spend else missing_keypair_refusal()
+        #
+        # Measured 2026-10-11 against seeded cluster responses, with the keypair
+        # variable exported, in the two configurations that are one setting away from
+        # the operator's host:
+        #
+        #   hot_wallet="", no mint   can_spend True, why_cannot_pay_out("SOL") "",
+        #                            preview_payout() raises SolanaRPCError
+        #                            "SOL_HOT_WALLET is unset, so this payout has no
+        #                            payer"
+        #   hot wallet set + a mint  can_spend True, why_cannot_pay_out("SOL") "",
+        #                            preview_payout() raises SolanaSplSendRefused
+        #
+        # In both, all five `* -> SOL` pairs in Config.ALLOWED_PAIRS badge AVAILABLE,
+        # services/swap_service.create_swap()'s `cannot_pay` gate passes, a customer's
+        # deposit is taken and credited, and the payout then refuses on its FIRST
+        # guard having read nothing from the cluster. `docker-compose.web.armed-sol.yml`
+        # sets SOL_PAYOUT_KEYPAIR_PATH and nothing else, so `--arm sol` on a host with
+        # no SOL_HOT_WALLET produces the first of them exactly.
+        #
+        # So the capability now asks the whole question -- can this adapter actually
+        # produce a payout -- rather than one third of it, which is the arrangement
+        # chains/xrp.py has had since 2026-10-03 and for the same reason: a credential
+        # that is PRESENT but cannot produce a payout is the nine-character placeholder
+        # incident, and `can_spend` is the one value every rendered surface reads.
+        # See chains/solana_payout_keypair.payout_capability() for what each state
+        # returns and what it still cannot establish.
+        self.can_spend, self.payout_refusal = payout_capability(self.hot_wallet, self.mint)
         #: Credits the LAST find_deposits_to_address() call read and refused. See
         #: UnattributableCredit -- returning [] for "nothing arrived" and for "money arrived
         #: that nobody can claim" is the distinction this exists to restore.
@@ -836,6 +912,24 @@ class SolanaAdapter:
         #: unsupported transaction version, anything. A credit may be in any of them, so a
         #: caller reporting "no credits found" has to say over how many it actually looked.
         self.unreadable_signatures: list[str] = []
+        #: The signatures this same call LISTED and deliberately did not re-read, because
+        #: they are already settled or already recorded unattributable. See
+        #: find_deposits_to_address(), which is where the skip set is applied and where the
+        #: 2026-10-01 rate-limit measurement that forced it is written down.
+        #:
+        #: INITIALIZED HERE SINCE 2026-10-11, AND ITS THREE SIBLINGS ABOVE ALWAYS WERE.
+        #: find_deposits_to_address() assigns this attribute and nothing created it, so
+        #: reading it on a freshly constructed adapter raised AttributeError -- measured by
+        #: constructing the real adapter and touching all four. Nothing in the tree outside
+        #: tests/ reads it today (grepped 2026-10-11: two assignment-or-comment lines here
+        #: and five assertions in tests/test_solana_adapter.py), so this cost nothing yet;
+        #: it is the next diagnostic that asks "what did the last scan skip" before a scan
+        #: has run that pays for it, and an AttributeError out of a reporting line is rule
+        #: 14's failure wearing a traceback. The empty list is the honest answer -- a scan
+        #: that has not run skipped nothing -- and it is the same answer a scan that
+        #: skipped nothing gives, which is correct rather than ambiguous because
+        #: `signatures_listed == 0` is what distinguishes them.
+        self.signatures_skipped: list[str] = []
 
         # THIS VALIDATION MUST STAY LAST AND IT NEARLY DID NOT. An edit on 2026-10-01 inserted
         # the signatures_read property between the assignments above and this loop, which put a
@@ -1756,14 +1850,52 @@ class SolanaAdapter:
 
         cluster = require_devnet(self.genesis_hash(), self.url)
         destination_exists = self.account_exists(plan["destination"])
+
+        # ONE READ OF THE 0-BYTE RENT FLOOR, USED TWICE. IT WAS TWO READS OF THE
+        # SAME PARAMETER UNTIL 2026-10-11.
+        #
+        # Both uses below are getMinimumBalanceForRentExemption(SYSTEM_ACCOUNT_SPACE)
+        # -- the floor a NEW destination account must hold, and the floor the PAYER
+        # must retain -- and they were asked separately: once here and once in the
+        # `retain` line. Measured 2026-10-11 by counting the calls a preview makes:
+        #
+        #     destination does not exist   5 RPC calls, 2 of them this one
+        #     destination exists           4 RPC calls, 1 of them this one
+        #
+        # So a payout to a fresh customer address -- the ordinary case, and the one
+        # where the floor matters -- paid for the identical question twice. Four
+        # calls instead of five is rule 3's "leave it smaller", and on a public
+        # devnet endpoint it is not only cosmetic: HTTP 429 from
+        # api.devnet.solana.com is a measured failure in this tree, the one that
+        # stopped SOL deposit discovery for two days (find_deposits_to_address()
+        # carries that measurement), and the preview runs immediately before a send.
+        #
+        # THE STRONGER REASON IS THAT IT IS ONE NUMBER (rule 8). Two reads of a
+        # cluster parameter can disagree -- chains/solana_units.py's rent section
+        # records SIMD-0437 moving this figure twice -- and a preview that applied
+        # one value to the destination and another to the payer's retention would be
+        # internally inconsistent in a block an operator reads before authorizing a
+        # transfer. One read, one figure, both uses.
+        account_floor = self.rent_exempt_minimum(SYSTEM_ACCOUNT_SPACE)
         if destination_exists:
+            # STILL 0, AND THAT CONTRACT IS LOAD-BEARING OUTSIDE THIS FILE.
+            # sol_payout_preview.py reads `rent_minimum_lamports` and treats 0 as
+            # "the floor was not asked about the destination", because printing an
+            # unasked zero as a figure was on the operator's screen within an hour
+            # of that tool shipping ("the 0-lamport floor does not apply") and
+            # tests/test_sol_payout_preview.py::
+            # test_an_UNASKED_floor_is_never_printed_as_a_figure pins it. The floor
+            # is now READ either way, for the payer -- so the prose below says which
+            # account it was read for rather than claiming nobody asked.
             rent_minimum = 0
             rent_source = (
-                "not asked: the destination account already exists, so no account is created and no "
-                "rent-exempt minimum applies"
+                f"does not apply to the DESTINATION: it already exists, so no account is created. The "
+                f"floor was still read from the cluster for the PAYER's own retention below "
+                f"({account_floor} lamports); it is one reading used for both questions rather than two "
+                f"that could disagree"
             )
         else:
-            rent_minimum = self.rent_exempt_minimum(SYSTEM_ACCOUNT_SPACE)
+            rent_minimum = account_floor
             rent_source = (
                 f"{rent_minimum} lamports, read from the CLUSTER with "
                 f"getMinimumBalanceForRentExemption({SYSTEM_ACCOUNT_SPACE}) rather than from a constant -- "
@@ -1772,7 +1904,7 @@ class SolanaAdapter:
             )
         rent_line = require_destination_rent(destination_exists, plan["base_units"], rent_minimum)
         balance = self.balance_lamports(payer)
-        retain = self.rent_exempt_minimum(SYSTEM_ACCOUNT_SPACE) + int(retain_lamports)
+        retain = account_floor + int(retain_lamports)
         headroom = require_lamport_headroom(balance, plan["base_units"], plan["fee_lamports"], retain)
 
         plan.update(
@@ -1856,25 +1988,36 @@ class SolanaAdapter:
                             second branch, gets the preview inside the refusal
                             with SOL_PAYOUT_KEYPAIR_PATH named, and the swap
                             lands in `failed` with that reason recorded.
-          can_spend         DERIVED, not hardcoded, since 2026-10-03: this
-                            instance's can_spend is
-                            chains/solana_payout_keypair.
-                            payout_keypair_is_present(), so an unarmed process
-                            reports SOL as unable to pay out exactly as before
-                            and an armed one does not. What is UNCHANGED is
-                            that Config.ALLOWED_PAIRS names no pair that pays
-                            out in SOL (measured 2026-10-03), and enabling one
-                            is live posture and is the operator's.
+          can_spend         DERIVED, not hardcoded, since 2026-10-03, and since
+                            2026-10-11 derived from the WHOLE question rather
+                            than a third of it: this instance's can_spend is
+                            chains/solana_payout_keypair.payout_capability(),
+                            which requires the keypair path AND an on-curve
+                            SOL_HOT_WALLET for the key to derive to AND no SPL
+                            mint. It read payout_keypair_is_present() alone
+                            until then, and the two states that cost are
+                            measured at the __init__ call site. "What is
+                            UNCHANGED is that Config.ALLOWED_PAIRS names no
+                            pair that pays out in SOL (measured 2026-10-03)" IS
+                            NO LONGER TRUE EITHER: re-counted 2026-10-11, five
+                            pairs pay out in SOL. Enabling them was live
+                            posture and the operator did it.
 
-        AND THE BROADCAST ITSELF IS A PROPOSAL (rule 16), which is the one
-        sentence in this docstring that matters most. No transaction built by
-        this path has ever reached a cluster: api.devnet.solana.com answers 403
-        at this container's proxy -- re-measured 2026-10-02 -- so the
-        serialization is verified against an independent implementation
-        (chains/solana_transaction.py's header has the measurement) and the
-        broadcast is verified against nothing. The first real send is the
-        operator's run, and it should be for the smallest amount that clears
-        the rent floor the preview prints.
+        AND THE BROADCAST HAS RUN, WHICH THIS PARAGRAPH DENIED FOR EIGHT DAYS.
+        It read: "AND THE BROADCAST ITSELF IS A PROPOSAL (rule 16), which is
+        the one sentence in this docstring that matters most. No transaction
+        built by this path has ever reached a cluster". Measured false from the
+        operator's own database and re-read off devnet the same day: payouts
+        id=14 and id=15, GRC->SOL, 761654 lamports each, 2026-10-03. The 403 at
+        this container's proxy is still real and still means no test in this
+        repository can broadcast -- which is why the serialization is ALSO
+        verified against an independent implementation (chains/
+        solana_transaction.py's header has the measurement) -- but a claim
+        scoped to this environment was written as a claim about the world.
+        MAINNET is what is still a proposal, and require_devnet() refuses it by
+        genesis hash with no flag that turns it off. A first send on any
+        cluster should still be for the smallest amount that clears the rent
+        floor the preview prints.
 
         Returns the transaction signature, which is Solana's transaction id.
         Raises on every refusal, and the class of the exception says WHICH

@@ -108,9 +108,15 @@ No mainnet, no testnet, and no local validator. require_devnet() accepts one
 genesis hash.
 
 No broadcast, and no retry of one. Whether a signed transaction reaches a
-cluster is chains/solana.py's business, and nothing in this tree has ever done
-it -- see that module's header for the measurement (403 at this container's
-proxy) and rule 16's line between a fix and a proposal.
+cluster is chains/solana.py's business. THIS SENTENCE CONTINUED "and nothing in
+this tree has ever done it" UNTIL 2026-10-11, and that had been false since
+2026-10-03: two GRC->SOL payouts built by this module's signed_transfer_wire()
+settled on devnet and were read back off the cluster (payouts.id=14 and id=15,
+761654 lamports each; chains/solana.py's header has the citation). What remains
+true, and is the measurement the old sentence rested on, is that
+api.devnet.solana.com answers 403 at this container's proxy -- so no test in
+this repository can broadcast, and rule 16's line between a fix and a proposal
+now falls at MAINNET rather than at any send.
 """
 
 from __future__ import annotations
