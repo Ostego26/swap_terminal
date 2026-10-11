@@ -996,6 +996,96 @@ def still_unset(values: dict, already: dict) -> list[str]:
                   if not values.get(name) and not already.get(name))
 
 
+#: A per-chain arming overlay at the repository root, and the asset it arms. Matched rather
+#: than listed, so an overlay added later is reported without this file being edited
+#: (rule 8) -- and so a reader cannot be told about an overlay that no longer exists.
+ARMED_OVERLAY = re.compile(r"^docker-compose\.web\.armed-([a-z]+)\.yml$")
+
+#: The one required variable inside an overlay, as compose spells a hard requirement.
+#: `:?` rather than `:-` is the whole distinction: compose REFUSES to start when a `${VAR:?}`
+#: is unset or empty, which is what makes arming an act rather than an inheritance.
+OVERLAY_REQUIRES = re.compile(r"\$\{([A-Z][A-Z0-9_]*):\?")
+
+
+def arming_overlays() -> list[tuple[str, str, str]]:
+    """(asset, overlay filename, the one variable it requires), read off the root.
+
+    COMMENT LINES ARE SKIPPED and that is not cosmetic: every one of these files explains
+    the "at most one ${VAR:?} per compose file" rule IN PROSE, quoting the literal
+    `${VAR:?}` to name it. Reading the raw text finds `VAR` as a requirement of two of the
+    three overlays -- which is the same prose-read-as-code defect that put configure_env.py
+    into tests/test_daemon_conf.py's chain-resolver register this morning, in a second
+    file, within the hour. The lesson keeps costing because the scan keeps being written
+    fresh.
+
+    SORTED BY ASSET so two runs read the same, and a diff between them is about arming
+    rather than about directory order.
+    """
+    found = []
+    for path in sorted(REPO_ROOT.glob("docker-compose.web.armed-*.yml")):
+        match = ARMED_OVERLAY.match(path.name)
+        if not match:
+            continue
+        code = "".join(line for line in path.read_text().splitlines()
+                       if not line.lstrip().startswith("#"))
+        required = OVERLAY_REQUIRES.findall(code)
+        found.append((match.group(1).upper(), path.name, required[0] if required else ""))
+    return sorted(found)
+
+
+def say_arming(already: dict) -> None:
+    """What this tool does NOT set, and what a chain still needs before it can PAY.
+
+    =========================================================================
+    THE 17 VARIABLES ABOVE CONFIGURE THE DEPOSIT LEG. A CHAIN CAN READ
+    DEPOSITS PERFECTLY AND BE UNABLE TO SEND A PAYOUT.
+    =========================================================================
+
+    Found 2026-10-11, while about to tell the operator that setting SOL_HOT_WALLET would
+    finish SOL. It would not. SOL payouts need SOL_PAYOUT_KEYPAIR_HOST_FILE and the
+    docker-compose.web.armed-sol.yml overlay; XRP needs XRP_PAYOUT_SECRET_SEED and
+    armed-xrp. Neither is in this tool's 17, and the report said
+
+        AFTERWARDS  2 of 17 written with no prompt
+                    4 of 17 ONLY IF YOU ANSWER
+
+    with nothing to indicate that two chains would still be half-configured after every
+    one of the 17 was set. THAT IS THE DEFECT THIS WHOLE TOOL EXISTS FOR, one layer out:
+    something the system needs that nothing sets and nothing mentions. Measured against
+    .env.example, which declares 92 variables to this tool's 17 -- most of the other 75
+    are tunables with defaults, and these are the ones that gate a leg.
+
+    IT WILL NEVER SET THEM, and that is a design decision rather than a gap to close
+    later. Both name a signing credential, and chain-safety is unambiguous: "Never move,
+    copy, or read back a key. Not .env, not a keypair JSON, not a WIF." The overlays
+    themselves make the same argument at greater length -- arming is a posture, it should
+    take an act to enter, and naming the file on the command line is that act. A
+    configuration tool that armed a payout path would be exactly the inheritance those
+    files were separated to prevent.
+
+    SO THIS BLOCK REPORTS AND DOES NOT OFFER. PRESENCE ONLY, NEVER A VALUE -- the same
+    rule the "already in .env" line follows, and here it matters more: one of these is a
+    wallet passphrase and one is an XRP secret seed.
+    """
+    overlays = arming_overlays()
+    compose = already.get("COMPOSE_FILE", "")
+    say("")
+    say("  PAYOUTS ARE ARMED SEPARATELY, and this tool sets none of it. The variables above")
+    say("  configure the DEPOSIT leg; a chain can read deposits and still be unable to send.")
+    if not overlays:
+        say("    (none)  <- no docker-compose.web.armed-*.yml at the repository root, so no")
+        say("            chain can sign a payout from this checkout at all")
+        return
+    for asset, filename, variable in overlays:
+        active = "named in COMPOSE_FILE" if filename in compose else "NOT in COMPOSE_FILE"
+        held = "set in .env" if already.get(variable) else "NOT set in .env"
+        say(f"    {asset:5} {filename}")
+        say(f"    {'':5} needs {variable}  <- {held}; overlay {active}")
+    say(f"    none of these {len(overlays)} is settable here: each names a signing credential, and")
+    say("    this tool never reads, copies or writes one. Arming is an act you take on the")
+    say("    command line, which is why it is a separate file per chain.")
+
+
 def say_dry_run(needed: list, values: dict, secrets: set, already: dict) -> None:
     """What an --apply run would ask for and write. Rule 14: `(none)` is a result.
 
@@ -1192,6 +1282,7 @@ def main() -> int:
 
     if not args.apply:
         say_dry_run(needed, values, secrets, already)
+        say_arming(already)
         return 0
 
     values.update(collect_answers(needed, secrets))
@@ -1203,10 +1294,12 @@ def main() -> int:
         # as "nothing to write" on a run where everything was already correct, and those
         # are opposite states (rule 14).
         say_still_unset(values, already)
+        say_arming(already)
         return 0
 
     write_env(values)
     say_what_was_written(values, already)
+    say_arming(already)
     return 0
 
 

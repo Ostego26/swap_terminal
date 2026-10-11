@@ -41,6 +41,9 @@ forty-seven.
 
 from __future__ import annotations
 
+import ast
+import pathlib
+
 import pytest
 from network_target import CHAIN_PORTS
 
@@ -662,9 +665,16 @@ def test_the_nothing_to_write_exit_says_what_it_left_dark(env_file, monkeypatch,
         f"a run that skipped every prompt said only 'nothing to write', which is the same "
         f"output a fully configured host produces:\n{printed}"
     )
-    assert "(none)" not in after[1], "a run that configured nothing reported nothing unset"
+    # BOUNDED TO THE BLOCK, not to the rest of the screen. This assertion read everything
+    # after "STILL UNSET" and started failing the moment say_arming() was added below it,
+    # because that block prints its own `(none)` when no arming overlay exists. The claim
+    # was always about THIS block; the slice was wider than the claim, which is the same
+    # shape as the prose-read-as-code defect two commits ago -- an assertion true of text
+    # adjacent to the thing it names.
+    block = after[1].split("PAYOUTS ARE ARMED", 1)[0]
+    assert "(none)" not in block, "a run that configured nothing reported nothing unset"
     for name in ("BTC_RPC_USER", "BTC_RPC_PASS", "SOL_HOT_WALLET", "XRP_DEPOSIT_ACCOUNT"):
-        assert name in after[1], f"{name} was skipped and the report does not name it"
+        assert name in block, f"{name} was skipped and the report does not name it"
 
 
 def test_the_still_unset_report_varies_with_what_was_actually_set(capsys):
@@ -693,6 +703,161 @@ def test_the_still_unset_report_varies_with_what_was_actually_set(capsys):
     # for, and a report that counted them as set would describe it as fully configured.
     configure_env.say_still_unset({}, dict.fromkeys(everything, ""))
     assert everything[0] in capsys.readouterr().out, "an empty .env value was counted as set"
+
+
+def test_an_overlays_prose_example_is_not_read_as_a_requirement():
+    """MUTATION: drop the comment-line filter in arming_overlays().
+
+    MEASURED AGAINST THE REAL OVERLAY FILES, not a fixture, because the hazard is in
+    their actual text: every one of them explains compose's "at most one ${VAR:?} per
+    file" rule IN PROSE, quoting the literal `${VAR:?}` in order to name it. A raw-text
+    scan returns `VAR` as the requirement of two of the three.
+
+    THIS IS THE THIRD TIME IN ONE DAY. tests/test_daemon_conf.py's chain-resolver register
+    classified configure_env.py as an unclassified resolver because its docstring NAMES
+    build_adapters(); the two gates below it had already learned the same lesson from
+    testnet_wallets.py on 2026-10-10. A sentence that explains a rule is not an instance
+    of it, and a scan that cannot tell the difference reports on the explanation.
+    """
+    overlays = configure_env.arming_overlays()
+
+    assert overlays, "no arming overlay was found at the repository root"
+    for asset, filename, variable in overlays:
+        assert variable != "VAR", (
+            f"{filename}'s prose example was read as {asset}'s requirement, so the block "
+            f"would tell an operator to set a variable that does not exist"
+        )
+        assert variable, f"{filename} declares no required variable at all"
+        assert variable in pathlib.Path(filename).read_text(), "the variable is not in that file"
+
+
+def test_the_arming_block_reports_presence_and_never_a_value(capsys):
+    """MUTATION: print `already[variable]` beside the name.
+
+    ONE OF THESE IS A WALLET PASSPHRASE AND ONE IS AN XRP SECRET SEED. The banner's
+    "already in .env" line follows the same rule and says so; here the consequence is
+    larger, and the only way to test a negative about printing is to seed a sentinel and
+    assert its absence.
+    """
+    required = [variable for _asset, _filename, variable in configure_env.arming_overlays()]
+    configure_env.say_arming(dict.fromkeys(required, LEAK_SENTINEL))
+    printed = capsys.readouterr().out
+
+    assert LEAK_SENTINEL not in printed, "a signing credential was printed by a report"
+    # The NAMES are what make it actionable, so they must be there.
+    for _asset, _filename, variable in configure_env.arming_overlays():
+        assert variable in printed
+    assert "set in .env" in printed
+
+
+def test_the_arming_block_says_whether_the_overlay_is_actually_in_use(capsys):
+    """MUTATION: print a constant instead of testing membership in COMPOSE_FILE.
+
+    A variable set in .env and an overlay named on the command line are two separate
+    conditions and BOTH are required -- compose refuses to start on the unset variable,
+    and without the overlay the variable is never passed to the container at all. An
+    operator who has done one of the two has done nothing, and the block has to tell them
+    which half is missing.
+    """
+    overlays = configure_env.arming_overlays()
+    first = overlays[0]
+
+    configure_env.say_arming({"COMPOSE_FILE": f"docker-compose.yml:{first[1]}"})
+    printed = capsys.readouterr().out
+    lines = [line for line in printed.splitlines() if first[2] in line]
+    assert lines and "named in COMPOSE_FILE" in lines[0], f"the active overlay was not recognized: {lines}"
+    # And the others, which are not named, must read the other way.
+    for _asset, filename, variable in overlays[1:]:
+        other = [line for line in printed.splitlines() if variable in line]
+        assert other and "NOT in COMPOSE_FILE" in other[0], f"{filename} was reported as active"
+
+
+def test_the_arming_block_is_a_result_when_there_is_no_overlay(env_file, capsys):
+    """Rule 14: a blank gap is ambiguous between "nothing to arm" and "the scan broke".
+
+    The env_file fixture points REPO_ROOT at tmp_path, so the glob finds nothing -- which
+    is also the real state of a checkout where the overlays were deleted, and that state
+    means NO chain can sign a payout from it. Silence would read as "nothing to worry
+    about" for the one condition that disables every payout path at once.
+    """
+    del env_file
+    configure_env.say_arming({})
+    printed = capsys.readouterr().out
+
+    assert "(none)" in printed
+    assert "no chain can sign a payout" in printed.replace("\n", " ").replace("   ", "")
+
+
+def test_every_exit_from_main_reports_the_arming_state(env_file, monkeypatch, capsys):
+    """MUTATION: drop say_arming() from any one of main()'s three returns.
+
+    THE WIRING GAP AGAIN, and it is the second time in this file: the first was
+    accounts_from_the_database(), correct and fully tested and called by nothing. A report
+    that only some exits print is worse than one that prints nowhere, because the operator
+    learns to expect it and then does not get it on the run that mattered.
+
+    Each case below is a real exit, driven through the real main(): report-only, write,
+    and write-nothing.
+    """
+    always_present = (
+        "SOL_RPC_URL='https://api.devnet.solana.com'\n"
+        "XRP_RPC_URL='https://s.altnet.rippletest.net:51234'\n"
+        "ICP_DFX_SERVICE='icp-replica'\n"
+    )
+    monkeypatch.setattr(configure_env, "listening_ports", set)
+
+    for label, argv, answers, env_text in (
+        ("the dry run", ["configure_env.py"], None, ""),
+        ("a run that writes", ["configure_env.py", "--apply"], "BTC_RPC_USER=u", ""),
+        ("a run with nothing to write", ["configure_env.py", "--apply"], "", always_present),
+    ):
+        env_file.write_text(env_text)
+        monkeypatch.setattr("sys.argv", argv)
+        if answers is None:
+            monkeypatch.delenv("ST_ANSWERS", raising=False)
+        else:
+            monkeypatch.setenv("ST_ANSWERS", answers)
+
+        assert configure_env.main() == 0
+        printed = capsys.readouterr().out
+        assert "PAYOUTS ARE ARMED" in printed, f"{label} did not report the arming state"
+
+
+def test_no_exit_added_later_can_skip_the_arming_report():
+    """The structural half, which the three cases above cannot give.
+
+    A FOURTH EXIT ADDED LATER would pass the test above untouched -- it enumerates the
+    exits it knows, and CLAUDE.md's note on this exact failure is that "a check that
+    enumerates what it checks measures the list". So this walks main()'s own AST and
+    requires every `return` to have a say_arming() call somewhere before it in the same
+    block.
+
+    IT IS A COVERAGE PROPERTY OVER CODE THAT DOES NOT EXIST YET, which is the one case
+    where reading the source is the only form of check available. It does not replace the
+    behavioral test above and is not evidence the report is correct -- only that no exit
+    is missing it.
+    """
+    source = pathlib.Path(configure_env.__file__).read_text()
+    main = next(node for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+
+    def calls_arming(statements):
+        return any(isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+                   and getattr(stmt.value.func, "id", "") == "say_arming"
+                   for stmt in statements)
+
+    returns = 0
+    for block in [main.body, *[node.body for node in ast.walk(main)
+                               if isinstance(node, ast.If | ast.For | ast.While | ast.Try)]]:
+        for index, statement in enumerate(block):
+            if isinstance(statement, ast.Return):
+                returns += 1
+                assert calls_arming(block[:index]), (
+                    f"the `return` at line {statement.lineno} is reached without reporting the "
+                    f"arming state, so an operator leaving main() by that path is told the 17 "
+                    f"variables are the whole story"
+                )
+    assert returns >= 3, f"main() has {returns} returns; this test has stopped measuring"
 
 
 def test_every_help_string_tells_the_operator_what_to_do(env_file):
