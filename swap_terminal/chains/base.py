@@ -781,9 +781,43 @@ class RPCAdapter:
         # (rule 16). A payout refused here has already taken the customer's
         # deposit; refusing at creation costs a retry, which is the whole argument
         # services/payout_capacity.py was built on the same day. What stops it being
-        # done here is that the threshold is not zero -- Bitcoin Core also rejects
-        # an output below its DUST limit, which is a few hundred satoshis and
-        # depends on the output type, and no part of this tree measures it yet.
+        # done here is NOT that the threshold is unknown. THIS COMMENT SAID "no part of
+        # this tree measures it yet" AND THAT WAS FALSE WHEN IT WAS WRITTEN.
+        # modules/htlc_fee.dust_threshold_satoshis(asset, script_pubkey) computes it from
+        # DUST_RELAY_FEE_SAT_PER_KVB, measured against each daemon:
+        #
+        #     shape     BTC    LTC     LTC as a coin amount
+        #     P2WPKH     294   2940    0.00002940
+        #     P2WSH      330   3300    0.00003300
+        #     P2TR       330   3300    0.00003300
+        #     P2PKH      546   5460    0.00005460
+        #
+        # LITECOIN'S DUST RELAY RATE IS TEN TIMES BITCOIN'S -- 30000 against 3000
+        # sat/kvB -- so there is a band, 295 to 2939 base units, where a payout is
+        # deliverable on BTC and REFUSED BY litecoind. Every amount in this tree is
+        # spelled in whole coins, where the two chains look identical. GRC reaches that
+        # band easily in the other direction: its rate is 0, because Gridcoin has no dust
+        # rule at all, so a small tGRC deposit produces a sub-dust tLTC payout. Measured
+        # 2026-10-11: 2000 litoshi reached sendtoaddress, the swap completed, the txid was
+        # recorded, and nothing refused it -- not at quote time, not here.
+        #
+        # SO THE FALSE SENTENCE WAS THE DEFECT, not the missing gate. It is what told a
+        # reader the figure did not exist, and rule 16 is explicit that a wrong comment is
+        # fixed with the same seriousness as wrong code.
+        #
+        # WHY THE GATE IS STILL NOT HERE, which is a different reason than the old one
+        # claimed. First, this module cannot import modules/htlc_fee.py: that pulls in
+        # base58, bech32 and ecdsa, and swap_terminal/requirements.txt states as a
+        # deployment property that the Flask app does not drag the atomic-swap
+        # dependencies in. The shape that works is a package-root leaf with no third-party
+        # imports, as script_pub_key.py and microfortnights.py already are. Second, a
+        # refusal HERE arrives after the deposit is irreversible and sends the swap to
+        # `failed` with no retry -- measured by mutation. The gate belongs at quote time
+        # beside services/quote_service.require_deliverable_sol_payout(), which exists for
+        # exactly this on Solana because the operator asked for it on 2026-10-02.
+        #
+        # That remains the operator's call (rule 16): it changes whether a swap may
+        # proceed. What is no longer true is that the number is unknown.
         # Refusing exactly-zero is the half that needs no threshold.
         if fitted <= 0 < float(amount):
             raise RPCError(
