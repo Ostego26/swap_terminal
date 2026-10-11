@@ -1342,8 +1342,95 @@ class SolanaAdapter:
         meta = transaction.get("meta") or {}
         if meta.get("err") is not None:
             return []
-        credits = (self._spl_credits(signature, address, meta, rank) if self.is_spl
-                   else self._native_credits(signature, address, transaction, meta, rank))
+        # =====================================================================
+        # THE DEPOSIT LEG IS ALWAYS NATIVE SOL. SOL_SPL_MINT IS A PAYOUT SETTING.
+        # =====================================================================
+        #
+        # This line was:
+        #
+        #     credits = (self._spl_credits(...) if self.is_spl
+        #                else self._native_credits(...))
+        #
+        # so with SOL_SPL_MINT set, a customer who sent NATIVE SOL to
+        # SOL_DEPOSIT_ACCOUNT with a correct memo got nothing: _spl_credits() found no
+        # matching pre/postTokenBalances entry and returned [], _attributable() returned
+        # [] on `if not credits` BEFORE the memo was ever read -- so there was no
+        # deposit_events row, NO unattributable_deposits row either, and the scan's INFO
+        # line read exactly like a healthy one. The swap sat at awaiting_deposit forever
+        # with the money provably in the account.
+        #
+        # MEASURED 2026-10-10 with a seeded getSignaturesForAddress/getTransaction pair
+        # carrying a native 1.5 SOL credit and a valid spl-memo of '12': with mint=''
+        # it returned one event (vout 12, amount 1.5); with the mint set it returned
+        # `events: []`, `unattributable: []`, and the same INFO line ending "Nothing was
+        # skipped: (none)."
+        #
+        # WHY NATIVE IS THE RIGHT ANSWER RATHER THAN READING BOTH. Operator, 2026-10-11:
+        # "sol should be devnet coins that we can swap into any other chain" and "any
+        # other chain should be able to be swapped into any other as the entire main
+        # idea of this fucking project". And services/pricing.py prices the asset string
+        # 'SOL' as NATIVE SOL either way, so anything credited as a SOL deposit must BE
+        # native SOL or the rate is wrong -- crediting a token as 'SOL' at the mint's own
+        # decimals against a natively-priced quote is rule 11's wrong-precision case
+        # sitting on the gate that releases a payout.
+        #
+        # CLAUDE.md ALREADY SAID SO, which is what makes this a leak rather than a design
+        # choice: "SPL/wGRC PAYOUT SUPPORT IN THE PYTHON TREE IS UNTOUCHED and is a
+        # different thing -- chains/solana.py and SOL_SPL_MINT pay an SPL token OUT".
+        # Out. The other three is_spl branches in this file are all on the payout side
+        # (get_balance at ~1070, describe_address at ~1004, the send path at ~2007) and
+        # are correct; this was the one on the deposit side and it had no business here.
+        credits = self._native_credits(signature, address, transaction, meta, rank)
+
+        # AND A TOKEN ARRIVING INSTEAD MUST NOT BE SILENT, which is the half that stops
+        # this fix from trading one quiet failure for another. If somebody sends the
+        # configured SPL token to the deposit account, there is no native delta, so
+        # `credits` is empty and _attributable() returns [] -- money in the account,
+        # nothing in any table. That is the shape of the defect this block replaces.
+        #
+        # So the token read still happens, and ONLY to record a drop: an
+        # UnattributableCredit naming the signature, the amount at the MINT's decimals,
+        # and why it is not a SOL deposit. record_what_nobody_can_claim() in
+        # services/deposit_service.py writes the row with no change at its call site,
+        # and show_unattributable.py and /admin can both see it.
+        #
+        # ONLY WHEN THERE IS NO NATIVE CREDIT. A transaction that moves both -- native
+        # SOL to the deposit account and a token to the same owner -- is a SOL deposit
+        # that happens to carry a token transfer; crediting the SOL and also recording
+        # a drop would assert two things about one payment, which is what db.py's
+        # comment on unattributable_deposits refuses.
+        #
+        # AND ONLY WHEN A MINT IS CONFIGURED, because _spl_credits() matches on
+        # `self.mint` and an unset mint matches nothing. A token this terminal is not
+        # configured for is invisible here either way, which is stated rather than
+        # hidden: it is a gap, and the remedy for it is a mint in the environment.
+        if not credits and self.is_spl:
+            token_credits = self._spl_credits(signature, address, meta, rank)
+            if token_credits:
+                stranded = sum(float(credit["amount"]) for credit in token_credits)
+                self.unattributable_drops.append(UnattributableCredit(
+                    signature=signature,
+                    credits=len(token_credits),
+                    amount=stranded,
+                    address=address,
+                    why=(
+                        f"{stranded} of SPL mint {self.mint} arrived at this SOL deposit account, and a SOL "
+                        f"deposit is NATIVE SOL -- services/pricing.py quotes the asset string 'SOL' at native "
+                        f"SOL's price, so crediting a token against that rate would be wrong by whatever the "
+                        f"two are worth relative to each other. SOL_SPL_MINT configures the PAYOUT direction, "
+                        f"not this one. Nothing was credited; this row is the record that the money arrived"
+                    ),
+                ))
+                logger.warning(
+                    "signature %s delivered %s of SPL mint %s to the SOL deposit account %s and NOTHING WAS "
+                    "CREDITED: a SOL deposit is native SOL. Recorded as unattributable so the money is in a "
+                    "table rather than only in this line. SOL_SPL_MINT is a payout setting; it stopped "
+                    "selecting the deposit reader on 2026-10-11, when a native SOL deposit with a correct "
+                    "memo was being dropped with no event and no row at all.",
+                    signature, stranded, self.mint, address,
+                )
+                return []
+
         return self._attributable(signature, transaction, credits)
 
     def _attributable(self, signature: str, transaction: dict, credits: list[dict]) -> list[dict]:

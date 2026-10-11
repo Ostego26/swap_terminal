@@ -1154,7 +1154,12 @@ def test_a_reader_that_decoded_an_amount_says_so_and_names_the_other_one():
     text = summary_text(NATIVE_DECODED)
     assert "_native_credits DECODED" in text
     assert "1 refused" in text
-    assert "_spl_credits (needs --mint)" in text, "name the reader still outstanding, and how"
+    # THE WORDING MOVED 2026-10-11 and the requirement did not: name the reader still
+    # outstanding AND how to exercise it. With no mint, _spl_credits matches nothing, so
+    # what is outstanding is the drop recorder and the remedy is --mint.
+    assert "_spl_credits" in text, "name the reader still outstanding"
+    assert "no mint is set" in text, "and WHY it could not have run"
+    assert "--mint" in text, "and how to exercise it (rule 14: the instruction goes with the number)"
     assert "PARTLY" not in text
 
 
@@ -1196,9 +1201,30 @@ def test_decoded_an_amount_counts_a_REFUSAL_and_not_only_a_CREDIT():
     assert NOTHING_READ.decoded_an_amount is False
 
 
-def test_the_reader_is_named_from_the_adapters_mode_and_not_from_a_string():
-    assert SPL_FILTER_ONLY.reader == "_spl_credits"
+def test_the_deposit_reader_is_always_native_since_the_path_stopped_branching():
+    """RENAMED AND INVERTED 2026-10-11, because the thing it asserted stopped being true.
+
+    It was `test_the_reader_is_named_from_the_adapters_mode_and_not_from_a_string` and it
+    asserted `SPL_FILTER_ONLY.reader == "_spl_credits"`. _credits_in_transaction() no
+    longer chooses a reader on `is_spl`: a SOL deposit is NATIVE SOL, so _native_credits
+    runs always and _spl_credits runs only to RECORD A DROP for a token arriving where
+    native SOL was expected.
+
+    THE PROPERTY IT WAS PROTECTING SURVIVES AND IS WHY THE CLASS EXISTS: the summary must
+    name what RAN, not what was configured. A `reader` property that still returned
+    _spl_credits for an SPL run would be CreditPathObserved's founding defect committed
+    by the class built to prevent it -- so the mint now moves `spl_drop_reader_ran`,
+    which is a different question, and the two are asserted separately.
+    """
+    assert SPL_FILTER_ONLY.reader == "_native_credits", (
+        "the deposit path does not branch on the mint any more; naming _spl_credits as the "
+        "reader would send an operator to read the wrong function"
+    )
     assert NATIVE_DECODED.reader == "_native_credits"
+
+    # The mint still decides something -- just not which reader the deposit path uses.
+    assert SPL_FILTER_ONLY.spl_drop_reader_ran is True
+    assert NATIVE_DECODED.spl_drop_reader_ran is False
 
 
 def test_main_with_no_arguments_reads_an_address_and_says_the_credit_path_ran(monkeypatch, capsys):
@@ -2308,12 +2334,33 @@ def _spl_transaction(before, after, *, memo=False):
     }
 
 
-def test_a_decoded_and_attributed_credit_says_the_reader_is_proven():
+def test_a_decoded_token_credit_says_the_reader_is_proven_and_why_it_is_not_credited():
+    """RENAMED 2026-10-11: a token can no longer be ATTRIBUTED to a swap at all.
+
+    It was `test_a_decoded_and_attributed_credit_says_the_reader_is_proven` and asserted
+    "DECODED and ATTRIBUTED" plus `vout=4242` -- the memo tag becoming the discriminator.
+    A SOL deposit is NATIVE SOL now, so _credits_in_transaction() reaches _spl_credits
+    only to RECORD A DROP and the memo is never consulted on that path. The tag cannot
+    become a discriminator for a token, so asserting it did would pin behavior the
+    operator has said is wrong.
+
+    WHAT THE STEP EXISTS TO ESTABLISH IS UNCHANGED and is still asserted: an amount was
+    decoded off a real response at the MINT's own decimals, which means every field name
+    in the reader was right. 2_500_000_000 base units at 9 decimals is 2.5 -- and that
+    figure is the proof, because SOL's nine would be a coincidence here and the mint's
+    own decimals are what produced it.
+    """
     adapter = _seeded_adapter(mint=_A_MINT, responses={"getTransaction": _spl_transaction("0", "2500000000", memo=True)})
     line = _spl_reader_line(adapter, _A_HOLDER, "4yPFj1mq")
-    assert "DECODED and ATTRIBUTED" in line
+
     assert "2.5" in line, "the decoded amount, from uiTokenAmount.amount and .decimals"
-    assert "vout=4242" in line, "the memo tag became the discriminator"
+    assert "PROVEN" in line, "a decoded amount proves the decoder, which is the step's purpose"
+    assert "UNATTRIBUTABLE" in line
+    assert "not a SOL deposit" in line, "the real reason, which an operator can act on"
+    # AND NOT THE FALSE REASON IT USED TO GIVE. This transaction carries a perfectly good
+    # memo; "no usable memo" would send the operator looking for one they already have.
+    assert "no usable memo" not in line
+    assert "memo is not consulted here" in line
 
 
 def test_a_DECODED_THEN_REFUSED_credit_still_PROVES_the_decoder():
@@ -2333,12 +2380,16 @@ def test_a_DECODED_THEN_REFUSED_credit_still_PROVES_the_decoder():
     """
     adapter = _seeded_adapter(mint=_A_MINT, responses={"getTransaction": _spl_transaction("0", "2500000000")})
     line = _spl_reader_line(adapter, _A_HOLDER, "4yPFj1mq")
-    assert "DECODED 1 credit(s) and then REFUSED" in line
+    # THE WORDING MOVED 2026-10-11 and the lesson did not: an empty credit list with a
+    # recorded drop means the amount WAS decoded. Only the REASON for the refusal changed
+    # -- it is "a token is not a SOL deposit", not "no usable memo".
+    assert "DECODED 1 credit(s)" in line
+    assert "UNATTRIBUTABLE" in line
     assert "are PROVEN" in line
     assert "not POSITIVE" not in line, (
         "the amount WAS decoded -- that sentence is the defect this test exists for"
     )
-    assert "which is correct" in line, "refusing an unattributable credit is the right behavior"
+    assert "which is correct" in line, "refusing an uncreditable credit is the right behavior"
 
 
 def test_no_positive_delta_is_reported_as_a_fact_about_the_TRANSACTION():
@@ -2352,12 +2403,38 @@ def test_no_positive_delta_is_reported_as_a_fact_about_the_TRANSACTION():
     assert "NOT the same as the reader never running" in line
 
 
-def test_the_three_outcomes_are_distinguishable():
-    adapter_lines = []
-    for before, after, memo in (("0", "2500000000", True), ("0", "2500000000", False), ("5", "5", False)):
-        adapter = _seeded_adapter(mint=_A_MINT, responses={"getTransaction": _spl_transaction(before, after, memo=memo)})
-        adapter_lines.append(_spl_reader_line(adapter, _A_HOLDER, "4yPFj1mq"))
-    assert len(set(adapter_lines)) == 3
+def test_the_two_remaining_outcomes_are_distinguishable_and_the_memo_no_longer_splits_them():
+    """THREE BECAME TWO ON 2026-10-11, and the collapse is the thing to assert.
+
+    The three used to be: decoded-and-attributed, decoded-then-memo-refused, and no
+    positive delta. The first two differed ONLY by whether the memo carried a tag -- and
+    the memo is no longer consulted for a token, because a SOL deposit is native SOL and
+    _spl_credits is reached only to record a drop.
+
+    SO THE MEMO MUST NO LONGER CHANGE THE LINE, which is asserted directly rather than
+    left as a consequence: if a future version made the memo matter again on this path,
+    it would be crediting a token against a natively-priced quote, and this is where that
+    shows up.
+
+    A COUNT ALONE WOULD NOT CATCH IT. `len(set(...)) == 2` passes if the two token cases
+    produced different text and one of them collided with the no-delta case, so the
+    equality is asserted between the two specific lines that must now match.
+    """
+    with_memo, without_memo, no_delta = (
+        _spl_reader_line(
+            _seeded_adapter(mint=_A_MINT, responses={"getTransaction": _spl_transaction(before, after, memo=memo)}),
+            _A_HOLDER, "4yPFj1mq",
+        )
+        for before, after, memo in (("0", "2500000000", True), ("0", "2500000000", False), ("5", "5", False))
+    )
+
+    assert with_memo == without_memo, (
+        "the memo changed the outcome for a TOKEN, which means the deposit path is reading it "
+        "again -- and a token credited against a natively-priced quote is wrong by whatever the "
+        "two are worth relative to each other (rule 11)"
+    )
+    assert no_delta != with_memo, "a decoded amount and no amount at all must not read the same"
+    assert len({with_memo, without_memo, no_delta}) == 2
 
 
 def test_the_drops_are_cleared_so_an_earlier_step_cannot_be_misread_as_this_one():
@@ -2873,22 +2950,46 @@ def test_the_summary_never_says_the_OTHER_reader_decoded_nothing():
 
     MUTATION: restore "has not decoded one" and this fails on either reader.
     """
-    for observed, named, ran in ((SPL_DECODED, "_native_credits (drop --mint)", "_spl_credits"),
-                                 (NATIVE_DECODED, "_spl_credits (needs --mint)",
-                                  "_native_credits")):
+    # =========================================================================
+    # REWRITTEN 2026-10-11 FOR A MODEL CHANGE, AND THE RULE IT PINS IS UNCHANGED
+    # =========================================================================
+    #
+    # "A run reads one reader or the other, never both" was true until the deposit path
+    # stopped branching. _native_credits now runs ALWAYS, so the old wording named it as
+    # unexercised on exactly the runs that DID exercise it -- this test's own defect,
+    # arriving by a third route.
+    #
+    # WHAT IS STILL FORBIDDEN, and it is the whole point: stating something the run did
+    # not measure in the voice of having measured it. Both branches below are checked for
+    # that, and the phrases that would signal it are pinned as ABSENT.
+    for observed, ran in ((SPL_DECODED, "_native_credits"), (NATIVE_DECODED, "_native_credits")):
         block = summary_text(observed)
         assert f"{ran} DECODED a real amount" in block, "what this run DID establish"
-        assert f"{named}, was NOT exercised by this run" in block
         assert "nothing here says whether it works" in block, (
             "and the limit of the claim, next to the claim (rule 14)"
         )
         assert "has not decoded one" not in block, (
             "a run that never called a reader has measured nothing about it"
         )
-        assert "never" in block and "both" in block, (
-            "and WHY it was not exercised -- a run reads one or the other, so this is not a gap "
-            "the operator left open by accident"
-        )
+
+    # WITH A MINT: the token branch MAY have run, per transaction, and this run does not
+    # count which transactions took it. So the summary must hedge, and must not claim.
+    with_mint = summary_text(SPL_DECODED)
+    assert "MAY ALSO have run" in with_mint
+    assert "does not count which transactions took that branch" in with_mint
+    assert "was NOT exercised" not in with_mint, (
+        "_spl_credits may well have run on an SPL run; saying it was not exercised is the "
+        "fabrication this test exists to forbid, pointed the other way"
+    )
+
+    # WITHOUT A MINT: it provably could not have run, because it matches on the mint. That
+    # IS measurable from the configuration, so here the summary may state it flatly -- and
+    # must give the remedy.
+    without_mint = summary_text(NATIVE_DECODED)
+    assert "was NOT exercised" in without_mint
+    assert "no mint is set" in without_mint, "state WHY, so it does not read as an accident"
+    assert "--mint" in without_mint
+    assert "MAY ALSO have run" not in without_mint
 
 
 # ---------------------------------------------------------------------------
@@ -3108,6 +3209,11 @@ def test_a_step_line_claims_nothing_about_readers_it_did_not_run():
     for name, response in outcomes.items():
         line = _spl_reader_line(_seeded_adapter({"getTransaction": response}, _A_MINT),
                                 _A_HOLDER, "65bWBunzbNMkN9d5")
+        # "_native_credits" STAYS ON THIS LIST. A step that read one transaction through
+        # _spl_credits may not mention the other reader at all -- that is the rule, and it
+        # survived the 2026-10-11 model change untouched. The step's wording now names
+        # SOL_SPL_MINT and "a SOL deposit" instead, which is a fact about THIS
+        # transaction's contents rather than a claim about a reader it did not run.
         for claim in ("last reader", "no live evidence", "has not decoded",
                       "still unproven", "_native_credits"):
             assert claim not in line, (
@@ -3120,9 +3226,12 @@ def test_a_step_line_claims_nothing_about_readers_it_did_not_run():
             )
 
     # THE SUMMARY IS WHERE THAT BELONGS, and it still says it -- the rule moves the claim, it
-    # does not delete it.
-    assert "was NOT exercised by this run" in summary_text(
-        CreditPathObserved(address_read=True, is_spl=True, signatures=5, credits=0, refused=0,
+    # does not delete it. WITH NO MINT, since 2026-10-11: an SPL run can no longer say
+    # _native_credits was unexercised, because _native_credits always runs. The flat
+    # "was NOT exercised" claim is now only available where it is actually measurable --
+    # a run with no mint, where _spl_credits matches nothing by construction.
+    assert "was NOT exercised" in summary_text(
+        CreditPathObserved(address_read=True, is_spl=False, signatures=5, credits=0, refused=0,
                            targeted_read_decoded=True))
 
 

@@ -570,9 +570,40 @@ def test_deposits_across_two_transactions_both_come_back():
 
 
 # --- find_deposits_to_address: SPL / wGRC ------------------------------------
+#
+# =============================================================================
+# THESE THREE TESTS CHANGED SHAPE ON 2026-10-11, AND THE BEHAVIOR CHANGED UNDER THEM
+# =============================================================================
+#
+# _spl_credits() is no longer the DEPOSIT reader. It was selected by `self.is_spl`, and
+# that meant a customer who sent NATIVE SOL to the deposit account with a correct memo
+# got nothing at all: no deposit_events row, no unattributable_deposits row, and a scan
+# line that read exactly like a healthy one.
+#
+# Operator, 2026-10-11: "sol should be devnet coins that we can swap into any other
+# chain." And services/pricing.py prices the asset string 'SOL' as NATIVE SOL either
+# way, so anything credited as a SOL deposit must BE native SOL or the quoted rate is
+# wrong. CLAUDE.md already said SOL_SPL_MINT "pay[s] an SPL token OUT" -- the deposit
+# side was a leak.
+#
+# SO WHAT THESE TESTS ASSERT MOVED, AND WHAT THEY ARE FOR DID NOT. Each was written for
+# a property of _spl_credits() -- owner-AND-mint matching, the mint's own decimals, a
+# missing pre-balance defaulting to zero -- and every one of those properties is still
+# live, because that reader still runs to RECORD A DROP when a token arrives where
+# native SOL was expected. They now assert against the drop rather than against a
+# credited event, which is the surface the property actually has now.
+#
+# tests/test_a_sol_deposit_is_native_sol.py is the regression test for the change
+# itself.
 
 
 def test_an_spl_credit_is_matched_on_owner_and_mint_at_the_mints_decimals():
+    """The matching and the decimals, now observed on the recorded drop.
+
+    4_500_000 - 1_000_000 at 6 decimals is 3.5, and that figure is what proves BOTH
+    halves: matched on (owner, mint) so the entry was found at all, and divided by the
+    MINT's decimals rather than SOL's nine, which would have given 0.0035.
+    """
     adapter = make_adapter(
         {
             "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "finalized"}],
@@ -587,14 +618,30 @@ def test_an_spl_credit_is_matched_on_owner_and_mint_at_the_mints_decimals():
         },
         mint=WSOL_MINT,
     )
-    assert adapter.find_deposits_to_address(WALLET) == [
-        {"txid": SIG, "vout": FIXTURE_TAG, "address": WALLET, "amount": 3.5, "confirmations": 3}
-    ]
+
+    # NOT CREDITED, because a SOL deposit is native SOL.
+    assert adapter.find_deposits_to_address(WALLET) == []
+
+    # RECORDED, because the money arrived and must be in a table rather than nowhere.
+    assert len(adapter.unattributable_drops) == 1
+    drop = adapter.unattributable_drops[0]
+    assert drop.amount == 3.5, (
+        "the delta was not read at the MINT's decimals -- SOL's nine would give 0.0035"
+    )
+    assert drop.address == WALLET
+    assert WSOL_MINT in drop.why
 
 
 def test_a_deposit_of_a_different_token_to_the_same_wallet_is_not_credited():
     """Matching on owner alone would credit another mint's deposit AT THIS
-    MINT'S DECIMALS -- rule 11's silent order-of-magnitude error."""
+    MINT'S DECIMALS -- rule 11's silent order-of-magnitude error.
+
+    STILL AN EMPTY LIST AND NOW FOR TWO REASONS, which is why this one did not need
+    rewriting: a different mint is not credited (it never was) and it is not recorded as
+    a drop either, because _spl_credits() matched nothing. That is a stated gap rather
+    than an oversight -- a token this terminal is not configured for is read at no
+    decimals anybody verified, so it is left to a human and to the cluster's own history.
+    """
     adapter = make_adapter(
         {
             "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "finalized"}],
@@ -610,11 +657,21 @@ def test_a_deposit_of_a_different_token_to_the_same_wallet_is_not_credited():
         mint=WSOL_MINT,
     )
     assert adapter.find_deposits_to_address(WALLET) == []
+    assert adapter.unattributable_drops == [], (
+        "a mint this adapter is not configured for produced a drop, which would be an "
+        "amount read at a decimals nothing verified"
+    )
 
 
 def test_a_first_deposit_into_a_brand_new_token_account_has_no_pre_balance():
     """The ordinary case for a wallet receiving a token for the first time: the
-    associated token account did not exist before the transaction."""
+    associated token account did not exist before the transaction.
+
+    OBSERVED ON THE DROP since 2026-10-11 -- see the block above this group. The
+    property is unchanged: with no entry in preTokenBalances the before-amount defaults
+    to zero, so the whole post-balance is the delta. Without that default the subtraction
+    would raise a KeyError and the token would be invisible rather than recorded.
+    """
     adapter = make_adapter(
         {
             "getSignaturesForAddress": [{"signature": SIG, "err": None, "confirmationStatus": "finalized"}],
@@ -625,7 +682,11 @@ def test_a_first_deposit_into_a_brand_new_token_account_has_no_pre_balance():
         },
         mint=WSOL_MINT,
     )
-    assert adapter.find_deposits_to_address(WALLET)[0]["amount"] == 2.0
+    assert adapter.find_deposits_to_address(WALLET) == []
+    assert adapter.unattributable_drops[0].amount == 2.0, (
+        "a token arriving into a brand new account was recorded nowhere, which means the "
+        "missing pre-balance was not defaulted to zero"
+    )
 
 
 def test_deposit_discovery_refuses_a_malformed_address_before_calling_out():

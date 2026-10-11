@@ -629,17 +629,45 @@ def _spl_reader_line(adapter: SolanaAdapter, owner: str, signature: str,
         # decoded_an_amount already applies to the scan's counts.
         decoded.append(bool(credits or dropped))
 
+    # =====================================================================
+    # TWO OUTCOMES SINCE 2026-10-11, NOT THREE, AND THE REASON CHANGED
+    # =====================================================================
+    #
+    # The `credits` arm below is now UNREACHABLE for a token and is kept rather than
+    # deleted, because a reader finding one branch missing cannot tell "it cannot happen"
+    # from "somebody removed it". It said "DECODED and ATTRIBUTED ... the memo carried a
+    # usable tag", and a token can no longer be attributed to a swap at all: a SOL
+    # deposit is NATIVE SOL, so _credits_in_transaction() reads _native_credits and
+    # reaches _spl_credits only to RECORD A DROP. The memo is never consulted on that
+    # path.
+    #
+    # AND THE `dropped` ARM WAS GIVING A FALSE REASON, which is the part that mattered.
+    # It said "REFUSED them: no usable memo" -- it printed that for a token WITH a
+    # perfectly good memo, because the memo is not why it was refused. The real reason is
+    # that an SPL token is not a SOL deposit, and an operator sent to look for a missing
+    # memo would find one and conclude the diagnostic was broken. Rule 16, in the one
+    # place whose whole job is to tell them what happened.
+    #
+    # WHAT THE STEP STILL ESTABLISHES IS UNCHANGED, and it is the reason the step exists:
+    # a drop carries an amount, that amount was read off uiTokenAmount.amount at
+    # uiTokenAmount.decimals, and every field name in the reader had to be right to
+    # produce it. A refusal is PROOF OF THE DECODER rather than silence.
     if credits:
         amounts = ", ".join(f"{credit['amount']} (vout={credit['vout']})" for credit in credits)
         return (f"DECODED and ATTRIBUTED {len(credits)} credit(s): {amounts}  <- _spl_credits "
                 f"read uiTokenAmount.decimals and .amount off a REAL response, and the memo "
-                f"carried a usable tag."
+                f"carried a usable tag. NOTE: since 2026-10-11 the deposit path cannot reach "
+                f"this outcome for a token -- a SOL deposit is native SOL -- so seeing it means "
+                f"_credits_in_transaction() has changed again."
                 + logged)
     if dropped:
-        return (f"DECODED {dropped} credit(s) and then REFUSED them: no usable memo, so nothing "
-                f"is credited -- which is correct. But the amount WAS decoded off a real "
-                f"response, so _spl_credits' uiTokenAmount.decimals and .amount reads are "
-                f"PROVEN. Which is what this step exists to establish."
+        return (f"DECODED {dropped} credit(s) at the mint's OWN decimals and recorded them as "
+                f"UNATTRIBUTABLE: an SPL token is not a SOL deposit, so nothing is credited -- "
+                f"which is correct, and SOL_SPL_MINT configures the PAYOUT direction rather than "
+                f"this one. The memo is not consulted here and is not why this was refused. But "
+                f"the amount WAS decoded off a real response, so _spl_credits' "
+                f"uiTokenAmount.decimals and .amount reads are PROVEN. Which is what this step "
+                f"exists to establish."
                 + logged)
     return ("(none)  <- no POSITIVE delta for this owner and mint in this transaction, so "
             "_spl_credits returned before decoding an amount. A fact about this transaction, "
@@ -1123,7 +1151,41 @@ class CreditPathObserved(NamedTuple):
 
     @property
     def reader(self) -> str:
-        return "_spl_credits" if self.is_spl else "_native_credits"
+        """Which reader the DEPOSIT path ran. Always _native_credits since 2026-10-11.
+
+        IT WAS `"_spl_credits" if self.is_spl else "_native_credits"`, and that stopped
+        being true the day a SOL deposit became native-only. _credits_in_transaction()
+        no longer chooses: it reads _native_credits ALWAYS, because
+        services/pricing.py quotes the asset string 'SOL' at native SOL's price so
+        anything credited as a SOL deposit must be native SOL. SOL_SPL_MINT configures
+        the payout direction (CLAUDE.md: it "pay[s] an SPL token OUT").
+
+        A DIAGNOSTIC THAT NAMES THE WRONG FUNCTION IS WORSE THAN ONE THAT NAMES NONE.
+        This whole class exists because the summary kept reporting a conclusion drawn
+        from something other than what executed -- see its own docstring -- so a
+        `reader` property that returned _spl_credits for an SPL run would be that defect
+        committed by the class built to prevent it (rule 16).
+
+        See also `spl_drop_reader_ran`, which is what _spl_credits is now FOR.
+        """
+        return "_native_credits"
+
+    @property
+    def spl_drop_reader_ran(self) -> bool:
+        """Could _spl_credits have run on this run, as the drop recorder it now is?
+
+        ONLY WITH A MINT CONFIGURED, because _spl_credits() matches on `self.mint` and an
+        unset mint matches nothing. And only when the native read found no credit -- a
+        transaction that moved native SOL is a SOL deposit and does not reach the token
+        read at all.
+
+        "COULD HAVE", NOT "DID", AND THE WORDING IS DELIBERATE. This class's rule is that
+        it reports what was OBSERVED, and whether the token branch was entered is not
+        something this run counts: it depends per transaction on whether the native delta
+        was zero. Calling it `did` would be the inference this class was created to stop,
+        so the summary says "may also have" and does not claim more than it has.
+        """
+        return self.is_spl
 
     @property
     def decoded_an_amount(self) -> bool:
@@ -1178,10 +1240,34 @@ def credit_path_lines(observed: CreditPathObserved) -> list[str]:
     # run establishes is which reader it exercised; what it owes the operator is how to exercise
     # the other. Caught 2026-10-01 reading the operator's fifth clean --find-holder run, where
     # the summary asserted _native_credits had decoded nothing in a run that never called it.
-    other = "_spl_credits (needs --mint)" if not observed.is_spl else "_native_credits (drop --mint)"
-    unexercised = (f"Every field name in that reader had to be right to get there. The other "
-                   f"reader, {other}, was NOT exercised by this run -- a run reads one or the "
-                   f"other, never both, so nothing here says whether it works.")
+    # =========================================================================
+    # "A RUN READS ONE OR THE OTHER, NEVER BOTH" WAS TRUE UNTIL 2026-10-11
+    # =========================================================================
+    #
+    # This sentence used to name the reader that was NOT exercised, because
+    # _credits_in_transaction() chose between them on `is_spl`. It no longer chooses:
+    # _native_credits runs ALWAYS, and _spl_credits runs only as the recorder for a token
+    # that arrived where native SOL was expected. So the old wording named
+    # _native_credits as unexercised on exactly the runs that DID exercise it, which is
+    # this class's founding defect -- a conclusion reported from something other than
+    # what executed -- arriving by a third route.
+    #
+    # WHAT IS HONEST NOW. Without a mint, the token branch cannot run and that is a fact
+    # worth stating. With a mint, it MAY have run, per transaction, depending on whether
+    # the native delta was zero -- and this run does not count that, so it is not
+    # claimed. See CreditPathObserved.spl_drop_reader_ran.
+    if observed.spl_drop_reader_ran:
+        unexercised = ("Every field name in that reader had to be right to get there. _spl_credits "
+                       "MAY ALSO have run on some of these transactions -- it is the recorder for a "
+                       "token arriving where native SOL was expected, and it is reached only when "
+                       "the native delta was zero. This run does not count which transactions took "
+                       "that branch, so nothing here says whether it works.")
+    else:
+        unexercised = ("Every field name in that reader had to be right to get there. _spl_credits "
+                       "was NOT exercised: it matches on the configured mint and no mint is set, so "
+                       "with --mint a token arriving at this account would be RECORDED as "
+                       "unattributable rather than being invisible. As the run stands, nothing here "
+                       "says whether it works.")
     if observed.decoded_an_amount:
         # WHICH READ GOT THERE, because the two are different evidence and the operator has to
         # be able to tell them apart. The scan proves the reader over a WINDOW; the targeted
