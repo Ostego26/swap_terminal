@@ -882,30 +882,44 @@ def test_no_exit_added_later_can_skip_the_arming_report():
     main = next(node for node in ast.walk(ast.parse(source))
                 if isinstance(node, ast.FunctionDef) and node.name == "main")
 
-    # EITHER REPORTER COUNTS, and the second was added when `--arm` grew its own exit.
-    # The gate's claim is that no exit leaves the operator thinking the 17 variables are
-    # the whole story -- and an exit that is ABOUT arming carries that by construction.
-    # Accepting only say_arming() would have forced the --arm run to print the full
-    # four-chain survey as well, which is two answers to one question on one screen.
-    REPORTERS = {"say_arming", "say_arm_result"}
-
-    def calls_arming(statements):
-        return any(isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
-                   and getattr(stmt.value.func, "id", "") in REPORTERS
-                   for stmt in statements)
+    # ANY OF THE REPORTERS, AND LEXICALLY BEFORE THE RETURN RATHER THAN IN ITS OWN BLOCK.
+    # Both halves of that rule were learned by this gate being wrong, twice:
+    #
+    #   it knew ONE reporter      --arm grew its own exit, which reports through
+    #                             say_arm_result() instead of the four-chain survey.
+    #                             Accepting only say_arming() would have forced an --arm
+    #                             run to print both, which is two answers to one question
+    #                             on one screen.
+    #   it required the SAME      --disarm made main() exceed C901, so the posture
+    #   BLOCK                     decision was extracted to change_posture() and main()
+    #                             became `posture = change_posture(...)` then `if posture
+    #                             is not None: return posture`. That return is legitimate
+    #                             -- the reporting happened inside the function that
+    #                             produced the value -- and the per-block rule could not
+    #                             see a call in the enclosing scope.
+    #
+    # So the test is now "some reporter was called at a lower line number", which is
+    # weaker as a proof and right as a rule: it accepts delegation, which is the shape
+    # rule 10 asks for. What it still refuses is an exit with no reporting before it
+    # anywhere, which is the thing it exists to catch.
+    REPORTERS = {"say_arming", "say_arm_result", "say_disarm_result", "change_posture"}
+    reported_at = sorted(
+        node.lineno for node in ast.walk(main)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", "") in REPORTERS
+    )
+    assert reported_at, f"main() calls none of {sorted(REPORTERS)}; this gate measures nothing"
 
     returns = 0
-    for block in [main.body, *[node.body for node in ast.walk(main)
-                               if isinstance(node, ast.If | ast.For | ast.While | ast.Try)]]:
-        for index, statement in enumerate(block):
-            if isinstance(statement, ast.Return):
-                returns += 1
-                assert calls_arming(block[:index]), (
-                    f"the `return` at line {statement.lineno} is reached without reporting the "
-                    f"arming state, so an operator leaving main() by that path is told the 17 "
-                    f"variables are the whole story"
-                )
-    assert returns >= 3, f"main() has {returns} returns; this test has stopped measuring"
+    for node in ast.walk(main):
+        if not isinstance(node, ast.Return):
+            continue
+        returns += 1
+        assert any(line < node.lineno for line in reported_at), (
+            f"the `return` at line {node.lineno} is reached before anything reports the arming "
+            f"state, so an operator leaving main() by that path is told the 17 variables are the "
+            f"whole story"
+        )
+    assert returns >= 4, f"main() has {returns} returns; this test has stopped measuring"
 
 
 def test_every_help_string_tells_the_operator_what_to_do(env_file):
@@ -1490,3 +1504,143 @@ def test_compose_files_parses_a_quoted_and_an_unquoted_line(env_file_with_overla
         env_file_with_overlays.write_text(line)
         parsed = configure_env.compose_files(configure_env.existing_assignments())
         assert parsed == ["docker-compose.yml", "a.yml"], f"{line!r} parsed as {parsed}"
+
+
+# ===========================================================================
+# DISARMING, the inverse --arm did not have
+# ===========================================================================
+#
+# 2026-10-11. I armed ICP because its payout method is complete and its transport can
+# sign -- both true. What I had not established is that anything CALLS it correctly:
+# services/payout_service.broadcast_payout() passes send_to_address(address, amount)
+# with two positional arguments, so created_at_time arrives as None and the adapter
+# refuses before any ledger call. So arming made five `* -> ICP` directions offerable
+# against a payout path that refuses every time, taking a customer's deposit first.
+#
+# The safe move is to stop offering them, and the only way to do that was to hand-edit
+# the COMPOSE_FILE line in a .env holding GRIDCOIN_WALLET_PASSPHRASE -- the exact thing
+# --arm exists to avoid. An operation with no inverse is one an operator cannot back out
+# of safely.
+
+
+def test_disarming_removes_only_that_overlay(env_file_with_overlays):
+    """MUTATION: rebuild the value from the base file alone instead of filtering.
+
+    COMPOSE_FILE is ordered and cumulative, so disarming ICP must leave GRC armed. A
+    rebuild-from-base would silently disarm every other chain in the act of disarming
+    one -- and GRC is the chain whose payout path actually works today.
+    """
+    env_file_with_overlays.write_text(
+        "COMPOSE_FILE=docker-compose.yml:docker-compose.web.armed-grc.yml"
+        ":docker-compose.web.armed-icp.yml\n"
+        "GRIDCOIN_WALLET_PASSPHRASE='must survive'\n"
+    )
+    already = configure_env.existing_assignments()
+
+    value, why = configure_env.disarm_verdict("icp", already)
+
+    assert value == "docker-compose.yml:docker-compose.web.armed-grc.yml", value
+    assert "armed-grc" in value, "disarming ICP disarmed GRC"
+    assert "armed-icp" not in value
+    assert "ICP" in why and "disarmed" in why
+    # And the write keeps every other line, which is the reason to go through write_env.
+    configure_env.write_env({configure_env.COMPOSE_FILE_VARIABLE: value})
+    written = env_file_with_overlays.read_text()
+    assert "GRIDCOIN_WALLET_PASSPHRASE='must survive'" in written
+    assert written.count("COMPOSE_FILE") == 1
+
+
+def test_disarming_a_chain_that_is_not_armed_changes_nothing(env_file_with_overlays):
+    """Rule 13: "skipped" and "success" must not share an output.
+
+    A second --disarm is the ordinary case. It must not rewrite COMPOSE_FILE to the same
+    value and report success, because an operator reading "disarmed" would then recreate
+    a container for no reason -- and on the arming side that same confusion is what left
+    them with an unarmed container after a recreate.
+    """
+    env_file_with_overlays.write_text("COMPOSE_FILE=docker-compose.yml\n")
+
+    value, why = configure_env.disarm_verdict("icp", configure_env.existing_assignments())
+
+    assert value == "", "disarming an unarmed chain produced a new value"
+    assert "not armed" in why
+    assert "cannot sign" in why, "the refusal does not say what the current state IS"
+
+
+def test_disarm_and_arm_round_trip_to_the_same_value(env_file_with_overlays):
+    """MUTATION: make either verdict rebuild the list rather than add or remove one entry.
+
+    THE INVERSE PROPERTY IS THE WHOLE POINT and it is the one thing neither verdict can
+    establish alone: arming then disarming must land exactly where it started, or an
+    operator backing out of a posture change gets a COMPOSE_FILE that is almost right.
+    Asserted on the string, because that string is what compose reads.
+    """
+    start = "docker-compose.yml:docker-compose.web.armed-grc.yml"
+    env_file_with_overlays.write_text(f"COMPOSE_FILE={start}\n")
+
+    armed, _why = configure_env.arm_verdict("icp", configure_env.existing_assignments())
+    assert armed.endswith(":docker-compose.web.armed-icp.yml")
+
+    back, _why = configure_env.disarm_verdict(
+        "icp", {configure_env.COMPOSE_FILE_VARIABLE: armed})
+
+    assert back == start, f"the round trip did not return to {start}: {back}"
+
+
+def test_an_apply_disarm_says_the_running_container_is_STILL_ARMED(
+        env_file_with_overlays, monkeypatch, capsys):
+    """MUTATION: drop the recreate block from say_disarm_result().
+
+    FORGETTING THE RECREATE IS WORSE ON THE WAY OUT THAN ON THE WAY IN. Forget it after
+    --arm and the chain cannot pay, which shows up as a NONE lamp. Forget it after
+    --disarm and the container still holds the mounted credential and can still sign --
+    which looks exactly like success. So the output has to say the running process is
+    unchanged, not merely that .env was written.
+    """
+    env_file_with_overlays.write_text(
+        "COMPOSE_FILE=docker-compose.yml:docker-compose.web.armed-icp.yml\n")
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--disarm", "icp", "--apply"])
+
+    assert configure_env.main() == 0
+
+    written = env_file_with_overlays.read_text()
+    assert "armed-icp" not in written
+    printed = capsys.readouterr().out
+    assert "STILL ARMED IN THE RUNNING CONTAINER" in printed
+    assert "--force-recreate web" in printed
+    assert "REQUIRED" in printed
+
+
+def test_arming_and_disarming_in_one_command_is_refused(env_file_with_overlays, monkeypatch, capsys):
+    """MUTATION: drop the both-flags branch.
+
+    They are opposite acts on one line of .env. Whichever order a tool picked would be
+    right half the time and unexplained both times, so it picks neither and writes
+    nothing. Asserted on .env being byte-unchanged, not just on the exit code.
+    """
+    env_file_with_overlays.write_text("COMPOSE_FILE=docker-compose.yml\n")
+    before = env_file_with_overlays.read_text()
+    monkeypatch.setattr(
+        "sys.argv", ["configure_env.py", "--arm", "icp", "--disarm", "grc", "--apply"])
+
+    assert configure_env.main() == 1
+    assert env_file_with_overlays.read_text() == before, "a refused command wrote to .env"
+    assert "nothing was done" in capsys.readouterr().out
+
+
+def test_neither_posture_flag_lets_the_run_carry_on(env_file_with_overlays, monkeypatch, capsys):
+    """change_posture() returns None, not 0, and the difference is load-bearing.
+
+    MUTATION: return 0 instead of None. `--apply` alone would then stop before
+    discovering or asking for anything, and report success for having done nothing --
+    rule 14's "make 'did nothing' look different from 'did work'" failing in the
+    direction that looks like work.
+    """
+    env_file_with_overlays.write_text("COMPOSE_FILE=docker-compose.yml\n")
+    monkeypatch.setattr(configure_env, "listening_ports", set)
+    monkeypatch.setattr("sys.argv", ["configure_env.py"])
+
+    assert configure_env.main() == 0
+    printed = capsys.readouterr().out
+    assert "DISCOVERING" in printed, "the run stopped before discovery"
+    assert "DISARMING" not in printed and "ARMING " not in printed

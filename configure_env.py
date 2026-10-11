@@ -1222,6 +1222,84 @@ def arm_verdict(chain: str, already: dict) -> tuple[str, str]:
     )
 
 
+def disarm_verdict(chain: str, already: dict) -> tuple[str, str]:
+    """The COMPOSE_FILE with this chain's overlay REMOVED, and why -- or ("", why not).
+
+    =========================================================================
+    ARMING HAD NO INVERSE, AND I NEEDED ONE FOR A CHAIN I ARMED ON A FALSE BELIEF
+    =========================================================================
+
+    2026-10-11. I armed ICP because I had established that its payout method was
+    complete and its transport could sign, and both of those are true. What I had NOT
+    established is that anything calls it correctly:
+    services/payout_service.broadcast_payout() passes send_to_address(address, amount)
+    with two positional arguments, so created_at_time arrives as None and the adapter
+    refuses before any ledger call. Measured through the real process_pending_payouts():
+    zero ledger calls, swaps.status failed, and the customer's deposit already credited.
+
+    So arming made five `* -> ICP` directions offerable against a payout path that
+    refuses every time. The safe move is to stop offering them until the call site is
+    fixed -- and the only way to do that was to hand-edit the COMPOSE_FILE line in a
+    .env that holds GRIDCOIN_WALLET_PASSPHRASE, which is the exact thing --arm exists to
+    avoid. An operation with no inverse is one an operator cannot back out of safely.
+
+    IT IS THE SAME SHAPE AS arm_verdict() AND DELIBERATELY NOT A FLAG ON IT. A boolean
+    parameter would make one function hold two decisions whose refusals are different:
+    arming refuses when the overlay's variable is unset, and disarming never can --
+    removing a file from the list cannot break a compose command, it can only stop a
+    posture. Rule 10 wants the decision in the smallest testable piece, and these are
+    two decisions.
+
+    THE BASE FILE CAN NEVER BE REMOVED. docker-compose.yml defines the services; a
+    COMPOSE_FILE without it leaves compose with a `web` that has volumes and no image.
+    Only `docker-compose.web.armed-<chain>.yml` entries are removable here, which is
+    structural rather than checked: the name comes from arming_overlays().
+    """
+    overlays = {asset: (filename, variable) for asset, filename, variable in arming_overlays()}
+    asset = chain.strip().upper()
+    if asset not in overlays:
+        return "", (f"{asset} has no arming overlay, so there is nothing to disarm. This tree has "
+                    f"{', '.join(sorted(overlays)) or '(none)'}.")
+    filename, _variable = overlays[asset]
+    current = compose_files(already)
+    if filename not in current:
+        return "", (f"{asset} is not armed: {filename} is not in {COMPOSE_FILE_VARIABLE}, so "
+                    f"nothing was changed. The container cannot sign {asset} payouts as it is.")
+    remaining = [part for part in current if part != filename]
+    return ":".join(remaining), (
+        f"{asset} disarmed by removing {filename} from {COMPOSE_FILE_VARIABLE}"
+    )
+
+
+def say_disarm_result(chain: str, value: str, why: str, *, apply: bool) -> None:
+    """What disarming did or refused to do, and the step that is REQUIRED after it.
+
+    THE RECREATE IS WHAT ACTUALLY DISARMS, and saying so matters more here than on the
+    way in: an operator who reads "disarmed" and does not recreate still has a running
+    container that holds the mounted credential and the identity it was started with.
+    On the arming side forgetting the recreate leaves a chain that cannot pay, which is
+    visible as a NONE lamp. Forgetting it here leaves a chain that CAN, which looks
+    exactly like success.
+    """
+    say(f"  DISARMING {chain.strip().upper()}")
+    if not value:
+        say(f"    REFUSED: {why}")
+        return
+    say(f"    {why}")
+    say(f"    {COMPOSE_FILE_VARIABLE} becomes {value or '(empty)'}")
+    if not apply:
+        say("    Nothing was written. Re-run with --apply to change .env.")
+        return
+    say("")
+    say("  STILL ARMED IN THE RUNNING CONTAINER. .env selects the compose files for the")
+    say("  NEXT command. The container that is serving now was created WITH the overlay,")
+    say("  so it still holds the credential and can still sign -- this step is REQUIRED,")
+    say("  not optional:")
+    say("      docker compose up -d --force-recreate web")
+    say("  Then the chain reports it cannot pay out, and the pairs that pay into it go")
+    say("  UNAVAILABLE rather than taking a deposit they cannot settle.")
+
+
 def say_arm_result(chain: str, value: str, why: str, *, apply: bool) -> None:
     """What arming did or refused to do, and the step that is REQUIRED after it."""
     say(f"  ARMING {chain.strip().upper()}")
@@ -1239,6 +1317,53 @@ def say_arm_result(chain: str, value: str, why: str, *, apply: bool) -> None:
     say("      docker compose up -d --force-recreate web")
     say("  Arming is a custody posture. Nothing here signed anything, and the payout path")
     say("  for this chain has still never been exercised on a chain.")
+
+
+def change_posture(args, already: dict) -> int | None:
+    """Apply --arm or --disarm, or None when neither was given. Returns main()'s exit code.
+
+    EXTRACTED BECAUSE main() WENT OVER THE CEILING, and rule 12 says what that means
+    rather than what to silence: "a main() past the ceiling is orchestration that has
+    swallowed decisions, which is rule 10's defect wearing a lint code. The fix is to
+    extract the decision so it can be called with seeded inputs, not to raise the
+    ceiling." Adding --disarm took C901 to 12 and PLR0915 to 52, and the thing it had
+    swallowed is this: the decision of which posture change to make, and what its exit
+    code means.
+
+    THE TWO BRANCHES WERE NEAR-IDENTICAL, which is the other reason (rule 8). A verdict,
+    a reporter, a conditional write and an exit code, twice, differing only in which pair
+    of functions is called. One table makes them one path, so a third posture -- if one
+    is ever added -- cannot drift from the other two in how it writes or what it returns.
+
+    None RATHER THAN 0 FOR "NEITHER FLAG", because 0 is a real exit code here and main()
+    has to tell "nothing to do, carry on with discovery" apart from "the posture change
+    succeeded". Returning 0 for both would make `--apply` alone stop before discovering
+    anything.
+
+    ARMING AND DISARMING TOGETHER IS REFUSED rather than ordered. They are opposite acts
+    on one line of .env, and which one wins is not a choice a tool should make silently
+    for an operator: whichever order it picked would be right half the time and
+    unexplained both times.
+    """
+    #: (flag value, verdict function, reporter). One row per posture.
+    changes = (
+        (args.arm, arm_verdict, say_arm_result),
+        (args.disarm, disarm_verdict, say_disarm_result),
+    )
+    if args.arm and args.disarm:
+        say("  --arm AND --disarm IN ONE COMMAND, so nothing was done. They are opposite acts on")
+        say("  one line of .env and the order they would be applied in is not something this")
+        say("  tool should pick for you. Run them separately.")
+        return 1
+    for chain, verdict, report in changes:
+        if not chain:
+            continue
+        value, why = verdict(chain, already)
+        report(chain, value, why, apply=args.apply)
+        if value and args.apply:
+            write_env({COMPOSE_FILE_VARIABLE: value})
+        return 0 if value else 1
+    return None
 
 
 def say_banner(apply: bool, already: dict) -> None:
@@ -1620,6 +1745,13 @@ def main() -> int:
               "--read-daemon-confs."),
     )
     parser.add_argument(
+        "--disarm", metavar="CHAIN", default="",
+        help=("Remove that chain's docker-compose.web.armed-<chain>.yml from COMPOSE_FILE in .env, "
+              "so the container can no longer sign that chain's payouts. Needs --apply to write, "
+              "and a --force-recreate afterwards: the RUNNING container keeps the credential it "
+              "was started with."),
+    )
+    parser.add_argument(
         "--arm", metavar="CHAIN", default="",
         help=("Add that chain's docker-compose.web.armed-<chain>.yml to COMPOSE_FILE in .env, so "
               "the container can SIGN that chain's payouts. Needs --apply to write. REFUSED when "
@@ -1636,12 +1768,9 @@ def main() -> int:
     # changes a custody posture and nothing else, so mixing it with a credential sweep
     # would make one command do two unrelated things to .env -- and the operator reading
     # the output could not tell which half did what (rule 14).
-    if args.arm:
-        value, why = arm_verdict(args.arm, already)
-        say_arm_result(args.arm, value, why, apply=args.apply)
-        if value and args.apply:
-            write_env({COMPOSE_FILE_VARIABLE: value})
-        return 0 if value else 1
+    posture = change_posture(args, already)
+    if posture is not None:
+        return posture
 
     discovered = discover_all(already)
 
