@@ -503,6 +503,22 @@ ASKED = [
     ("SOL_DEPOSIT_ACCOUNT", "the PUBLIC key every SOL swap deposits into (one shared account + memo)"),
     ("SOL_HOT_WALLET", "the PUBLIC key SOL payouts are sent FROM"),
     ("XRP_DEPOSIT_ACCOUNT", "the classic address every XRP swap deposits into (one account + destination tag)"),
+    # A PATH, NOT A CREDENTIAL, which is why this one arming variable is askable and the
+    # other two are not. The file it names holds a signing key; this names the file.
+    # docker-compose.web.armed-sol.yml mounts it read-only and nothing in this tree reads,
+    # prints or copies its contents -- chains/solana_payout_keypair.py exists precisely so
+    # the capability check never opens it.
+    #
+    # ADDED 2026-10-11 BECAUSE ITS ABSENCE MADE AN OPERATOR HAND-EDIT .env. `--arm sol`
+    # refuses until this is set, and this tool would not set it, so the only path through
+    # was editing by hand the one file that holds GRIDCOIN_WALLET_PASSPHRASE -- which is
+    # the hand edit write_env() was written to make unnecessary. The cause was .env.example
+    # marking it SECRET: that marker is what makes a prompt no-echo, so it both excluded
+    # the variable and would have had the answer typed blind, where a mistyped path is
+    # invisible until a payout fails at the send.
+    ("SOL_PAYOUT_KEYPAIR_HOST_FILE",
+     "the PATH to the keypair file that owns SOL_HOT_WALLET -- the path, not the key. "
+     "Nothing here opens it; the overlay mounts it read-only"),
 ]
 
 
@@ -1587,9 +1603,21 @@ def say_arming(already: dict) -> None:
         held = "set in .env" if already.get(variable) else "NOT set in .env"
         say(f"    {'':5} needs {variable}  <- {held}; overlay {active}")
     settable = [variable for _asset, _filename, variable in overlays if variable]
-    say(f"    none of these {len(settable)} variable(s) is settable here: each names a signing")
-    say("    credential, and this tool never reads, copies or writes one. Arming is an act you")
-    say("    take on the command line, which is why it is a separate file per chain.")
+    # WHICH OF THESE THIS TOOL CAN SET, and the distinction is value versus location.
+    # This block used to say "none of these is settable here: each names a signing
+    # credential", and that was true of two of the four. SOL's names a FILE and ICP's
+    # names a dfx identity; the credential is what they point AT. Saying all four were
+    # credentials is what kept the askable one out of ASKED and sent an operator to
+    # hand-edit .env for a path.
+    askable = [variable for variable in settable if variable in {name for name, _w in ASKED}]
+    withheld = [variable for variable in settable if variable not in askable]
+    if askable:
+        say(f"    {len(askable)} of these this tool CAN set, because they name a location rather")
+        say(f"    than a credential: {', '.join(askable)}. Run --apply and answer the prompt.")
+    if withheld:
+        say(f"    {len(withheld)} it will never set -- {', '.join(withheld)} IS the credential, and")
+        say("    this tool never reads, copies or writes one. Arming is an act you take on the")
+        say("    command line, which is why it is a separate file per chain.")
 
 
 def say_dry_run(needed: list, values: dict, secrets: set, already: dict) -> None:

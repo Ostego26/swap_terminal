@@ -1644,3 +1644,49 @@ def test_neither_posture_flag_lets_the_run_carry_on(env_file_with_overlays, monk
     printed = capsys.readouterr().out
     assert "DISCOVERING" in printed, "the run stopped before discovery"
     assert "DISARMING" not in printed and "ARMING " not in printed
+
+
+def test_the_keypair_PATH_is_askable_and_the_secrets_are_not():
+    """MUTATION: restore the `# SECRET` marker on SOL_PAYOUT_KEYPAIR_HOST_FILE.
+
+    THE DISTINCTION IS VALUE VERSUS LOCATION. GRIDCOIN_WALLET_PASSPHRASE and
+    XRP_PAYOUT_SECRET_SEED ARE the credential. SOL_PAYOUT_KEYPAIR_HOST_FILE names a FILE,
+    and the credential is its contents -- which the overlay mounts read-only and which
+    chains/solana_payout_keypair.py exists specifically never to open.
+
+    THE MARKER IS WHAT MAKES A PROMPT NO-ECHO, so marking a path SECRET cost twice and
+    bought nothing: configure_env.py would not ask for it at all, so arming SOL meant
+    hand-editing the file that holds GRIDCOIN_WALLET_PASSPHRASE -- the hand edit
+    write_env() was written to make unnecessary -- and had it asked, the answer would have
+    been typed blind, where a mistyped path is invisible until a payout fails at the send.
+    """
+    secrets = configure_env.secret_names()
+    asked = {name for name, _what in configure_env.ASKED}
+
+    assert "SOL_PAYOUT_KEYPAIR_HOST_FILE" in asked, (
+        "the keypair PATH is not askable, so arming SOL requires hand-editing .env"
+    )
+    assert "SOL_PAYOUT_KEYPAIR_HOST_FILE" not in secrets, (
+        "the keypair path is marked SECRET, so its prompt would be no-echo and a typo invisible"
+    )
+    # The two that ARE the credential stay out of reach, both ways.
+    for credential in ("GRIDCOIN_WALLET_PASSPHRASE", "XRP_PAYOUT_SECRET_SEED"):
+        assert credential not in asked, f"{credential} is the credential and must never be asked for"
+
+
+def test_the_arming_block_separates_what_it_can_set_from_what_it_will_not(capsys):
+    """MUTATION: restore "none of these is settable here: each names a signing credential".
+
+    That sentence was true of two of the four and is what kept the askable one out of
+    ASKED. An operator reading it goes to edit .env by hand for a path -- which is the
+    thing this tool exists to prevent, recommended by the tool itself.
+    """
+    configure_env.say_arming({})
+    printed = capsys.readouterr().out
+
+    assert "CAN set" in printed
+    assert "SOL_PAYOUT_KEYPAIR_HOST_FILE" in printed.split("CAN set", 1)[1]
+    assert "never set" in printed
+    withheld = printed.split("never set", 1)[1]
+    assert "GRIDCOIN_WALLET_PASSPHRASE" in withheld and "XRP_PAYOUT_SECRET_SEED" in withheld
+    assert "none of these" not in printed, "the sentence that called all four credentials is back"
