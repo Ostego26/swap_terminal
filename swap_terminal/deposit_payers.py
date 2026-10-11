@@ -75,9 +75,16 @@ Worth stating because it is the obvious shortcut and it is wrong in both
 directions. `chains/*.can_spend` answers "can the PAYOUT path send on this
 chain", which is a different question:
 
-  ICP     can_spend is False -- every adapter call is `--identity anonymous` --
-          and yet pay_icp_deposit.py sends perfectly well, because it builds its
-          own transport with a signing identity. False, and payable.
+  ICP     can_spend is DERIVED, since 2026-10-11, from whether ICP_PAYOUT_IDENTITY
+          names an identity (chains/icp.py, `self.can_spend =
+          payout_identity_is_present()`), and chains/registry.py passes that identity
+          into the transport. THIS ENTRY USED TO READ "can_spend is False -- every
+          adapter call is `--identity anonymous` -- and yet pay_icp_deposit.py sends
+          perfectly well", and the hardcoded False was itself the bug: dfx_transport()
+          grew an `identity` parameter on 2026-10-07 and the registry went on passing
+          none. The old sentence is still true of an UNARMED process, where the
+          transport does send `--identity anonymous`; it is false of an armed one.
+          pay_icp_deposit.py builds its own transport either way.
   SOL/XRP can_spend is DERIVED from whether payout key material is present. A
           deposit is sent from the desk's own wallet, which is the same key, so
           here the two happen to coincide -- but by coincidence, not by meaning.
@@ -122,9 +129,12 @@ PAYERS: dict[str, DepositPayer] = {
         arming="a dfx identity that can sign; the default identity in the replica container "
         "is the one fund_desk.py tops up",
         note="Added 2026-10-10, the swap that exposed this whole gap. It does NOT use the "
-        "adapter to send: chains/icp.py carries can_spend = False because every call it "
-        "makes is --identity anonymous. The idempotency key is derived from the swap's "
-        "created_at, so re-running the command is one transfer rather than two.",
+        "adapter to send, and builds its own transport with a signing identity -- which was "
+        "the ONLY way to send when this was written, because chains/icp.py hardcoded "
+        "can_spend = False. Since 2026-10-11 that is derived from ICP_PAYOUT_IDENTITY, so an "
+        "armed adapter can send too; this command does not depend on that either way. The "
+        "idempotency key is derived from the swap's created_at, so re-running the command is "
+        "one transfer rather than two.",
     ),
     "SOL": DepositPayer(
         tool="python3 pay_test_deposit.py",

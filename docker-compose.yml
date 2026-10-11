@@ -9,10 +9,34 @@
 # Live-safe: no secret is written here. Every CREDENTIAL and every ENDPOINT is
 #       `${NAME:-}` with no default, so an unset variable is an empty value the
 #       server refuses at startup rather than a working default nobody chose.
-#       Exactly two variables carry a default and neither is a credential:
-#       REQUIRE_GRIDCOIN_SHARED_SECRET=true (the fail-closed value) and
-#       GRIDCOIN_MIN_CONFIRMATIONS=6, which agrees with BOTH places that already
-#       state it -- server.js:88 and config.py:153's GRC_MIN_CONFIRMATIONS.
+#       SIX variables carry a default and none is a credential. Re-counted
+#       2026-10-11 with
+#
+#         grep -v -E '^\s*#' docker-compose.yml \
+#           | grep -o -E '\$\{[A-Z_]+:-[^}]+\}' | sort -u
+#
+#       which is the scan this line should always have been, since the same
+#       pattern with [^}]* returns 26 -- so twenty are the empty ${VAR:-} form
+#       described just above and six carry an actual value:
+#
+#         REQUIRE_GRIDCOIN_SHARED_SECRET=true   the fail-closed value
+#         GRIDCOIN_MIN_CONFIRMATIONS=6          agrees with BOTH places that
+#                                               already state it, server.js:88
+#                                               and config.py:153's
+#                                               GRC_MIN_CONFIRMATIONS
+#         ABSTERGO_HOST_PORT=5057               a host port
+#         ABSTERGO_STATE_DIR=./runtime/abstergo
+#         ST_REGTEST_STATE_DIR=./runtime/regtest
+#         SWAP_TERMINAL_BRIDGE_SUBNET=172.18.0.0/16
+#
+#       THIS SAID "Exactly two" UNTIL 2026-10-11 and was short by four. The
+#       surviving half of the claim is the half that matters -- none of the four
+#       it missed is a credential; they are a host port, two state directories
+#       and the bridge subnet. But all four are topology-deciding, and the subnet
+#       in particular is the one this file's own closing block argues must be
+#       pinned BECAUSE the operator's firewall names it by hand. A reader auditing
+#       "what does this file decide for me without asking" was being handed a list
+#       missing exactly the entries that decide where the container is reachable.
 #
 # TWO SERVICES HERE, AND THE SPLIT IS A DEFECT FIX RATHER THAN ORGANIZATION.
 # `docker compose` interpolates the WHOLE file -- every variable in every file it
@@ -118,12 +142,26 @@
 # the literal command an operator types reached the two services that are NOT the
 # terminal. `include:` moves that knowledge into the file compose reads first.
 #
-# WHY `include:` AND NOT A `COMPOSE_FILE` ENTRY IN `.env`. Both would make a bare
-# `up` read all three. `COMPOSE_FILE` lives in a file this repository must never
-# read or write (CLAUDE.md's chain-safety rules: never read back `.env`), it is
-# invisible to anyone reading the compose files, and it is per-checkout state
-# rather than a declaration in the tree. `include:` is in version control, is read
-# by the same parser, and is what the suite can gate.
+# WHY `include:` AND NOT A `COMPOSE_FILE` ENTRY IN `.env`, and TWO OF THIS
+# PARAGRAPH'S THREE REASONS STOPPED BEING TRUE ON 2026-10-10. Kept and corrected
+# in place rather than rewritten, because a reader who finds the argument needs to
+# know which half of it still holds.
+#
+# Both would make a bare `up` read all three. The reasons given were: `COMPOSE_FILE`
+# "lives in a file this repository must never read or write (CLAUDE.md's chain-safety
+# rules: never read back `.env`)", it is invisible to anyone reading the compose
+# files, and it is per-checkout state rather than a declaration in the tree.
+#
+#   STILL TRUE   it is invisible to anyone reading the compose files, and it is
+#                per-checkout state. `include:` is in version control, is read by
+#                the same parser, and is what the suite can gate.
+#   NO LONGER    "a file this repository must never read or write". configure_env.py
+#                both READS and WRITES the COMPOSE_FILE line -- that is what
+#                `--arm` and `--disarm` are -- and it does so without ever reading
+#                back a credential from the same file. The chain-safety rule is
+#                about KEY MATERIAL, not about every byte of `.env`, and reading
+#                that sentence as the stronger claim is what made this paragraph
+#                wrong.
 #
 # WHAT IS DELIBERATELY NOT INCLUDED, and this is the load-bearing half:
 #
@@ -131,10 +169,33 @@
 #   docker-compose.web.armed-sol.yml   the key that lets the container sign and
 #   docker-compose.web.armed-xrp.yml   broadcast. Arming is a posture, not a
 #                                      setting, and entering it must take an act
-#                                      (rule 16). Naming the file on the command
-#                                      line IS that act, and it is visible in
-#                                      shell history. An `include:` would make the
-#                                      act disappear.
+#                                      (rule 16). An `include:` would make the act
+#                                      disappear, which is why none of them is
+#                                      included and why
+#                                      tests/test_compose_default_project.py gates
+#                                      it.
+#
+#                                      WHAT THE ACT IS HAS CHANGED, AND THIS BLOCK
+#                                      USED TO NAME THE OLD ONE: "Naming the file
+#                                      on the command line IS that act, and it is
+#                                      visible in shell history." Since 2026-10-10
+#                                      the act is editing the COMPOSE_FILE line in
+#                                      `.env`, normally through
+#                                      `configure_env.py --arm <chain>`, and a
+#                                      bare `docker compose up` on a checkout built
+#                                      from `.env.example` IS ARMED FOR GRC --
+#                                      .env.example:62 states that outright and
+#                                      records the measurement behind it. The
+#                                      operator came up unarmed three times in a
+#                                      row because arming meant remembering two -f
+#                                      flags, and a GRC payout then failed with
+#                                      "GRIDCOIN_WALLET_PASSPHRASE is not set"
+#                                      AFTER a customer's deposit had confirmed.
+#                                      So the act is deliberate and reversible but
+#                                      no longer in shell history, and the gate
+#                                      below protects `include:` only -- nothing
+#                                      tests what the template's COMPOSE_FILE
+#                                      makes required.
 #   docker-compose.web.hostnet.yml     replaces the container's whole network mode.
 #                                      An alternative, not an addition.
 #   docker-compose.grc-desk.yml        requires GRC_DESK_DATADIR, and a default

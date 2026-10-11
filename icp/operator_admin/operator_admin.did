@@ -4,8 +4,22 @@
 // this file to build the Candid UI and to type-check calls, and generating it needs
 // candid-extractor plus a wasm build -- a toolchain the hygiene tests deliberately
 // do not require (tests/test_dfx_canisters_are_buildable.py explains why). So the
-// file is explicit and tests/test_operator_admin_canister.py asserts every method
-// named here exists in the Rust source, and the reverse.
+// file is explicit, and tests/test_candid_matches_the_rust.py asserts every method
+// named here exists in the Rust source, with the same query/update kind, and the
+// reverse.
+//
+// THAT SENTENCE NAMED tests/test_operator_admin_canister.py UNTIL 2026-10-11, AND NO
+// SUCH FILE HAS EVER EXISTED. `find . -name "test_operator_admin*"` returns exactly one
+// test, tests/test_operator_admin_seed.py, which is about seeding and never opens this
+// file. So "KEPT IN STEP BY A TEST" was a claim with no test behind it AND a pointer to
+// nothing, in the one place a caller looks first -- the same shape as the
+// `docker-compose.stateful.yml` paragraph docker-compose.yml records, where a file was
+// named three times and never existed.
+//
+// The first attempt at this correction said the named test "never opened this one",
+// which implies it exists and the grep came back empty. It does not exist and the grep
+// errors. Recorded because getting a correction imprecise is how the next one starts.
+// The replacement is real and is mutation-checked in both directions and on the kind.
 //
 // THE CONSOLE IS WHAT A PERSON SHOULD USE. This interface exists for dfx and for
 // the terminal, if it is ever wired; http_request serves a rendered page at

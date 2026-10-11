@@ -48,6 +48,7 @@ which is the half that can be checked on every run without a toolchain.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -69,6 +70,55 @@ SIGNING_CALLS = (
 )
 
 
+#: The calls that MOVE VALUE, which is the subset every canister in this repository
+#: must not contain. Separate from SIGNING_CALLS because `http_request` cannot be on a
+#: list applied to operator_admin -- see FORBIDDEN_BY_CANISTER.
+VALUE_MOVING_CALLS = (
+    "sign_with_ecdsa",
+    "sign_with_schnorr",
+    "bitcoin_send_transaction",
+)
+
+#: What each canister under icp/ must not contain, and the lists DIFFER on purpose.
+#:
+#: WHY operator_admin IS NOT HELD TO SIGNING_CALLS, measured 2026-10-11 before the
+#: entry was written rather than after it failed: operator_admin DEFINES `http_request`
+#: as its own query method (operator_admin.did:85, lib.rs:863) because the replica's
+#: HTTP gateway routes GETs to a canister method of that name -- it is how the canister
+#: serves its operator console. That is a completely different thing from the
+#: MANAGEMENT canister's `http_request`, which is an outcall to the internet and is the
+#: reason the name is on SIGNING_CALLS at all. Applying the four-call list here would
+#: have failed on a legitimate method, and a test that fails for a legitimate reason
+#: gets deleted rather than fixed.
+#:
+#: threshold_custody keeps the full four. It serves no page, so for it the name can
+#: only ever be the outcall.
+FORBIDDEN_BY_CANISTER = {
+    "threshold_custody": SIGNING_CALLS,
+    "operator_admin": VALUE_MOVING_CALLS,
+}
+
+
+def non_comment_occurrences(text: str, call: str) -> list[str]:
+    """Lines naming `call` that are NOT Rust comments.
+
+    A line that NAMES a call while explaining its absence is not a call, and this
+    repository's canister sources are mostly such explanations -- `grep -n sign` over
+    both lib.rs files returns 15 hits, every one of them a comment or a rendered-page
+    string. The distinction is whether the line starts // or * after stripping.
+
+    EXTRACTED 2026-10-11 so the two canisters share one definition of "a call" rather
+    than two that agree today (rule 8). It is also the whole decision this file makes,
+    which is rule 10's reason for it being a function: it can be asserted on directly
+    with a seeded string instead of only through a canister source.
+    """
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if call in line and not line.strip().startswith(("//", "*"))
+    ]
+
+
 def test_the_canister_source_contains_no_signing_call():
     """MUTATION: add `sign_with_ecdsa` anywhere in lib.rs.
 
@@ -80,17 +130,63 @@ def test_the_canister_source_contains_no_signing_call():
     text = SOURCE.read_text()
 
     for call in SIGNING_CALLS:
-        occurrences = [
-            line.strip()
-            for line in text.splitlines()
-            # A line that NAMES the call while explaining its absence is not a call.
-            # The distinction is whether it is inside a comment, which for Rust is
-            # a line starting // or //! after stripping.
-            if call in line and not line.strip().startswith(("//", "*"))
-        ]
+        occurrences = non_comment_occurrences(text, call)
         assert not occurrences, (
             f"increment 1 must not call {call}; found:\n  " + "\n  ".join(occurrences)
         )
+
+
+@pytest.mark.parametrize("canister", sorted(FORBIDDEN_BY_CANISTER))
+def test_no_canister_in_this_repository_can_move_value(canister):
+    """EVERY canister under icp/, not just threshold_custody.
+
+    WHAT THIS CLOSES, measured 2026-10-11: operator_admin is 1458 lines -- three times
+    threshold_custody's 457 -- and NOTHING pinned its inability to sign. Four files in
+    tests/ mention it and none of them contained `sign_with` or `cannot sign`
+    (`grep -rln operator_admin tests/ | xargs grep -ln 'sign_with|cannot sign'` matched
+    nothing). So the repository's entire "the canisters cannot move value" argument
+    rested on a test scoped by a module-level CANISTER constant pointing at the smaller
+    of the two.
+
+    It passes today -- `grep -rn "sign_with" icp/` returns a single hit, prose in
+    icp/README.md -- which is the point. The absence was already true and simply
+    unasserted, and an unasserted absence is one commit from not being true.
+
+    THE FORBIDDEN LIST IS PER CANISTER AND THE REASON IS AT FORBIDDEN_BY_CANISTER.
+    Reading it before adding a canister here is the difference between a gate and a
+    test somebody deletes.
+
+    MUTATION: add `sign_with_schnorr` to a non-comment line of either lib.rs.
+    """
+    source = Path(__file__).resolve().parent.parent / "icp" / canister / "src" / "lib.rs"
+    assert source.is_file(), f"{source} is missing; the canister was moved or deleted"
+    text = source.read_text()
+
+    for call in FORBIDDEN_BY_CANISTER[canister]:
+        occurrences = non_comment_occurrences(text, call)
+        assert not occurrences, (
+            f"{canister} must not call {call}; found:\n  " + "\n  ".join(occurrences)
+        )
+
+
+def test_every_canister_in_the_tree_is_covered_by_the_table_above():
+    """FORBIDDEN_BY_CANISTER must name every rust canister icp/dfx.json declares.
+
+    Without this the parametrize above passes vacuously the day a third canister is
+    added: a new crate nobody listed is a crate nobody checks, and it would be the
+    newest and least-reviewed code in the repository. Rule 3 -- the denominator is
+    what dfx would actually deploy, not what this file remembered.
+    """
+    dfx = json.loads((Path(__file__).resolve().parent.parent / "icp" / "dfx.json").read_text())
+    rust = {
+        name for name, body in (dfx.get("canisters") or {}).items()
+        if (body or {}).get("type") == "rust"
+    }
+    assert rust == set(FORBIDDEN_BY_CANISTER), (
+        f"icp/dfx.json declares rust canisters {sorted(rust)} and FORBIDDEN_BY_CANISTER "
+        f"covers {sorted(FORBIDDEN_BY_CANISTER)}. A canister missing from the table is a "
+        f"canister nothing checks for a signing call."
+    )
 
 
 def test_the_canister_declares_only_the_two_methods_it_documents():

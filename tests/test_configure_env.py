@@ -1511,11 +1511,17 @@ def test_compose_files_parses_a_quoted_and_an_unquoted_line(env_file_with_overla
 # ===========================================================================
 #
 # 2026-10-11. I armed ICP because its payout method is complete and its transport can
-# sign -- both true. What I had not established is that anything CALLS it correctly:
-# services/payout_service.broadcast_payout() passes send_to_address(address, amount)
-# with two positional arguments, so created_at_time arrives as None and the adapter
-# refuses before any ledger call. So arming made five `* -> ICP` directions offerable
-# against a payout path that refuses every time, taking a customer's deposit first.
+# sign -- both true. What I had not established is that anything CALLED it correctly:
+# services/payout_service.broadcast_payout() passed send_to_address(address, amount)
+# with two positional arguments, so created_at_time arrived as None and the adapter
+# refused before any ledger call. So arming made five `* -> ICP` directions offerable
+# against a payout path that refused every time, taking a customer's deposit first.
+#
+# FIXED LATER THE SAME DAY -- broadcast_payout() has an ICP branch now, and this file's
+# sibling tests/test_icp_e2e_both_directions.py had its two DEFECT assertions inverted.
+# The past tense above is the correction; the narrative stays because it is why the
+# tests below exist, and a reason rewritten to describe a world without the defect
+# stops being a reason.
 #
 # The safe move is to stop offering them, and the only way to do that was to hand-edit
 # the COMPOSE_FILE line in a .env holding GRIDCOIN_WALLET_PASSPHRASE -- the exact thing

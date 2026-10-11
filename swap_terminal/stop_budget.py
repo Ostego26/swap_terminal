@@ -115,5 +115,21 @@ def total_stop_seconds(
     the grace once for the whole set, so one is the designed answer and anything above
     it is the defect. A default of, say, 3.0 would make this function agree with a
     serial stop and quietly stop detecting one.
+
+    THIS SUM OVERSTATES THE REAL WORST CASE, DELIBERATELY, and that is worth stating
+    because it was not understood when this file was written hours earlier the same
+    day. The two legs are CONCURRENT rather than sequential: docker/web.Dockerfile's
+    dumb-init passes no --single-child and the gunicorn Popen no start_new_session, so
+    gunicorn shares the entrypoint's process group and takes SIGTERM at the same
+    instant -- measured from the operator's own container log 2026-10-11, where
+    gunicorn was gone at +0.1s while the workers ran another 15.05s. So the container's
+    stop is really max(worker_grace, gunicorn's own graceful_timeout), and adding them
+    is an upper bound rather than the figure.
+
+    THE SUM IS KEPT ANYWAY. A budget that overstates refuses a configuration that
+    would in fact have fitted, which costs a conversation; a budget that understates is
+    the original defect this file exists for -- a stop SIGKILLed mid-proof, reporting
+    success having proven nothing. It also stays correct if either of those two lines
+    ever changes, and both are in files this one does not own.
     """
     return worker_multiplier * worker_grace + gunicorn_grace

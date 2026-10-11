@@ -29,12 +29,26 @@ repository can reach one more that looks nothing like any of them:
     Solana    plain base58 of a 32-byte ed25519 key with NO CHECKSUM AT ALL.
               chains/solana_address.py owns it. Length is the only structure there is.
 
-So the blanket guard refuses every valid Solana payout. MEASURED 2026-09-29 rather than
-asserted: SOL is NOT in Config.ALLOWED_PAIRS today -- the set is BTC, GRC, LTC and XRP --
-so this trap is LATENT and not live, and saying otherwise would be the register error rule
-17 is about. What makes it worth a table anyway is that enabling a pair is a one-line
-change and this refusal would land on a swap whose deposit has ALREADY been taken and
-credited. A false refusal there is worse than the burn it was meant to prevent: the burn
+So the blanket guard refuses every valid Solana payout.
+
+THIS TRAP IS LIVE, AND THE PARAGRAPH THAT SAID OTHERWISE IS KEPT BELOW BECAUSE IT WAS A
+CORRECT MEASUREMENT THAT WENT STALE WITHOUT BEING RE-RUN -- which is the exact failure
+rule 17 is about, committed by a sentence invoking rule 17. It read:
+
+    MEASURED 2026-09-29 rather than asserted: SOL is NOT in Config.ALLOWED_PAIRS today
+    -- the set is BTC, GRC, LTC and XRP -- so this trap is LATENT and not live, and
+    saying otherwise would be the register error rule 17 is about.
+
+RE-MEASURED 2026-10-11 by ast.literal_eval of the ALLOWED_PAIRS literal rather than by
+reading prose: the set is 30 ordered pairs over six assets -- BTC, GRC, ICP, LTC, SOL,
+XRP -- the complete 6x5 cross product with no self-pairs, so EVERY asset including SOL
+has five inbound directions. The 2026-10-06 ICP expansion took the set to that full
+product and pulled SOL in as a destination as a side effect; nothing re-ran this count.
+
+So "latent" was true for a week and has been false since, and the difference is not
+cosmetic: a reader deciding whether to prioritize this was being told the refusal cannot
+reach a customer. It can, on any of five pairs, and it would land on a swap whose deposit
+has ALREADY been taken and credited. A false refusal there is worse than the burn it was meant to prevent: the burn
 costs one customer's payout, and the outage costs every customer of that chain while their
 money sits in our wallet.
 

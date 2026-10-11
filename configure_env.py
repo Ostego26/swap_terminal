@@ -1248,13 +1248,24 @@ def disarm_verdict(chain: str, already: dict) -> tuple[str, str]:
     2026-10-11. I armed ICP because I had established that its payout method was
     complete and its transport could sign, and both of those are true. What I had NOT
     established is that anything calls it correctly:
-    services/payout_service.broadcast_payout() passes send_to_address(address, amount)
-    with two positional arguments, so created_at_time arrives as None and the adapter
-    refuses before any ledger call. Measured through the real process_pending_payouts():
+    services/payout_service.broadcast_payout() passed send_to_address(address, amount)
+    with two positional arguments, so created_at_time arrived as None and the adapter
+    refused before any ledger call. Measured through the real process_pending_payouts():
     zero ledger calls, swaps.status failed, and the customer's deposit already credited.
 
     So arming made five `* -> ICP` directions offerable against a payout path that
-    refuses every time. The safe move is to stop offering them until the call site is
+    refused every time.
+
+    THAT CALL SITE WAS FIXED LATER THE SAME DAY and the tenses above are past for that
+    reason; the narrative is kept because `--disarm` exists BECAUSE of it, and a
+    justification rewritten to describe a world where the problem never happened stops
+    justifying anything. broadcast_payout() now has an ICP branch passing the swap's
+    recorded created_at as the ledger's idempotency key, and
+    tests/test_icp_e2e_both_directions.py's two DEFECT assertions were inverted with it.
+    What is still unproven is the NETWORK: no `* -> ICP` payout has completed on any
+    network through that path, only against a stub ledger. So `--disarm` is no longer
+    the remedy for a path that refuses every time -- it is the inverse of `--arm`, which
+    is reason enough for it to exist. The safe move is to stop offering them until the call site is
     fixed -- and the only way to do that was to hand-edit the COMPOSE_FILE line in a
     .env that holds GRIDCOIN_WALLET_PASSPHRASE, which is the exact thing --arm exists to
     avoid. An operation with no inverse is one an operator cannot back out of safely.
@@ -1566,7 +1577,10 @@ def still_unset(values: dict, already: dict) -> list[str]:
     you have the set you subtracted them from.
 
     MEASURED RATHER THAN ARGUED, 2026-10-11: over 4000 randomized (already, discovered)
-    pairs drawn from the 17 variables this tool can set, 0 produced a non-empty result.
+    pairs drawn from the 17 variables this tool could set THAT MORNING -- the set is 18
+    since SOL_PAYOUT_KEYPAIR_HOST_FILE was added later the same day, and the figure is
+    left at what was actually run rather than restated (rule 3: the denominator is the
+    set the sampling drew from, not today's).
     A field that cannot vary is rule 14's defect in its strongest form -- it is not a
     number whose meaning is unstated, it is a number with no meaning at all.
 
@@ -1635,31 +1649,50 @@ def say_arming(already: dict, written: dict) -> None:
     """What this tool does NOT set, and what a chain still needs before it can PAY.
 
     =========================================================================
-    THE 17 VARIABLES ABOVE CONFIGURE THE DEPOSIT LEG. A CHAIN CAN READ
+    THE 18 VARIABLES ABOVE MOSTLY CONFIGURE THE DEPOSIT LEG. A CHAIN CAN READ
     DEPOSITS PERFECTLY AND BE UNABLE TO SEND A PAYOUT.
     =========================================================================
 
     Found 2026-10-11, while about to tell the operator that setting SOL_HOT_WALLET would
     finish SOL. It would not. SOL payouts need SOL_PAYOUT_KEYPAIR_HOST_FILE and the
     docker-compose.web.armed-sol.yml overlay; XRP needs XRP_PAYOUT_SECRET_SEED and
-    armed-xrp. Neither is in this tool's 17, and the report said
+    armed-xrp. Neither was in this tool's set, and the report said
 
         AFTERWARDS  2 of 17 written with no prompt
                     4 of 17 ONLY IF YOU ANSWER
 
     with nothing to indicate that two chains would still be half-configured after every
-    one of the 17 was set. THAT IS THE DEFECT THIS WHOLE TOOL EXISTS FOR, one layer out:
+    one of them was set. THAT IS THE DEFECT THIS WHOLE TOOL EXISTS FOR, one layer out:
     something the system needs that nothing sets and nothing mentions. Measured against
-    .env.example, which declares 92 variables to this tool's 17 -- most of the other 75
+    .env.example, which declares 92 variables to this tool's 18 -- most of the other 74
     are tunables with defaults, and these are the ones that gate a leg.
 
-    IT WILL NEVER SET THEM, and that is a design decision rather than a gap to close
-    later. Both name a signing credential, and chain-safety is unambiguous: "Never move,
-    copy, or read back a key. Not .env, not a keypair JSON, not a WIF." The overlays
-    themselves make the same argument at greater length -- arming is a posture, it should
-    take an act to enter, and naming the file on the command line is that act. A
-    configuration tool that armed a payout path would be exactly the inheritance those
-    files were separated to prevent.
+    THOSE 17s ARE THE TRANSCRIPT OF THE RUN THAT FOUND THIS AND ARE LEFT ALONE. The set
+    was 17 that morning and is 18 now, because SOL_PAYOUT_KEYPAIR_HOST_FILE was added
+    to it LATER THE SAME DAY -- the drift is the point (rule 1), and rewriting a recorded
+    transcript to agree with today would destroy the only evidence of what the operator
+    actually saw. Every count outside the indented block is the present one.
+
+    AND "IT WILL NEVER SET THEM" WAS THIS PARAGRAPH'S NEXT SENTENCE, WHICH IS NOW FALSE
+    OF ONE OF THE TWO. The line that matters is not payout-versus-deposit, it is PATH
+    versus CREDENTIAL, and it was only ever the credential half that chain-safety forbids:
+    "Never move, copy, or read back a key. Not .env, not a keypair JSON, not a WIF."
+
+      SOL_PAYOUT_KEYPAIR_HOST_FILE   a PATH. The tool sets it, as of 2026-10-11, and the
+                                     justification is at every_variable_this_tool_can_set()'s
+                                     entry for it. Naming where a keypair lives is not
+                                     reading one, and the alternative was the operator
+                                     hand-editing the .env that holds
+                                     GRIDCOIN_WALLET_PASSPHRASE -- which is a worse place
+                                     to put a human with a text editor.
+      XRP_PAYOUT_SECRET_SEED         a CREDENTIAL. Never set, never read back, never
+                                     echoed. This block reports its PRESENCE and nothing
+                                     else.
+      GRIDCOIN_WALLET_PASSPHRASE     the same, and the reason the one above matters.
+
+    So a configuration tool that armed a payout path would still be the inheritance the
+    overlays were separated to prevent -- and naming a keypair's location is not that.
+    What arms SOL is the overlay plus a keypair file this tool never opens.
 
     SO THIS BLOCK REPORTS AND DOES NOT OFFER. PRESENCE ONLY, NEVER A VALUE -- the same
     rule the "already in .env" line follows, and here it matters more: one of these is a

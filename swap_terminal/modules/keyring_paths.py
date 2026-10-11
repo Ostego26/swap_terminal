@@ -194,8 +194,11 @@ PUBLIC_KEY_SHAPE: dict[str, tuple[int, tuple[int, ...]]] = {
 # ICP IS DELIBERATELY ABSENT, and it is the asset a reader will look for first.
 # A canister's ICP identity is its own principal; there is no threshold key to
 # derive and no address to compute, so a row here would describe a derivation
-# that does not exist. chains/icp.py holds that path and says `can_spend = False`
-# because it calls with `--identity anonymous`.
+# that does not exist. chains/icp.py holds that path, and its can_spend is DERIVED
+# from whether ICP_PAYOUT_IDENTITY names an identity (changed 2026-10-11; this comment
+# said `can_spend = False` because it calls with `--identity anonymous`, which is now
+# true only of an unarmed process). Neither state changes the line above: ICP's absence
+# here is about there being no threshold key to derive, not about whether it can sign.
 #
 # XMR IS ALSO ABSENT, and for a different reason worth writing down: Monero keys
 # are ed25519, so the CURVE is available, but a Monero address is a pair of keys

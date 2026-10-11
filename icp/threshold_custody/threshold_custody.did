@@ -4,8 +4,18 @@
 // operator_admin/operator_admin.did explains: dfx reads this file to build the
 // Candid UI and to type-check calls, and generating it needs candid-extractor
 // plus a wasm build -- a toolchain the hygiene tests deliberately do not require.
-// So the file is explicit, and tests/test_icp_canister_cannot_sign.py pins the
-// method surface against the Rust source.
+// So the file is explicit, and tests/test_candid_matches_the_rust.py compares the
+// method set and the query/update kind of each against the Rust, in both directions.
+//
+// THAT LAST CLAUSE NAMED tests/test_icp_canister_cannot_sign.py UNTIL 2026-10-11 AND
+// WAS FALSE. That test does assert on the Rust's method surface -- it counts the
+// `#[ic_cdk::query]` and `#[ic_cdk::update]` macros -- but it never opens THIS file,
+// and `grep -rn threshold_custody.did` over the whole tree returned only
+// tests/test_keyring_curve_vocabulary.py, which extracts the Curve variant labels and
+// nothing else. So the two method sets had never been compared, and a hand-written
+// candid that drifts is worse than a missing one: dfx TYPE-CHECKS CALLS against it, so
+// a drifted method typechecks at the caller and fails at the replica. The replacement
+// is mutation-checked in both directions and on the kind.
 //
 // WHAT THIS CANISTER CANNOT DO, because the interface is where a reader looks
 // first: there is no signing method. `public_key` returns a PUBLIC key and

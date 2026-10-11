@@ -651,12 +651,21 @@ def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float
     # a SOL-destined quote with no SOL adapter REFUSES rather than skipping the
     # check (rule 19: a gate that can be silently bypassed is not a gate).
     #
-    # IT CANNOT FIRE TODAY, and that is said out loud rather than discovered:
-    # Config.ALLOWED_PAIRS names no pair whose TO asset is SOL (counted
-    # 2026-10-02 -- SOL appears only as a source), so validate_pair() above
-    # refuses every *->SOL quote before this line is reached. This is the gate
-    # for the moment the operator enables one, which is exactly when nobody
-    # would remember to add it.
+    # IT FIRES. This comment said "IT CANNOT FIRE TODAY, and that is said out
+    # loud rather than discovered: Config.ALLOWED_PAIRS names no pair whose TO
+    # asset is SOL (counted 2026-10-02 -- SOL appears only as a source), so
+    # validate_pair() above refuses every *->SOL quote before this line is
+    # reached." That count was right on 2026-10-02 and was never re-run.
+    #
+    # RE-MEASURED 2026-10-11 by ast.literal_eval of the ALLOWED_PAIRS literal:
+    # 30 ordered pairs over BTC, GRC, ICP, LTC, SOL and XRP -- the complete 6x5
+    # cross product -- so five pairs have SOL as their TO asset
+    # (BTC/GRC/ICP/LTC/XRP -> SOL). The 2026-10-06 ICP expansion did it. So this
+    # is not a gate waiting for a future enablement; it is the gate that runs on
+    # every *->SOL quote the terminal offers right now, which is the stronger
+    # reason for it to be here and the weaker reason to trust the sentence above
+    # it. A comment that says a live gate is unreachable invites someone to
+    # delete it.
     require_deliverable_sol_payout(config, adapters, to_asset, output_amount_estimate)
     now = utc_now()
     quote = {

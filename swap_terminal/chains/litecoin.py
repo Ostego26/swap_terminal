@@ -78,9 +78,15 @@ functions that compute it, so this table cannot drift away from the code the
 way the paragraph it replaced did.
 
 AND chains/base.RPCAdapter.send_to_address() CONSULTS NONE OF IT. Its only
-amount refusal is `fitted <= 0`, and the comment beside that refusal says the
+amount refusal is `fitted <= 0`. The comment beside that refusal USED to say the
 dust limit "depends on the output type, and no part of this tree measures it
-yet" -- which has been false since the table above landed. So the brokered
+yet"; base.py was corrected on 2026-10-11 and now retracts that sentence in
+place and carries the same per-output-type table this file does. The quote is
+kept here rather than deleted so a reader who met the old wording can see it
+resolved -- but base.py no longer says it, and attributing it to that file in
+the present tense would be this paragraph committing the error it reports. The
+architectural fact is unchanged and is the load-bearing half: there is no dust
+floor on the brokered payout path, at quote time or at send time. So the brokered
 payout path hands litecoind an amount below the floor and lets the DAEMON
 refuse it, which is an error arriving AFTER the customer's deposit is credited
 and irreversible.

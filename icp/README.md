@@ -9,8 +9,34 @@ threshold-ECDSA and Bitcoin-integration examples are Rust-first.
 ## What is here
 
 `threshold_custody` -- increment 1. Holds one threshold key and reports its
-PUBLIC half. It cannot sign: `sign_with_ecdsa` appears nowhere in the source and
-nowhere in the built wasm, which `tests/test_icp_canister_cannot_sign.py` pins.
+PUBLIC half. It cannot sign: `sign_with_ecdsa` appears nowhere in the source, and
+`tests/test_icp_canister_cannot_sign.py` pins that.
+
+THE WASM HALF OF THAT SENTENCE IS NOT PINNED BY A NORMAL RUN, and this paragraph
+claimed it was until 2026-10-11. The test that inspects the built artifact,
+`test_the_built_wasm_exports_no_signing_call`, is `@pytest.mark.skipif`'d on
+`ST_CHECK_WASM` not being set, because a release build costs ~34s against a suite
+of 5,000-odd tests. So `python3 -m pytest` reports 1 skipped there and the only
+check that actually ran read the SOURCE -- which CLAUDE.md is explicit about:
+"Never accept 'the code contains a check for X' as evidence X is enforced."
+
+To get the real one:
+
+    ST_CHECK_WASM=1 python3 -m pytest tests/test_icp_canister_cannot_sign.py
+
+It builds the wasm, asserts `ecdsa_public_key` and `schnorr_public_key` ARE in the
+bytes, asserts none of the forbidden calls is, and asserts exactly one
+`canister_update` and one `canister_query` export. Run it before trusting a
+deployment, because it is the one check that would catch a signing call arriving
+through a macro, a re-export or a dependency rather than through a line of lib.rs.
+
+`operator_admin` -- the configuration and audit canister: posture, fee bps, pairs,
+per-asset confirmations, armed flags, an audit log and an operator console served
+from its own `http_request` query method. It holds no key material. Its inability
+to sign was UNPINNED until 2026-10-11 -- four files in `tests/` mentioned it and
+none checked -- and it is now covered by the same table as `threshold_custody`,
+with a per-canister forbidden list, because `http_request` is a legitimate method
+here and an outcall there.
 
 Build and inspect without dfx:
 

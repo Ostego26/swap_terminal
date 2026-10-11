@@ -34,6 +34,33 @@ So the order is explicit and the proof is the existing one:
                signals, and POLLS FOR ABSENCE -> then gunicorn is asked to stop ->
                then this process exits with what the stop actually established.
 
+THAT ORDER IS WHAT THIS FILE REQUESTS AND NOT WHAT THE CONTAINER DOES, measured on
+the operator's host 2026-10-11 from `docker compose logs --timestamps`:
+
+    15:25:29.950  [10] [INFO] Handling signal: term          gunicorn's master
+    15:25:29.950  signal 15 received. Stopping WORKERS FIRST  this file
+    15:25:30.053  [10] [INFO] Shutting down: Master           gunicorn GONE, +0.1s
+    15:25:45.004  stop deposit_watcher    stopped             the workers, +15.05s
+
+gunicorn received SIGTERM at the SAME MILLISECOND as this process, fifteen seconds
+before the line below would have asked it to. The cause is two lines neither of which
+is in this file: docker/web.Dockerfile's `ENTRYPOINT ["dumb-init", "--"]` passes no
+--single-child, and the gunicorn Popen below passes no start_new_session -- so
+gunicorn shares this process's group and dumb-init's default signals the whole group.
+
+THE REAL BEHAVIOR IS THE SAFER OF THE TWO AND IS DELIBERATELY LEFT, which is why this
+is a corrected comment rather than a code change. gunicorn dying first means no swap
+can be CREATED while the workers wind down; the order this file requests would leave
+the page accepting swaps whose payout worker was already gone. What the order below
+still buys is the case where gunicorn does NOT take the group signal -- it is
+terminate()d and waited for explicitly, so a gunicorn that ignored SIGTERM is still
+reaped here rather than SIGKILLed by the runtime.
+
+AND THE TWO LEGS ARE THEREFORE CONCURRENT, NOT SEQUENTIAL. The container's stop is
+max(worker grace, gunicorn's own graceful_timeout) rather than their sum -- see
+swap_terminal/stop_budget.total_stop_seconds(), which sums them on purpose and says
+why.
+
 The reaper is named here, in the same file as the spawn, which is rule 13's first
 bullet: a spawn and its reap are one change.
 

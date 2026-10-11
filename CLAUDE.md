@@ -15,11 +15,38 @@ denominator stated (rule 3). None of them is inherited prose.
 
 ## What this system is, and why that raises the stakes
 
-swap_terminal moves real cryptocurrency between chains. Two implementations
+swap_terminal moves real cryptocurrency between chains. FOUR implementations
 live here side by side:
 
+**THIS SAID "Two" AND LISTED THREE UNTIL 2026-10-11, and the fourth was missing
+altogether.** The sentence is in the file whose rule 3 says "a count without what it
+was counted out of has caused real errors more than once", and it had been read past
+by everyone including the author of rule 3. The four are below; the ICP canisters are
+the one that was absent.
+
+**AND THE AUTHORITATIVE DESCRIPTION IS NOT THIS PARAGRAPH.** It is
+`swap_terminal/architecture.py`, which states the deployment topology, the per-chain
+custody model and the canister layer as DATA, and
+`tests/test_architecture_is_what_the_tree_does.py` derives every one of those facts
+from the compose files, the adapters and `icp/dfx.json` and fails on any disagreement.
+Read that file first, and trust it exactly as far as that test runs.
+
+Why it exists rather than a longer version of this section (operator, 2026-10-11: "do
+you need to fucking write that shit down about docker because this is like the 2nd or
+3rd time you've fucked up our architecture"): prose about structure goes stale
+silently. The same session that wrote it corrected five such descriptions -- a
+`stop_grace_period` comment off by 3x on its own arithmetic, "exactly two variables
+carry a default" where six do, "SOL is NOT in `Config.ALLOWED_PAIRS`" where it had
+been a destination on five pairs for five days, "no payout has ever completed for ICP"
+hours after the call site was fixed, and "`COMPOSE_FILE` lives in a file this
+repository must never read or write" after `configure_env.py` started writing it.
+Every one was written by someone who had just measured it. A description of structure
+is worth what its test is worth.
+
   Flask app            `app.py`, `routes/`, `services/`, `workers/`, `chains/`
-                       quote -> deposit -> payout, backed by SQLite.
+                       quote -> deposit -> payout, backed by SQLite. Runs in the
+                       `web` container as gunicorn plus three supervised workers --
+                       four processes, which `architecture.SERVICES["web"]` lists.
   Atomic swap modules  `modules/atomic_*_client.py`, `modules/atomic_htlc_scripts.py`,
                        `modules/atomic_swapper.py` -- HTLC cross-chain swaps on
                        BTC / LTC / GRC.
@@ -40,6 +67,38 @@ live here side by side:
                        THE PYTHON TREE IS UNTOUCHED and is a different thing --
                        `chains/solana.py` and `SOL_SPL_MINT` pay an SPL token
                        out; they never needed a market.
+  ICP canisters        `icp/` -- Rust, two crates plus DFINITY's released ledger
+                       wasm. **THE ONE THIS SECTION OMITTED.** `threshold_custody`
+                       is the keyring: it holds one threshold key and reports
+                       PUBLIC halves only, over three curves covering five assets
+                       (secp256k1_ecdsa for BTC/LTC/GRC, ed25519 for SOL/XRP,
+                       bip340secp256k1 unused). `operator_admin` is configuration
+                       and audit -- posture, fees, pairs, confirmations, armed
+                       flags, an audit log, a console -- and holds no key material.
+                       NEITHER CAN SIGN, which is the whole safety argument, and
+                       `tests/test_icp_canister_cannot_sign.py` pins it for both
+                       with a per-canister forbidden list. The wasm-level pin is
+                       skipped unless `ST_CHECK_WASM=1`, so an ordinary run proves
+                       the absence from the SOURCE only -- run it before trusting a
+                       deployment.
+
+**The topology, in the operator's words (2026-10-11):** "docker is the container,
+and then icp canisters hold the keyring for all applicable chains, not all apply,
+like sol, or xrp, but where this gives us capability for expansion of other swaps."
+Asked which sense of "applicable", they chose: the keyring holds ALL FIVE external
+chains, and what does not apply to SOL and XRP is consensus-backed CHAIN STATE, not
+custody -- reading those chains stays an RPC-provider-trust leg, holding their keys
+does not. So a new chain gets custody for free by adding a derivation path under an
+existing curve; there is no per-chain custody design to invent.
+
+**Custody and the keyring are two layers that do not meet yet, and that gap is the
+project rather than a defect.** Measured 2026-10-11: `threshold_custody`, `keyring`
+and `derivation_path` appear ZERO times in `routes/`, `services/` and `workers/`.
+Every chain today signs from its own credential -- the daemon's wallet for BTC, LTC
+and GRC, a keypair file for SOL, a seed for XRP, a dfx identity for ICP --
+and `architecture.CUSTODY` is the table, asserted against the modules that read
+them. Writing the two layers as one would be the thing `architecture.py` exists to
+stop.
 
 **The difference from Mammon that changes everything.** Mammon's rule 16 draws
 its safety line at "reversible by a deploy versus reversible only by a trade."
