@@ -110,6 +110,7 @@ sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 from chains.daemon_conf import parse_daemon_conf  # noqa: E402 -- after the sys.path line above
 from config import database_path  # noqa: E402
 from network_target import CHAIN_PORTS  # noqa: E402 -- as every root tool does
+from regtest.daemons import CHAIN_DEFAULTS  # noqa: E402 -- the one owner of each chain's datadir and conf name
 
 ENV_FILE = REPO_ROOT / ".env"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
@@ -176,6 +177,81 @@ DAEMON_CONFS = {
     "LTC": ("~/.litecoin/litecoin.conf", "LTC_RPC_USER", "LTC_RPC_PASS"),
     "GRC": ("~/.GridcoinResearch/gridcoinresearch.conf", "GRC_RPC_USER", "GRC_RPC_PASS"),
 }
+
+#: EVERY PLACE A CHAIN'S CONF MIGHT BE, and why conf_candidates() is a list rather than
+#: the one entry in DAEMON_CONFS above.
+#:
+#: =========================================================================
+#: I RESPELLED A PATH THAT regtest/daemons.CHAIN_DEFAULTS ALREADY OWNS, AND
+#: THE TWO TABLES DISAGREE ABOUT BITCOIN
+#: =========================================================================
+#:
+#: Measured 2026-10-11:
+#:
+#:     regtest/daemons.CHAIN_DEFAULTS    BTC  ~/regtest/btc/bitcoin.conf
+#:     configure_env.DAEMON_CONFS        BTC  ~/.bitcoin/bitcoin.conf
+#:
+#: chains/daemon_conf.py imports CHAIN_DEFAULTS for exactly this and says why in its own
+#: header: it "is the one place that owns each chain's datadir and conf name. Respelling
+#: them here would be two sources for the fact that moves whenever the harness is pointed
+#: somewhere else (rule 8)." I then respelled them here, on a different path.
+#:
+#: THE COST WAS A CHAIN THE OPERATOR COULD NOT CONFIGURE. Their BTC has no conf at
+#: ~/.bitcoin and nothing listening on 18332 or 18443, so --read-daemon-confs reported
+#: "no conf" and asked them for an rpcuser and an rpcpassword. The moment they bring up
+#: this repository's OWN regtest harness, bitcoind writes ~/regtest/btc/bitcoin.conf with
+#: both -- and this tool would still have asked, about a file in the tree it ships with.
+#: LTC worked only by luck: their litecoind is a real testnet node at ~/.litecoin, which
+#: is the path that happened to be spelled here.
+#:
+#: WHICH CANDIDATE IS PREFERRED IS DECIDED BY THE PROBED PORT, not by an order chosen
+#: here. CHAIN_DEFAULTS' ports are the regtest ones (BTC 18443, LTC 19443), so a daemon
+#: answering on a regtest port is the harness and its conf is the harness's; a daemon on a
+#: testnet port is the operator's own and its conf is the conventional one. That is the
+#: same discriminator CONF_SECTION_FOR_PORT already uses one line down, and it is why this
+#: needs no new knowledge: the port was measured before the file was opened.
+def conventional_conf(chain: str) -> str:
+    """DAEMON_CONFS' path for `chain`, read AT CALL TIME and not precomputed.
+
+    THIS WAS A MODULE-LEVEL DICT COMPREHENSION FOR ONE EDIT and broke six tests, which is
+    the small version of the thing it exists to prevent. The fixtures redirect a conf by
+    monkeypatching DAEMON_CONFS; a constant derived from it at IMPORT time had already
+    taken its copy, so the patch redirected nothing and the tool read the operator's real
+    ~/.litecoin while the test watched a file in tmp_path.
+
+    A derived CONSTANT is a second source for a fact that can change after import -- rule
+    8 in the same commit whose whole subject is rule 8 -- and a function reading the one
+    table cannot diverge from it.
+    """
+    entry = DAEMON_CONFS.get(chain)
+    return entry[0] if entry else ""
+
+
+def conf_candidates(chain: str, port: int) -> list[Path]:
+    """Where to look for `chain`'s conf, best first, given the port it answers on.
+
+    THE HARNESS PATH COMES FROM CHAIN_DEFAULTS and is never spelled here, which is the
+    whole point of the function. GRC has no CHAIN_DEFAULTS entry -- the harness does not
+    run Gridcoin -- so it gets its conventional path and nothing else, and that is
+    correct rather than a gap.
+
+    DEDUPED WITH ORDER PRESERVED, so a chain whose two tables agree is tried once and the
+    output does not report looking in the same file twice (rule 14: output that
+    contradicts itself about what it did is a defect in the output).
+    """
+    harness = CHAIN_DEFAULTS.get(chain)
+    harness_path = (Path(harness["datadir"]).expanduser() / harness["conf_name"]) if harness else None
+    conventional = conventional_conf(chain)
+    conventional_path = Path(conventional).expanduser() if conventional else None
+
+    regtest = bool(harness) and port == harness.get("port")
+    ordered = ([harness_path, conventional_path] if regtest
+               else [conventional_path, harness_path])
+    seen: list[Path] = []
+    for candidate in ordered:
+        if candidate is not None and candidate not in seen:
+            seen.append(candidate)
+    return seen
 
 #: Which conf SECTION a given port's network uses. Bitcoin Core names them `[main]`,
 #: `[test]` and `[regtest]`, and credentials are conventionally at the TOP level while
@@ -749,18 +825,28 @@ def credentials_from_confs(discovered: dict, already: dict, *, gridcoin: bool) -
     stated reason: "a second formatter is a second chance to interpolate the wrong key".
     """
     found: dict[str, tuple[str, str]] = {}
-    for chain, (conf_path, user_variable, pass_variable) in sorted(DAEMON_CONFS.items()):
+    for chain, (_conventional, user_variable, pass_variable) in sorted(DAEMON_CONFS.items()):
         if chain == "GRC" and not gridcoin:
             say(f"    {chain}: NOT READ. {GRIDCOIN_CONF_HAZARD}")
             continue
         if already.get(user_variable) and already.get(pass_variable):
             continue
-        path = Path(conf_path).expanduser()
-        if not path.is_file():
-            say(f"    {chain}: no conf at {path}, so there is nothing to read")
-            continue
-
+        # THE PORT IS READ BEFORE THE FILE IS CHOSEN, which is the ordering the whole
+        # conf_candidates() change turns on: a daemon answering on a regtest port is this
+        # repository's own harness and its conf is the harness's, and one on a testnet
+        # port is the operator's and its conf is the conventional one. Both facts were
+        # already measured by discovery; nothing new is probed here.
         port = _probed_port(chain, discovered, already)
+        candidates = conf_candidates(chain, port)
+        path = next((candidate for candidate in candidates if candidate.is_file()), None)
+        if path is None:
+            # EVERY PLACE LOOKED IS NAMED, not just the first. An operator told "no conf
+            # at ~/.bitcoin/bitcoin.conf" goes and creates one there, and the harness
+            # writes to ~/regtest/btc -- so a message naming one of two paths sends them
+            # to the wrong file (rule 14).
+            where = " or ".join(str(candidate) for candidate in candidates)
+            say(f"    {chain}: no conf at {where}, so there is nothing to read")
+            continue
         section = CONF_SECTION_FOR_PORT.get(port, "")
         try:
             settings = parse_daemon_conf(path.read_text(), network=section)

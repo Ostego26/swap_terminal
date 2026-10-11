@@ -46,6 +46,7 @@ import pathlib
 
 import pytest
 from network_target import CHAIN_PORTS
+from regtest.daemons import CHAIN_DEFAULTS
 
 import configure_env
 
@@ -924,6 +925,137 @@ def litecoin_conf(tmp_path, monkeypatch, env_file):
     )
     monkeypatch.setattr(configure_env, "listening_ports", lambda: {19332})
     return conf
+
+
+def test_the_harness_conf_is_found_because_the_path_is_not_respelled():
+    """MUTATION: drop the CHAIN_DEFAULTS branch from conf_candidates().
+
+    =========================================================================
+    I RESPELLED A PATH regtest/daemons.CHAIN_DEFAULTS ALREADY OWNS
+    =========================================================================
+
+    Measured 2026-10-11: CHAIN_DEFAULTS puts BTC's conf at ~/regtest/btc/bitcoin.conf and
+    configure_env.DAEMON_CONFS said ~/.bitcoin/bitcoin.conf. chains/daemon_conf.py imports
+    CHAIN_DEFAULTS for exactly this and its header says why: it "is the one place that owns
+    each chain's datadir and conf name. Respelling them here would be two sources for the
+    fact that moves whenever the harness is pointed somewhere else (rule 8)."
+
+    THE COST WAS A CHAIN THE OPERATOR COULD NOT CONFIGURE. The moment they start this
+    repository's own BTC regtest daemon, bitcoind writes that conf with both credentials --
+    and --read-daemon-confs would have reported "no conf" about a file this tree had just
+    created, then asked them for an rpcuser they already had.
+
+    ASSERTED AGAINST CHAIN_DEFAULTS rather than against the literal path, so pointing the
+    harness somewhere else moves this test with it instead of breaking it.
+    """
+    for chain, spec in CHAIN_DEFAULTS.items():
+        expected = pathlib.Path(spec["datadir"]).expanduser() / spec["conf_name"]
+        candidates = configure_env.conf_candidates(chain, spec["port"])
+
+        assert expected in candidates, (
+            f"{chain}'s harness conf at {expected} is in no candidate this tool looks at, so a "
+            f"daemon started by this repository's own harness cannot be read"
+        )
+        # On the harness's own port the harness conf is tried FIRST: that daemon is the
+        # harness, so its conf is the authority over any conventional file that also exists.
+        assert candidates[0] == expected, f"{chain} on its regtest port tried {candidates[0]} first"
+
+
+def test_a_testnet_port_prefers_the_operators_own_conf():
+    """MUTATION: order the candidates the same way whatever the port.
+
+    THE DISCRIMINATOR IS THE PORT AND IT WAS ALREADY MEASURED. CHAIN_DEFAULTS' ports are
+    the regtest ones, so a daemon answering on a TESTNET port is not the harness -- it is
+    the operator's own node, and its conf is the conventional one. Their litecoind answers
+    on 19332 and its conf is ~/.litecoin/litecoin.conf; reading ~/regtest/ltc first would
+    find a stale harness conf on a host that has run both.
+    """
+    conventional = pathlib.Path(configure_env.conventional_conf("LTC")).expanduser()
+
+    assert configure_env.conf_candidates("LTC", 19332)[0] == conventional
+    assert configure_env.conf_candidates("LTC", 19443)[0] != conventional, (
+        "the regtest port did not prefer the harness conf, so the port is not deciding"
+    )
+
+
+def test_a_chain_the_harness_does_not_run_gets_one_candidate():
+    """GRC has no CHAIN_DEFAULTS entry, and that is correct rather than a gap.
+
+    The regtest harness runs Bitcoin and Litecoin. Gridcoin's conf lives in
+    ~/.GridcoinResearch and is shared by mainnet and testnet both, which is why
+    chains/daemon_conf.CONF_FALLBACK_NETWORK excludes it entirely and why this tool needs
+    a separate flag to read it at all. A second candidate invented for it would be a path
+    that does not exist on any host.
+    """
+    assert "GRC" not in CHAIN_DEFAULTS, "the harness grew a Gridcoin entry; this test must be revisited"
+
+    candidates = configure_env.conf_candidates("GRC", 25715)
+
+    assert len(candidates) == 1
+    assert candidates[0] == pathlib.Path(configure_env.conventional_conf("GRC")).expanduser()
+    # And a chain in neither table gets nothing rather than a crash.
+    assert configure_env.conf_candidates("DOGE", 0) == []
+
+
+def test_the_missing_conf_message_names_every_path_it_looked_in(env_file, monkeypatch, capsys):
+    """MUTATION: name only the first candidate.
+
+    An operator told "no conf at ~/.bitcoin/bitcoin.conf" goes and creates one there. The
+    harness writes to ~/regtest/btc. A message naming one of two paths sends them to the
+    wrong file, which is rule 14's whole subject: the output has to be usable a day later
+    by somebody who does not already know the layout.
+    """
+    monkeypatch.setattr(configure_env, "DAEMON_CONFS",
+                        {"BTC": ("/nowhere/conventional/bitcoin.conf", "BTC_RPC_USER", "BTC_RPC_PASS")})
+    monkeypatch.setattr(configure_env, "listening_ports", set)
+
+    configure_env.credentials_from_confs({}, {}, gridcoin=False)
+    printed = capsys.readouterr().out
+
+    assert "/nowhere/conventional/bitcoin.conf" in printed
+    harness = pathlib.Path(CHAIN_DEFAULTS["BTC"]["datadir"]).expanduser() / CHAIN_DEFAULTS["BTC"]["conf_name"]
+    assert str(harness) in printed, "the harness path was not named, so half the search is invisible"
+
+
+def test_two_tables_naming_one_path_is_tried_once(monkeypatch):
+    """MUTATION: drop the dedupe and this returns the same file twice.
+
+    ADDED BECAUSE THE MUTATION SURVIVED. With BTC, LTC and GRC as they stand, the harness
+    path and the conventional path never coincide, so the dedupe was a branch no test
+    could reach -- and an unreachable branch is dead code (rule 9) unless it is either
+    deleted or made live. It is reachable the moment DAEMON_CONFS is pointed at the
+    harness directory, which is a thing an operator running only regtest would do.
+
+    WHY IT IS WORTH KEEPING RATHER THAN DELETING: the duplicate is not harmless. The
+    "no conf" line joins the candidates with " or ", so a host with neither file would
+    read "no conf at ~/regtest/btc/bitcoin.conf or ~/regtest/btc/bitcoin.conf" -- output
+    that contradicts itself about what it did, which rule 14 treats as a defect in the
+    output rather than a cosmetic one.
+    """
+    harness = pathlib.Path(CHAIN_DEFAULTS["LTC"]["datadir"]).expanduser() / CHAIN_DEFAULTS["LTC"]["conf_name"]
+    monkeypatch.setattr(configure_env, "DAEMON_CONFS",
+                        {"LTC": (str(harness), "LTC_RPC_USER", "LTC_RPC_PASS")})
+
+    for port in (CHAIN_DEFAULTS["LTC"]["port"], 19332):
+        candidates = configure_env.conf_candidates("LTC", port)
+        assert candidates == [harness], f"port {port} produced {candidates}"
+
+
+def test_the_conf_table_is_read_at_call_time_and_not_copied_at_import(monkeypatch):
+    """MUTATION: `CONVENTIONAL_CONF = {...}` at module scope instead of a function.
+
+    IT WAS THAT FOR ONE EDIT AND BROKE SIX TESTS, in the commit whose whole subject is
+    two sources for one fact. The fixtures in this file redirect a conf by monkeypatching
+    DAEMON_CONFS; a dict comprehension evaluated at IMPORT had already taken its copy, so
+    the patch redirected nothing and the tool read the operator's real ~/.litecoin while
+    the test watched a file under tmp_path. A test that silently reads a real file instead
+    of its fixture is the worst failure available to a suite -- it passes.
+    """
+    monkeypatch.setattr(configure_env, "DAEMON_CONFS",
+                        {"LTC": ("/redirected/litecoin.conf", "LTC_RPC_USER", "LTC_RPC_PASS")})
+
+    assert configure_env.conventional_conf("LTC") == "/redirected/litecoin.conf"
+    assert pathlib.Path("/redirected/litecoin.conf") in configure_env.conf_candidates("LTC", 19332)
 
 
 def test_a_credential_is_written_and_NEVER_printed(litecoin_conf, env_file, monkeypatch, capsys):
