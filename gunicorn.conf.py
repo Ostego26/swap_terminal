@@ -99,6 +99,7 @@ from import_spawn_guard import (  # noqa: E402
     thread_snapshot,
 )
 from microfortnights import format_duration  # noqa: E402
+from stop_budget import gunicorn_graceful_timeout  # noqa: E402
 
 # --- Where it listens --------------------------------------------------------
 #
@@ -140,7 +141,20 @@ preload_app = False
 # timeout at or below the call it is waiting on kills the worker instead of
 # surfacing the chain's own failure.
 timeout = int(os.getenv("GUNICORN_TIMEOUT_SECONDS", "60"))
-graceful_timeout = 30
+
+# DERIVED, NOT 30. This was `graceful_timeout = 30` until 2026-10-11 while
+# docker/web_workers_entrypoint.py waited 20 seconds before SIGKILLing gunicorn, and
+# nothing reconciled the two -- `graceful_timeout` appears in exactly one file in this
+# tree, measured by grepping all of it. So the entrypoint killed gunicorn TEN SECONDS
+# BEFORE gunicorn was configured to stop waiting on its own workers: a request in
+# flight longer than 20s could not finish, and the entrypoint logged "gunicorn still
+# alive after 20.0s; killing it", stating a defect in gunicorn for obeying its config.
+#
+# swap_terminal/stop_budget.py owns the wait and subtracts a named handoff margin, so
+# gunicorn reaches its own clean exit while the entrypoint is still waiting. An inner
+# deadline EQUAL to its outer one would be a race rather than a budget, which is why
+# the margin is subtracted rather than the wait being used directly.
+graceful_timeout = gunicorn_graceful_timeout()
 keepalive = 5
 
 # --- Logging -----------------------------------------------------------------

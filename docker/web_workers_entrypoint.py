@@ -77,6 +77,7 @@ sys.path.insert(0, str(BASE_DIR / "swap_terminal"))
 # derives the path -- config.Config does, the same way every other process in the
 # container reads it.
 import db  # noqa: E402
+import stop_budget  # noqa: E402
 import supervisor  # noqa: E402
 from config import Config  # noqa: E402
 
@@ -86,15 +87,19 @@ from config import Config  # noqa: E402
 #: having one.
 RUN_DIR = Path(os.getenv("ST_WORKER_RUN_DIR", str(BASE_DIR / "swap_terminal" / "runtime")))
 
-#: How long the workers get to exit before the supervisor escalates to SIGKILL. Spent
-#: ONCE for the whole set, not once per worker -- see stop_workers() below.
-#: Must be comfortably INSIDE the compose `stop_grace_period`, or the runtime
-#: SIGKILLs this process mid-stop and the proof is lost -- which would be a stop
-#: that cannot prove it worked, arrived at by a timeout rather than a bug.
-WORKER_GRACE_SECONDS = float(os.getenv("ST_WORKER_GRACE_SECONDS", "15"))
-
-#: Seconds to wait for gunicorn after the workers are gone.
-GUNICORN_GRACE_SECONDS = float(os.getenv("ST_GUNICORN_GRACE_SECONDS", "20"))
+#: THE TWO GRACES ARE IMPORTED, NOT DEFINED HERE, SINCE 2026-10-11. They used to be
+#: two module-level os.getenv() reads in this file, and gunicorn.conf.py separately
+#: hardcoded `graceful_timeout = 30` -- a number that had to be smaller than the wait
+#: below with nothing making it so, and was not. See swap_terminal/stop_budget.py for
+#: the measurement and for the ordering the two must satisfy; the point of the move is
+#: that one file now owns the spend and both readers derive from it (rule 8).
+#:
+#: Re-exported under the same names on purpose: this module's own tests and
+#: tests/test_container_stop_fits_its_grace_period.py read entrypoint.WORKER_GRACE_SECONDS
+#: and entrypoint.GUNICORN_GRACE_SECONDS, and an operator reading the startup banner
+#: sees the same two names the environment variables have.
+WORKER_GRACE_SECONDS = stop_budget.WORKER_GRACE_SECONDS
+GUNICORN_GRACE_SECONDS = stop_budget.GUNICORN_GRACE_SECONDS
 
 _stopping = False
 

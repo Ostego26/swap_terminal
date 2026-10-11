@@ -55,6 +55,7 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "swap_terminal"))
 
+import stop_budget  # noqa: E402
 import supervisor  # noqa: E402
 
 # The loader-by-path lives in ONE place (rule 8). See its docstring for why it is
@@ -177,8 +178,12 @@ def test_the_container_stop_fits_inside_its_compose_grace_period(tmp_path, monke
     names = list(supervisor.worker_commands())
     multiplier = measured_multiplier(tmp_path, names)
 
+    # THROUGH stop_budget.total_stop_seconds() rather than adding the two here, so the
+    # arithmetic lives in the module that owns the numbers instead of being spelled a
+    # second time in its test (rule 8). Spelling it here was how the comment at
+    # docker-compose.web.yml's stop_grace_period came to disagree with the code.
     workers = multiplier * entrypoint.WORKER_GRACE_SECONDS
-    worst_case = workers + entrypoint.GUNICORN_GRACE_SECONDS
+    worst_case = stop_budget.total_stop_seconds(multiplier)
     budget = compose_stop_grace_seconds()
     assert worst_case < budget, (
         f"the container's stop needs {worst_case:.0f}s and compose SIGKILLs it at {budget:.0f}s. "
@@ -215,4 +220,91 @@ def test_the_entrypoint_stops_every_worker_in_one_call(tmp_path, monkeypatch):
     assert calls == [expected], (
         f"expected one group call carrying every worker, got {calls}. "
         "One call per name is the serial budget this module measured at 3.11x."
+    )
+
+
+def test_each_stop_deadline_fires_before_the_one_outside_it():
+    """The four deadlines must NEST, each strictly inside the next, with margin.
+
+        gunicorn's own graceful_timeout  <  the entrypoint's wait for gunicorn
+        the entrypoint's whole stop      <  compose's stop_grace_period
+
+    WHAT THIS CAUGHT, 2026-10-11, and it is why the chain is asserted rather than
+    described. gunicorn.conf.py hardcoded `graceful_timeout = 30` while
+    docker/web_workers_entrypoint.py waited 20 seconds before SIGKILLing gunicorn,
+    and NOTHING reconciled them -- `graceful_timeout` appears in exactly one file in
+    the tree. So the inner deadline was TEN SECONDS LARGER than the outer one: a
+    request in flight longer than 20s could never finish, gunicorn never reached its
+    own clean exit, and the entrypoint logged "gunicorn still alive after 20.0s;
+    killing it" -- which reads as a defect in gunicorn for doing what it was
+    configured to do.
+
+    STRICT INEQUALITIES, NOT `<=`. An inner deadline equal to its outer one is a race
+    rather than a budget: both fire at the same instant and which lands first is
+    scheduling. swap_terminal/stop_budget.GUNICORN_HANDOFF_MARGIN_SECONDS exists for
+    exactly this and is the reason the first comparison has room in it.
+
+    MUTATION: set GUNICORN_HANDOFF_MARGIN_SECONDS to 0 and the first assertion fails
+    on `assert 20 < 20.0` -- the equality that is a race.
+
+    PUTTING `graceful_timeout = 30` BACK IN gunicorn.conf.py DOES NOT FAIL THIS TEST,
+    and that was written here as though it would until the mutation was actually run.
+    It cannot: this test reads stop_budget.gunicorn_graceful_timeout(), which still
+    derives 15 whatever gunicorn.conf.py assigns. That mutation is caught by
+    test_the_gunicorn_config_actually_uses_the_derived_timeout below, and the division
+    is deliberate rather than an accident of two tests -- this one asserts the
+    RELATIONSHIP between the numbers, that one asserts gunicorn actually receives the
+    derived one. Either alone leaves a hole: a correct relationship nobody reads, or a
+    faithfully-read number that is wrong.
+    """
+    graceful = stop_budget.gunicorn_graceful_timeout()
+    wait = stop_budget.GUNICORN_GRACE_SECONDS
+    assert graceful < wait, (
+        f"gunicorn is configured to wait {graceful}s for its own workers and the entrypoint "
+        f"SIGKILLs it after {wait}s. The inner deadline must fire first or gunicorn never "
+        f"reaches a clean exit, and the entrypoint's log blames gunicorn for it."
+    )
+
+    # The whole stop at the DESIGNED multiplier of 1.0 -- the group stop spends the
+    # grace once. The measured multiplier is the other test's subject; this one is
+    # about the relationship between the configured numbers.
+    designed = stop_budget.total_stop_seconds()
+    budget = compose_stop_grace_seconds()
+    assert designed < budget, (
+        f"the designed stop is {designed:.0f}s against a compose stop_grace_period of "
+        f"{budget:.0f}s, so there is no margin left for a loaded host before the runtime "
+        f"SIGKILLs the entrypoint mid-proof."
+    )
+
+
+def test_the_gunicorn_config_actually_uses_the_derived_timeout(tmp_path, monkeypatch):
+    """gunicorn.conf.py's `graceful_timeout` must BE the derived value, not a literal.
+
+    Asserted by reading the value gunicorn would receive rather than by grepping the
+    file for the function's name: a file that imported the helper and then assigned a
+    literal anyway would pass a source-text check and fail here.
+
+    THE CONFIG IS EXECUTED, NOT IMPORTED AS A MODULE, because that is how gunicorn
+    reads it (`-c`) and because its own docstring says so. It is run with a namespace
+    of its own so its module-level assignments land somewhere this test can read, and
+    nothing it does at that level starts a thread or touches the database --
+    import_spawn_guard, which it imports, is the thing that holds that property.
+    """
+    # FROM A DIFFERENT WORKING DIRECTORY, which is the container-shaped half of this
+    # assertion. gunicorn.conf.py puts swap_terminal/ on sys.path itself, derived from
+    # its own __file__ -- in the image that is /app/gunicorn.conf.py beside
+    # /app/swap_terminal (docker/web.Dockerfile's two COPY lines), and gunicorn runs it
+    # with cwd=/app. If any of that reached for the cwd instead, `import stop_budget`
+    # would fail and GUNICORN WOULD NOT START AT ALL -- a config import error is not a
+    # degraded page, it is no page. Chdir'ing somewhere empty is what makes this test
+    # able to tell the difference.
+    monkeypatch.chdir(tmp_path)
+    namespace: dict = {"__file__": str(REPOSITORY_ROOT / "gunicorn.conf.py")}
+    source = (REPOSITORY_ROOT / "gunicorn.conf.py").read_text()
+    exec(compile(source, "gunicorn.conf.py", "exec"), namespace)  # noqa: S102 -- the repo's own config, read from disk above
+
+    assert namespace["graceful_timeout"] == stop_budget.gunicorn_graceful_timeout(), (
+        f"gunicorn would use graceful_timeout={namespace['graceful_timeout']!r} and "
+        f"stop_budget derives {stop_budget.gunicorn_graceful_timeout()!r}. Two numbers that "
+        f"must agree, in two files, is the defect this module was split out to end."
     )
