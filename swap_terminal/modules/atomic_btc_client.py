@@ -131,8 +131,7 @@ files side by side after the fix.
   ...with max_wait           300s                300s                60s (the default)   GRC (and it always did)
   watch-only import          best-effort         best-effort         does not import     GRC (unchanged; it never did)
   rpc HTTP timeout           timeout=30          NONE                NONE                BTC (only one with a timeout)
-  platform fee on redeem     none                0.25%               0.25%               BTC (charges nothing)
-  ...fee amount vs comment   --                  matches             comment said 2.5%   (fixed 2026-09-25)
+  platform fee on redeem     ---- 1.5%, modules/htlc_fee.PLATFORM_FEE_RATE, one rate for all three ----
   create_contract arg order  amount, secret_hash,   amount, participant,  amount, secret_hash,   LTC
                              participant, refund,   refund, locktime,     participant, refund,
                              locktime               secret_hash=None      locktime
@@ -143,17 +142,50 @@ files side by side after the fix.
   balance fallback guarded   yes                 NO try around it    yes                 LTC
   default creds in __main__  no                  YES, a literal      no                  LTC
 
+THE PLATFORM FEE ROW SAID "none / 0.25% / 0.25% / BTC (charges nothing)" UNTIL
+2026-10-11, AND IT HAD BEEN FALSE SINCE 2026-09-27. Re-measured by reading the
+table back out of the running code rather than off this page:
+
+    PLATFORM_FEE_RATE -> {'LTC': '0.015', 'GRC': '0.015', 'BTC': '0.015'}
+
+Two separate things had moved under it. The operator settled BTC's row on
+2026-09-27 ("take care of btc and ltc deposit wallet accounts for fee
+collection") and `extra_outputs` was threaded through BTCClient.redeem_contract()
+in the same change, so BTC collects; and the rate went from 0.25% to 1.5% on all
+three to match DEFAULT_FEE_BPS=150 on the brokered path. Both were written down
+at PLATFORM_FEE_RATE and in each client's own redeem body. Nothing came back to
+this table -- which is the drift rule 1 is about, in the one place a reader looks
+to find out whether the three clients agree. A divergence table that reports a
+closed divergence sends somebody to reconcile two numbers that already match.
+(The `...fee amount vs comment` row went with it: it recorded a 2026-09-25 fix to
+a GRC comment about a rate that no longer exists.)
+
 The rows that still diverge are the ones a merge cannot settle without deciding
-something: whether BTC should charge a platform fee, whether LTC's parameter
-order should change under its callers, whether GRC should stop unlocking the
-wallet. Each is fund movement or armed state, and belongs to the operator
+something: whether LTC's parameter order should change under its callers, whether
+GRC should stop unlocking the wallet, whether the two clients with no HTTP timeout
+should get one. Each is fund movement or armed state, and belongs to the operator
 (rule 16). The rows that are merged are the ones where all three were wrong in
 the same way, which is the merge rule 8 actually asks for.
 
-GRIDCOIN IS NOT VERIFIED AND CANNOT BE. There is no Gridcoin regtest in this
-setup and no GRC node the fixes could be run against, so every GRC line above
-is REASONED FROM THE BTC AND LTC RESULT AND NOT MEASURED (rule 17). Two
-specifics a reader should carry: Gridcoin descends from the Peercoin line of
+THE GRC COLUMN ABOVE IS NOW MEASURED, AND THIS PARAGRAPH USED TO SAY IT COULD
+NEVER BE. It read "GRIDCOIN IS NOT VERIFIED AND CANNOT BE. There is no Gridcoin
+regtest in this setup and no GRC node the fixes could be run against, so every
+GRC line above is REASONED FROM THE BTC AND LTC RESULT AND NOT MEASURED." Both
+clauses were true when written; neither is now. The operator pointed that client
+at their own Gridcoin TESTNET daemon on 2026-09-27, grc_htlc_verify.py ran
+`OK=11 FAIL=0` on 2026-09-29, and docs/branch_coverage.md section 2 carries the
+grades and the txids. There is still no Gridcoin REGTEST -- that half stands --
+but "no regtest" is not "no node", and collapsing the two is what let a verified
+path keep reading as an unverified one.
+
+THE CORRECTION IS KEPT SHORT HERE ON PURPOSE AND THE EVIDENCE LIVES IN ONE PLACE:
+modules/atomic_grc_client.py's own header has the measurement, the three spends
+of one outpoint that settle CLTV, and the narrowed list of what is still
+unverified on that chain. Restating it here would be a second copy of a fact that
+moves whenever a GRC run does, which is the thing this very table got wrong about
+the platform fee (rule 8). Two specifics a reader of THIS file should still carry,
+because they explain why the GRC client's code differs rather than what has been
+run: Gridcoin descends from the Peercoin line of
 proof-of-stake forks, whose transactions carry a 4-byte nTime field Bitcoin and
 Litecoin do not have -- modules/htlc_spend.parse_transaction() handles that by
 re-serializing the daemon's own bytes and refusing anything it cannot reproduce
@@ -167,10 +199,52 @@ THE REFUND BRANCH OF EVERY CONTRACT BUILT HERE WAS UNSPENDABLE UNTIL
 requested block height of 500,000 was read by CHECKLOCKTIMEVERIFY as
 128,000,254. encode_script_number() replaced it, the locktime is derived per
 swap from the chain tip by modules/htlc_timelock.py, and the participant and
-refund addresses are two values rather than one. NO CLIENT HERE IMPLEMENTS A
-REFUND AT ALL -- there is no refund_contract() on any of the three -- so the
-refund branch is exercised only by the regtest harness's own spender, and the
-one a real swap would have to use does not exist yet.
+refund addresses are two values rather than one.
+
+THIS PARAGRAPH ENDED "NO CLIENT HERE IMPLEMENTS A REFUND AT ALL -- there is no
+refund_contract() on any of the three" AND THAT WAS FALSE FOR TWO WEEKS. All
+three have had refund_contract() since `0a1cf51`, written 2026-09-26 on the
+operator's explicit instruction; measured again 2026-10-11 by listing the methods
+of each class -- BTCClient.refund_contract, LTCClient.refund_contract and
+GRCClient.refund_contract all exist and all call modules/htlc_rpc.
+broadcast_refund(). The same sentence was already corrected inside
+modules/htlc_fee.assert_no_output_is_dust(), whose docstring says it "was true when
+it was written and nobody came back to it" -- and nobody came back to these three
+either, which is rule 8 in its plainest form: one fact, four copies, one of them
+fixed.
+
+AND THE SENTENCE I FIRST REPLACED IT WITH WAS ALSO WRONG, found within the hour
+by a second reader and corrected here rather than overwritten, because this
+paragraph has now been wrong in two directions and that is the whole lesson. It
+read: "the refund branch has never been exercised by anything but the regtest
+harness's own spender. No contract built with the corrected locktime encoding has
+been refunded on any chain, which is the proof CLAUDE.md asks for and it is still
+outstanding." I took that from CLAUDE.md's 2026-09-25 re-measurement and wrote it
+in the register of a measurement without re-running it (rule 17), and the runs
+that settled it happened four days later.
+
+WHAT IS ACTUALLY ESTABLISHED FOR BITCOIN, from docs/branch_coverage.md section 2,
+which grades each branch against a run rather than against a reading:
+
+    refund after expiry, BTC        SPENT -- step_9_refund_after_expiry, through
+                                    THIS class's refund_contract(), regtest,
+                                    `7cc92abdbad07a99...`, 2026-09-29
+    CLTV refuses an early refund    ENFORCED 2026-09-29, OK=37 FAIL=0. Both
+                                    layers: the mempool said
+                                    `mandatory-script-verify-flag-failed
+                                    (Locktime requirement not satisfied)` at
+                                    height 677 with BIP65 active from block 1,
+                                    and `generateblock` then refused the block.
+
+So both branches of a BTC contract have run on a chain, which is the proof
+CLAUDE.md's "Verify by behavior" section asks for. WHAT IS STILL OUTSTANDING is
+narrower and worth keeping separate: it was REGTEST, on a chain this harness
+mined itself, and no BTC contract has been refunded on testnet4 -- where the
+operator's daemon now is, and where blocks arrive on somebody else's schedule.
+
+A refund is also not a recovery from a failed redeem -- it spends after the
+locktime, so claiming it means abandoning the swap -- which is why the dust and
+fee-address refusals let a redeem through rather than blocking it.
 """
 
 import logging
@@ -400,22 +474,34 @@ class BTCClient:
         )
         assert_output_pays_the_contract(found, redeem_script, "BTC redeem")
 
-        # NO PLATFORM FEE ON BTC. The LTC and GRC clients pay 0.25% to a fee
-        # address here and this one pays nothing -- see the divergence table in
-        # the module header. That difference was fund movement and the operator's to
-        # settle (rule 16), and THEY SETTLED IT on 2026-09-27: "take care of btc and ltc
-        # deposit wallet accounts for fee collection". So BTC now charges the same 1.5%
-        # as LTC and GRC, from the same modules/htlc_fee.PLATFORM_FEE_RATE, and the
-        # divergence the module header describes is closed rather than documented.
+        # 1.5% PLATFORM FEE, the same as LTC and GRC, from the same
+        # modules/htlc_fee.PLATFORM_FEE_RATE. This comment began "NO PLATFORM FEE ON
+        # BTC" and then spent five lines retracting itself, because the retraction was
+        # appended when the operator settled it on 2026-09-27 ("take care of btc and
+        # ltc deposit wallet accounts for fee collection") rather than replacing the
+        # claim it refutes. A reader skimming for the fee found the heading and stopped
+        # -- which is exactly how the module header's divergence table came to report a
+        # closed divergence for two weeks (see that table, corrected 2026-10-11). The
+        # history is kept where history belongs, below; the first line now says what
+        # the code does.
+        #
+        # WHAT CHANGED AND WHEN: BTC charged nothing until 2026-09-27, when the
+        # operator's instruction above settled a row this package had deliberately left
+        # to them, and `extra_outputs` was threaded through the build_hashlock_spend()
+        # call below in the same change -- the rate and the collection landing together,
+        # which is the only order that is ever honest.
         #
         # The fee is taken off the TOTAL, matching the other two clients exactly, so it
         # does not move when the miner fee does. And the address resolves through
         # platform_fee_address(), which returns None when PLATFORM_FEE_BTC_ADDRESS is
         # unset -- None means charge NO fee, never block the redeem. That direction is
         # not a preference: the hashlock branch has to be spent before the counterparty's
-        # timelock expires and no client here implements a refund, so refusing would
-        # trade 1.5% for the whole leg. BTC also never had a testnet default to burn to,
-        # which the other two did.
+        # timelock expires, and the refund branch is not a recovery from a refused redeem
+        # -- it spends after the locktime, which means abandoning the swap -- so refusing
+        # would trade 1.5% for the whole leg. (This said "no client here implements a
+        # refund", which stopped being true on 2026-09-26 when refund_contract() landed
+        # on all three; the module header carries the measurement.) BTC also never had a
+        # testnet default to burn to, which the other two did.
         platform_fee = platform_fee_coin("BTC", found.value)
         # RESOLVED AND VALIDATED IN ONE CALL since 2026-09-27. This was
         #     fee_address = platform_fee_address("BTC")

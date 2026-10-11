@@ -65,6 +65,66 @@ class DaemonConfError(Exception):
     """A conf could not be read, or does not configure an RPC connection."""
 
 
+#: The key under the top level in what conf_sections() returns. The empty string,
+#: because that is what Bitcoin Core's own conf calls the lines before any header:
+#: they belong to no network and apply to all of them.
+TOP_LEVEL = ""
+
+
+def conf_sections(text: str) -> dict[str, dict[str, str]]:
+    """Every rpc setting in `text`, kept under the [section] it was written in.
+
+    THE ONE WALK OVER A CONF FILE. parse_daemon_conf() below is this function plus
+    one merge, and it was the only reader until 2026-10-11 -- which is why the
+    section NAMES were thrown away as the walk went. That turned out to be the
+    thing a caller needed: see configure_env.conf_section_for_port() for the
+    measurement, and the short version here, because a reader of this function has
+    to know what it is for.
+
+    A PORT DOES NOT NAME A NETWORK ON THIS OPERATOR'S HOST. Their Bitcoin Core
+    v28.1.0 daemon runs TESTNET4 with `rpcport=18443` -- 18443 being Bitcoin's
+    conventional REGTEST port -- because OPEN_FINDINGS.md finding 1 records the
+    2026-10-10 migration off regtest and says "The RPC ports did NOT have to
+    change." So the only thing that can say which section configures that daemon is
+    the conf itself: the section it declares the port in, or the single network
+    section it has. Neither question can be asked of a flat `{**top, **section}`.
+
+    Returns {section_name: {rpc key: value}}, with TOP_LEVEL ("") for the lines
+    before any header. A section that carries no rpc setting at all is PRESENT with
+    an empty dict rather than absent, because "the conf has a [testnet4] header" and
+    "the conf has no [testnet4] at all" are different answers and the caller chooses
+    on exactly that difference.
+
+    Only the three keys in CONF_TO_SETTING are kept, unchanged from the walk this
+    replaces: everything else in a bitcoin.conf is the daemon's business, and
+    carrying it would mean this function returning values nothing here reads.
+
+    A `#` ONLY STARTS A COMMENT AT THE BEGINNING OF A LINE. Modern Bitcoin Core
+    does not strip a trailing comment from a value, and an rpcpassword containing
+    `#` is both legal and likely from a generator. Stripping inline would silently
+    truncate it, and the failure would arrive as a 401 from the daemon with nothing
+    pointing here.
+    """
+    sections: dict[str, dict[str, str]] = {TOP_LEVEL: {}}
+    current = TOP_LEVEL
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1].strip()
+            sections.setdefault(current, {})
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if key not in CONF_TO_SETTING:
+            continue
+        sections[current][key] = value
+    return sections
+
+
 def parse_daemon_conf(text: str, *, network: str = "") -> dict[str, str]:
     """Every rpc setting in `text`, with a matching [network] section winning.
 
@@ -75,33 +135,19 @@ def parse_daemon_conf(text: str, *, network: str = "") -> dict[str, str]:
     port, which produces "unconfigured" on a daemon that is running and
     answering -- so both levels are read and the section overrides.
 
-    A `#` ONLY STARTS A COMMENT AT THE BEGINNING OF A LINE. Modern Bitcoin Core
-    does not strip a trailing comment from a value, and an rpcpassword
-    containing `#` is both legal and likely from a generator. Stripping inline
-    would silently truncate it, and the failure would arrive as a 401 from the
-    daemon with nothing pointing here.
+    IT IS conf_sections() PLUS ONE MERGE since 2026-10-11, and the behavior is
+    unchanged in both directions: an empty `network` reads the top level alone, and
+    a named one lets that section override it key by key. The walk moved so that the
+    section names survive it for the caller that needs them -- the reason is in
+    conf_sections() -- and a second walk beside it would be rule 8's bug with a
+    delay on it, in the one function that decides which credential reaches a daemon.
+
+    A `#` ONLY STARTS A COMMENT AT THE BEGINNING OF A LINE: see conf_sections(),
+    which is where that rule now lives.
     """
-    top: dict[str, str] = {}
-    section: dict[str, str] = {}
-    current = ""
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            current = line[1:-1].strip()
-            continue
-        if "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key, value = key.strip(), value.strip()
-        if key not in CONF_TO_SETTING:
-            continue
-        if not current:
-            top[key] = value
-        elif network and current == network:
-            section[key] = value
-    return {**top, **section}
+    sections = conf_sections(text)
+    chosen = sections.get(network, {}) if network else {}
+    return {**sections[TOP_LEVEL], **chosen}
 
 
 def rpc_settings_from_conf(path: Path, *, network: str = "", host: str = "127.0.0.1",

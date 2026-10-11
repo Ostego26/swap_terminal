@@ -406,8 +406,17 @@ def assert_no_output_is_dust(asset: str, outputs: Sequence[tuple[int, bytes]]) -
         raise ValueError(
             f"{asset}: output {index} pays {satoshis} satoshis to scriptPubKey {script_pubkey.hex()}, "
             f"which is DUST -- {describe_dust_threshold(asset, script_pubkey)}. The node would refuse the "
-            f"whole transaction with `code=-26 dust`, and no client here implements a refund, so a redeemer "
-            f"whose broadcast is refused has no recovery path. Nothing was signed. Dropping an output or "
+            # "AND NO CLIENT HERE IMPLEMENTS A REFUND" IS WHAT THIS SAID, and the
+            # docstring above already records that as FALSE: all three clients have
+            # had refund_contract() since `0a1cf51`. The correction had been made in
+            # the docstring and not in the string an operator reads, which is the
+            # half of a wrong-comment fix that actually reaches somebody (rule 16).
+            # The property the sentence needs is unchanged and is now stated
+            # directly: a refund spends the OTHER branch after the locktime, so it is
+            # not a recovery from a refused redeem.
+            f"whole transaction with `code=-26 dust`, and the refund branch is not a recovery from this "
+            f"-- it spends after the locktime, which means abandoning the swap -- so a redeemer whose "
+            f"broadcast is refused cannot get this leg back by redeeming. Nothing was signed. Dropping an output or "
             f"paying its amount somewhere else is fund movement and is the operator's call, not this "
             f"function's."
         )
@@ -535,12 +544,23 @@ def platform_fee_address(asset: str, environment: dict[str, str] | None = None) 
     None rather than an exception, and that choice is the important one here.
 
     A redeem is time-critical: the hashlock branch has to be spent before the
-    counterparty's timelock expires, and NO CLIENT IN THIS PACKAGE IMPLEMENTS A
-    REFUND (see assert_no_dust_outputs above, which says the same thing for the same
-    reason). So a fee address that cannot be resolved must never block a redeem --
-    doing that would trade a 1.5% fee for the whole leg. Omitting the fee output
-    costs the operator the fee on that one swap and costs the redeemer nothing,
-    which is the only failure direction worth having.
+    counterparty's timelock expires, and THE REFUND BRANCH IS NOT A RECOVERY FROM A
+    REFUSED REDEEM -- it spends after the locktime, which means abandoning the swap
+    and leaving the counterparty to claim or walk (see assert_no_output_is_dust
+    above, which says the same thing for the same reason). So a fee address that
+    cannot be resolved must never block a redeem -- doing that would trade a 1.5%
+    fee for the whole leg. Omitting the fee output costs the operator the fee on
+    that one swap and costs the redeemer nothing, which is the only failure
+    direction worth having.
+
+    TWO THINGS IN THAT PARAGRAPH WERE WRONG AND ARE CORRECTED HERE, 2026-10-11. It
+    said "NO CLIENT IN THIS PACKAGE IMPLEMENTS A REFUND", which assert_no_output_is_dust's
+    own docstring already records as false -- all three have had refund_contract()
+    since `0a1cf51` -- and it pointed at that function by a name it does not have
+    (`assert_no_dust_outputs`), so a reader following the citation found nothing.
+    The second is the smaller defect and the more annoying one: a cross-reference
+    that does not resolve is a comment that cannot be checked, which is how the
+    first survived.
 
     And it must never fall back to a TESTNET address on mainnet, which is what both
     clients did until 2026-09-27: at 0.25% that quietly burned the fee, and the rate
@@ -553,10 +573,35 @@ def platform_fee_address(asset: str, environment: dict[str, str] | None = None) 
     third source of truth here and inventing one would be guessing.
     """
     if asset not in PLATFORM_FEE_ADDRESS_VARIABLE:
+        # THIS MESSAGE USED TO END "BTC is absent for the reason given beside
+        # PLATFORM_FEE_RATE: its client passes no extra outputs at all", and on
+        # 2026-10-11 that was read back out of the running code and found to
+        # CONTRADICT ITS OWN FIRST HALF. Measured by calling this function:
+        #
+        #     platform_fee_address("XRP", {})
+        #     -> no platform fee address rule for asset 'XRP'; there is one for
+        #        LTC, GRC, BTC. BTC is absent for the reason given beside
+        #        PLATFORM_FEE_RATE: its client passes no extra outputs at all
+        #
+        # BTC was added to PLATFORM_FEE_ADDRESS_VARIABLE on 2026-09-27, in the same
+        # change that threaded `extra_outputs` through BTCClient.redeem_contract() --
+        # so the join lists BTC as present, the sentence after it says BTC is absent,
+        # and the reason it gives for the absence ("passes no extra outputs") was
+        # itself made false by that change. One sentence, three ways wrong, printed at
+        # whoever asked about a fourth chain. Rule 14: output that contradicts itself
+        # about what it did is a defect in the output; rule 16: a wrong comment is a
+        # bug, and a wrong MESSAGE is the same bug where somebody will act on it.
+        #
+        # It now names what the tables actually hold and nothing else. There is no
+        # longer a chain in this package that is in the rate table and not this one,
+        # which is why the sentence makes no per-chain exception at all.
         raise ValueError(
             f"no platform fee address rule for asset {asset!r}; there is one for "
-            f"{', '.join(PLATFORM_FEE_ADDRESS_VARIABLE)}. BTC is absent for the reason given "
-            f"beside PLATFORM_FEE_RATE: its client passes no extra outputs at all"
+            f"{', '.join(PLATFORM_FEE_ADDRESS_VARIABLE)}, which are the three chains this package "
+            f"has HTLC clients for. Adding a chain means adding its variable to "
+            f"PLATFORM_FEE_ADDRESS_VARIABLE and its rate to PLATFORM_FEE_RATE, and threading an "
+            f"extra output through that chain's redeem -- the row and the collection land together "
+            f"or the table claims a fee no code collects"
         )
     source = os.environ if environment is None else environment
     configured = (source.get(PLATFORM_FEE_ADDRESS_VARIABLE[asset]) or "").strip()
@@ -717,15 +762,28 @@ def platform_fee_coin(asset: str, contract_value: Decimal) -> Decimal:
     what somebody is paid, and nothing here is asking to.
 
     Raises:
-        ValueError: for an asset that charges none, naming BTC specifically,
-            because "BTC charges nothing" and "BTC is missing from the table"
-            are different sentences and a caller must not conflate them.
+        ValueError: for an asset this table has no rate for, naming the three it
+            does. IT USED TO NAME BTC AS THE ABSENT ONE and that stopped being
+            true on 2026-09-27, when the operator settled it ("take care of btc
+            and ltc deposit wallet accounts for fee collection") and BTC went into
+            PLATFORM_FEE_RATE at the same 1.5% as the other two. The old sentence's
+            own argument is why correcting it matters rather than being tidy:
+            "BTC charges nothing" and "BTC is missing from the table" are different
+            sentences and a caller must not conflate them -- and for two weeks this
+            printed the first about a chain that was in the table charging 1.5%.
     """
     if asset not in PLATFORM_FEE_RATE:
+        # Measured 2026-10-11 by calling it: `platform_fee_coin("XRP", 1)` printed
+        # "it is charged on LTC, GRC, BTC. BTC is absent on purpose", listing BTC as
+        # present and then declaring it absent in the next clause. See
+        # platform_fee_address() above for the same defect in the sibling message and
+        # for the full reasoning; the two are corrected together because they are one
+        # stale fact spelled twice (rule 8).
         raise ValueError(
-            f"no platform fee rule for asset {asset!r}; it is charged on {', '.join(PLATFORM_FEE_RATE)}. "
-            "BTC is absent on purpose: BTCClient.redeem_contract() passes no extra outputs, and whether it "
-            "should is the operator's call rather than this table's."
+            f"no platform fee rule for asset {asset!r}; it is charged on {', '.join(PLATFORM_FEE_RATE)}, "
+            f"at the rates beside PLATFORM_FEE_RATE. A chain with no rate here charges nothing because "
+            f"nothing collects one for it, not because a rate was chosen as zero -- those are different "
+            f"sentences and this refusal is the first one."
         )
     return (PLATFORM_FEE_RATE[asset] * contract_value).quantize(SATOSHI)
 

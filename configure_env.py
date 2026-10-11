@@ -107,7 +107,16 @@ from typing import NamedTuple
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
-from chains.daemon_conf import parse_daemon_conf  # noqa: E402 -- after the sys.path line above
+from chains.daemon_conf import (  # noqa: E402 -- after the sys.path line above
+    TOP_LEVEL,
+    conf_sections,
+    parse_daemon_conf,
+)
+
+# CHAIN_TEST_NETWORKS is the one per-chain allowlist of network names that are not
+# mainnet, and conf_section_for_port() reads it so that no [main] block can ever be
+# chosen as the source of a credential.
+from chains.daemon_network import CHAIN_TEST_NETWORKS  # noqa: E402 -- after the sys.path line above
 from config import database_path  # noqa: E402
 from network_target import CHAIN_PORTS  # noqa: E402 -- as every root tool does
 from regtest.daemons import CHAIN_DEFAULTS  # noqa: E402 -- the one owner of each chain's datadir and conf name
@@ -198,11 +207,22 @@ DAEMON_CONFS = {
 #:
 #: THE COST WAS A CHAIN THE OPERATOR COULD NOT CONFIGURE. Their BTC has no conf at
 #: ~/.bitcoin and nothing listening on 18332 or 18443, so --read-daemon-confs reported
-#: "no conf" and asked them for an rpcuser and an rpcpassword. The moment they bring up
-#: this repository's OWN regtest harness, bitcoind writes ~/regtest/btc/bitcoin.conf with
-#: both -- and this tool would still have asked, about a file in the tree it ships with.
-#: LTC worked only by luck: their litecoind is a real testnet node at ~/.litecoin, which
-#: is the path that happened to be spelled here.
+#: "no conf" and asked them for an rpcuser and an rpcpassword -- while their bitcoind's
+#: real conf sits at ~/regtest/btc/bitcoin.conf, a path CHAIN_DEFAULTS already owned and
+#: this tool did not look at. LTC worked only by luck: their litecoind is a real testnet
+#: node at ~/.litecoin, which is the path that happened to be spelled here.
+#:
+#: AND THE SENTENCE THAT USED TO BE HERE WAS WRONG ABOUT WHO WRITES THAT FILE. It said
+#: "The moment they bring up this repository's OWN regtest harness, bitcoind writes
+#: ~/regtest/btc/bitcoin.conf with both". NEITHER HALF IS TRUE, and it is the one claim
+#: on this page an operator would act on. bitcoind does not write a conf at all, and the
+#: harness deliberately refuses to: regtest/daemons.start_daemon() raises
+#: RegtestSetupError naming the file and the four settings it needs when the conf is
+#: absent, and regtest_htlc_verify.py's header says why -- "writing an rpcpassword into
+#: a file on the operator's behalf is not this harness's business". The conf is the
+#: operator's to create, once, by hand; this tool then reads it and never asks for the
+#: password. tests/test_btc_is_reachable.py pins the refusal so the sentence cannot go
+#: stale again by somebody teaching the harness to write one.
 #:
 #: WHICH CANDIDATE IS PREFERRED IS DECIDED BY THE PROBED PORT, not by an order chosen
 #: here. CHAIN_DEFAULTS' ports are the regtest ones (BTC 18443, LTC 19443), so a daemon
@@ -253,16 +273,157 @@ def conf_candidates(chain: str, port: int) -> list[Path]:
             seen.append(candidate)
     return seen
 
-#: Which conf SECTION a given port's network uses. Bitcoin Core names them `[main]`,
-#: `[test]` and `[regtest]`, and credentials are conventionally at the TOP level while
-#: the port sits in a section -- so the section name decides which rpcport a conf
-#: reports, and reading the wrong one reports a port the daemon is not on.
+#: Which conf SECTION a given port's network CONVENTIONALLY uses. Bitcoin Core names
+#: them `[main]`, `[test]` and `[regtest]`, and Core 28 adds `[testnet4]`; credentials
+#: are conventionally at the TOP level while the port sits in a section -- so the
+#: section name decides which rpcport a conf reports, and reading the wrong one reports
+#: a port the daemon is not on.
 #:
 #: DERIVED FROM THE PROBED PORT rather than from a fixed per-chain default, which is the
 #: one place this diverges from chains/daemon_conf.CONF_FALLBACK_NETWORK. That table
 #: hardcodes regtest for BTC and LTC; the operator's litecoind answers on 19332, which is
 #: TESTNET, so a fixed "regtest" would read the wrong section of their real conf.
+#:
+#: IT IS A CONVENTION AND NOT THE ANSWER, AND THAT DISTINCTION IS WHY BTC DID NOT WORK.
+#: It is read by conf_section_for_port() below, which prefers what the conf itself says
+#: -- the measurement, and what this table alone did to Bitcoin, are written up there.
 CONF_SECTION_FOR_PORT = {18332: "test", 18443: "regtest", 19332: "test", 19443: "regtest"}
+
+
+def conf_section_for_port(chain: str, text: str, port: int) -> tuple[str, str]:
+    """Which [section] of this conf configures the daemon on `port`, and one line saying why.
+
+    =========================================================================
+    A PORT DOES NOT NAME A NETWORK, AND BELIEVING IT DID IS WHY BTC WAS THE ONE
+    CHAIN THIS TOOL COULD NOT CONFIGURE
+    =========================================================================
+
+    CONF_SECTION_FOR_PORT above maps 18443 to `regtest`, which is Bitcoin's
+    conventional regtest port and is correct as a convention. The operator's daemon
+    does not follow it. OPEN_FINDINGS.md finding 1 records their 2026-10-10
+    migration off regtest -- "our grc, ltc, and btc daemons should have peers and
+    not be regtest anyone and just full testnet now" -- and two measured
+    consequences of it:
+
+        BTC needs `[testnet4]`, LTC needs `[test]`.   Core v28.1.0 has two testnets
+                                                      with different conf section
+                                                      names; Litecoin v0.21.4 has one.
+        The RPC ports did NOT have to change.         18443 and 19443 are in
+                                                      network_target.CHAIN_PORTS' TEST
+                                                      sets, not just the regtest ones.
+
+    So their bitcoind is on TESTNET4 at rpcport 18443, and the table sends this tool
+    to `[regtest]`. Measured 2026-10-11 by running the real parser over a conf in
+    that shape:
+
+        network='regtest'   -> the [regtest] block's rpcuser and rpcpassword
+        network='testnet4'  -> the [testnet4] block's, which is the daemon's
+        network=''          -> {} when the credentials are under the header
+
+    Both outcomes are failures and they fail differently. A conf migrated from
+    regtest with its old `[regtest]` block still in it hands over credentials
+    BITCOIND ITSELF IGNORES -- those get written to .env and every BTC call 401s,
+    which is indistinguishable from a daemon that is down. A conf whose stale block
+    was replaced rather than kept hands over nothing, and this tool reports
+    "has no rpcuser, rpcpassword" about a file that has both.
+
+    =========================================================================
+    SO THE CONF IS ASKED, AND THE TABLE IS THE FALLBACK
+    =========================================================================
+
+    Nothing new is probed and no daemon is contacted -- this function is pure, over
+    text that was already read. The order is strictly most-evidence-first:
+
+      1. the section that DECLARES rpcport=<port>, when exactly one does. The
+         strongest reading available: a section naming this port is the section
+         that put the daemon on it.
+      2. NOTHING, when two or more declare it. Two blocks claiming one port is a
+         conf no reading can settle -- only the daemon knows which network it came
+         up on, and this function holds no socket. It is the case a conf migrated
+         off regtest produces when the old block was left in beside the new one,
+         and it is the case where the convention in step 3 is actively wrong: it
+         would hand over the credentials from the block bitcoind IGNORES. So the
+         top level is read, the sentence names both blocks, and the operator
+         removes one or exports the two variables themselves.
+      3. the conventional section for the port, when the conf actually HAS that
+         section and no section declared the port. Unchanged behavior for a
+         conventional deployment, which is what every LTC and GRC read so far has
+         been.
+      4. the conf's only network section, when it has exactly one. This is the
+         operator's BTC: one `[testnet4]` block, nothing else, port declared at the
+         top level or in it.
+      5. the top level alone, saying so, for a conf with no network section at all.
+
+    A MAINNET SECTION IS NEVER CHOSEN, and the allowlist is not invented here:
+    chains/daemon_network.CHAIN_TEST_NETWORKS is the existing per-chain table of
+    "what this chain CALLS a network that is safe to lose coins on", and its own
+    comment says an allowlist is used precisely so that "a mainnet answer" cannot
+    slip through (rule 8 -- a second copy of that set is the bug with a delay on
+    it). It is per chain on purpose: `testnet4` is a BTC section name and
+    deliberately not an LTC one, because Litecoin Core v0.21.4 predates testnet4
+    entirely. discover_ports() only ever probes `test_ports`, so a mainnet section
+    could never be the right answer to this question anyway.
+
+    Returns (section, why). The section goes to parse_daemon_conf(); the sentence
+    goes on screen, because an operator who gets the wrong credentials has to be
+    able to see WHICH block of their own file was read (rule 14).
+    """
+    sections = conf_sections(text)
+    allowed = CHAIN_TEST_NETWORKS.get(chain, frozenset())
+    # TOP_LEVEL is in `sections` by construction and is not a network, so it is
+    # excluded from every count below -- otherwise "the conf's only network section"
+    # would be true of a conf with no sections at all.
+    network_sections = sorted(name for name in sections if name != TOP_LEVEL)
+    usable = [name for name in network_sections if name in allowed]
+
+    declaring = [name for name in usable if sections[name].get("rpcport", "") == str(port)]
+    if len(declaring) == _EXACTLY_ONE:
+        return declaring[0], f"[{declaring[0]}] is the only section declaring rpcport={port}"
+    if declaring:
+        return "", _ambiguous_sections(chain, declaring, port)
+
+    conventional = CONF_SECTION_FOR_PORT.get(port, "")
+    if conventional and conventional in usable:
+        return conventional, (
+            f"[{conventional}] is the conventional network for port {port}, this conf has it, and no "
+            f"section declares that port"
+        )
+
+    if len(usable) == _EXACTLY_ONE:
+        return usable[0], (
+            f"[{usable[0]}] is the only {chain} network section in this conf; port {port} does not "
+            f"name a network on its own"
+        )
+
+    if not usable:
+        return "", (
+            f"this conf has no {chain} network section -- its sections are "
+            f"{_named_sections(network_sections)} -- so only its top level was read"
+        )
+    return "", _ambiguous_sections(chain, usable, port)
+
+
+def _ambiguous_sections(chain: str, names: list[str], port: int) -> str:
+    """The sentence for a conf whose blocks cannot be told apart from the file alone.
+
+    ONE SPELLING FOR BOTH AMBIGUOUS BRANCHES -- two sections declaring the same
+    rpcport, and several sections declaring none -- because they have the same cause
+    and the same remedy, and two formatters is two chances to leave the remedy out
+    of one of them (rule 8). The remedy is in the sentence rather than in a docstring
+    the operator will never see (rule 14).
+    """
+    return (
+        f"this conf has {len(names)} {chain} network sections ({_named_sections(names)}) and the file "
+        f"alone does not settle which one put the daemon on port {port}, so ONLY its top level was read "
+        f"-- a credential inside one of those blocks was NOT taken. Picking the wrong block writes a "
+        f"credential the daemon ignores, and every call then 401s, which reads exactly like a daemon "
+        f"that is down. Remove the stale block, or set the two variables by hand"
+    )
+
+
+def _named_sections(names: list[str]) -> str:
+    """`[a], [b]` for a listing, or the (none) sentence. Never a blank gap (rule 14)."""
+    return ", ".join(f"[{name}]" for name in names) if names else "(none)"
 
 #: GRC IS REFUSED BY DEFAULT AND NEEDS ITS OWN FLAG, and the reason is quoted from
 #: chains/daemon_conf.CONF_FALLBACK_NETWORK, which excludes Gridcoin entirely:
@@ -847,14 +1008,22 @@ def credentials_from_confs(discovered: dict, already: dict, *, gridcoin: bool) -
             where = " or ".join(str(candidate) for candidate in candidates)
             say(f"    {chain}: no conf at {where}, so there is nothing to read")
             continue
-        section = CONF_SECTION_FOR_PORT.get(port, "")
         try:
-            settings = parse_daemon_conf(path.read_text(), network=section)
+            text = path.read_text()
         except OSError as error:
             # NAMED, not broad: an unreadable conf is a permissions answer, not a crash.
             # A conf owned by another user is an ordinary state on a shared host.
             say(f"    {chain}: {path} could not be read ({type(error).__name__}), so nothing was taken")
             continue
+        # THE SECTION COMES FROM THE CONF AND NOT FROM THE PORT since 2026-10-11, and
+        # conf_section_for_port() carries the measurement: the operator's bitcoind is on
+        # TESTNET4 at rpcport 18443, so CONF_SECTION_FOR_PORT alone sent this read to a
+        # `[regtest]` block the daemon itself ignores. The reason is SAID rather than kept,
+        # because "which block of my own file did you read" is the only question an
+        # operator can act on when the credentials turn out to be the wrong ones (rule 14).
+        section, section_why = conf_section_for_port(chain, text, port)
+        say(f"    {chain}: {path}: {section_why}")
+        settings = parse_daemon_conf(text, network=section)
 
         missing = [key for key in ("rpcuser", "rpcpassword") if not settings.get(key)]
         if missing:
