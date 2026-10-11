@@ -1164,12 +1164,23 @@ def say_arming(already: dict) -> None:
         return
     for asset, filename, variable in overlays:
         active = "named in COMPOSE_FILE" if filename in compose else "NOT in COMPOSE_FILE"
-        held = "set in .env" if already.get(variable) else "NOT set in .env"
         say(f"    {asset:5} {filename}")
+        if not variable:
+            # AN OVERLAY CAN LEGITIMATELY REQUIRE NOTHING, and printing "needs " with an
+            # empty name would be rule 14's blank gap in the one block whose job is to
+            # say what is missing. ICP is that case: its signing identity is created by
+            # dfx inside the replica container and lives on a named volume, so the
+            # overlay mounts that volume read-only and there is no host path to name.
+            # Naming the file on the command line is the whole act.
+            say(f"    {'':5} needs no variable -- it mounts a credential the project already")
+            say(f"    {'':5} holds, so naming the file IS the arming; overlay {active}")
+            continue
+        held = "set in .env" if already.get(variable) else "NOT set in .env"
         say(f"    {'':5} needs {variable}  <- {held}; overlay {active}")
-    say(f"    none of these {len(overlays)} is settable here: each names a signing credential, and")
-    say("    this tool never reads, copies or writes one. Arming is an act you take on the")
-    say("    command line, which is why it is a separate file per chain.")
+    settable = [variable for _asset, _filename, variable in overlays if variable]
+    say(f"    none of these {len(settable)} variable(s) is settable here: each names a signing")
+    say("    credential, and this tool never reads, copies or writes one. Arming is an act you")
+    say("    take on the command line, which is why it is a separate file per chain.")
 
 
 def say_dry_run(needed: list, values: dict, secrets: set, already: dict) -> None:

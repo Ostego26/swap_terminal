@@ -167,27 +167,50 @@ def test_the_module_reads_the_environment_at_call_time(monkeypatch):
     assert payout_identity() == "second", "the value was captured at import rather than read"
 
 
-def test_the_overlay_mounts_the_pem_where_dfx_resolves_the_name_it_sets():
-    """The two halves of arming must AGREE, and nothing else checks that they do.
+def test_the_overlay_points_dfx_at_the_volume_it_actually_mounts():
+    """The three halves of arming must AGREE, and nothing else checks that they do.
 
-    docker-compose.web.armed-icp.yml sets ICP_PAYOUT_IDENTITY to a literal and mounts
-    the PEM to a path. dfx resolves `--identity <name>` against
-    ~/.config/dfx/identity/<name>/identity.pem, so if the mount path and the literal
-    disagree the container is armed, reports can_spend True, and fails at the send
-    with dfx saying the identity does not exist -- after a deposit is taken.
+    docker-compose.web.armed-icp.yml mounts the replica's `icp-state` volume at a
+    path, sets DFX_CONFIG_ROOT to a path, and sets ICP_PAYOUT_IDENTITY to a name. dfx
+    resolves `--identity <name>` against $DFX_CONFIG_ROOT/.config/dfx/identity/<name>,
+    so if the mount point and the config root disagree the container is ARMED --
+    can_spend True, * -> ICP offered, a customer's deposit taken -- and then fails at
+    the send with dfx saying the identity does not exist.
 
-    MUTATION: change either the literal or the directory in the mount path.
+    THE FIRST VERSION OF THIS TEST ASSERTED A DIFFERENT INVARIANT, for a first version
+    of the overlay that bind-mounted a host PEM and demanded
+    ICP_IDENTITY_PEM_HOST_FILE. That design was wrong within the hour: ICP's identity
+    is created by dfx INSIDE the replica container, under DFX_CONFIG_ROOT=/state on
+    the `icp-state` named volume, so there is no host path to name -- measured on the
+    operator's host, `ls` under that root showed `default` and `minter`, both on the
+    volume. Filling that variable in would have meant copying a signing key out onto
+    the host, which chain-safety forbids outright.
+
+    MUTATION: change the mount point, the config root, or the identity name alone.
     """
     overlay = (pathlib.Path(__file__).resolve().parent.parent
                / "docker-compose.web.armed-icp.yml").read_text()
     code = "\n".join(line for line in overlay.splitlines() if not line.lstrip().startswith("#"))
 
+    mount = re.search(r'"icp-state:([^:"]+)(:ro)?"', code)
+    assert mount, "the overlay does not mount the icp-state volume"
+    root = re.search(r"DFX_CONFIG_ROOT:\s*(\S+)", code)
+    assert root, "the overlay sets no DFX_CONFIG_ROOT, so dfx keeps its own empty store"
     name = re.search(r"ICP_PAYOUT_IDENTITY:\s*(\S+)", code)
     assert name, "the overlay sets no ICP_PAYOUT_IDENTITY"
-    mount = re.search(r"/\.config/dfx/identity/([^/]+)/identity\.pem", code)
-    assert mount, "the overlay mounts nothing to a dfx identity path"
 
-    assert name.group(1) == mount.group(1), (
-        f"the overlay sets ICP_PAYOUT_IDENTITY={name.group(1)} and mounts the PEM as "
-        f"{mount.group(1)}; dfx would not find the identity it was told to sign with"
+    assert root.group(1) == mount.group(1), (
+        f"the overlay mounts the identity volume at {mount.group(1)} and points dfx at "
+        f"{root.group(1)}; dfx would find no identity at all"
+    )
+    assert name.group(1) != "minter", (
+        "the minter identity signs mints from the ledger's minting account, which is "
+        "fund_desk.py's business and not a customer payout"
+    )
+    # READ-ONLY IS THE DEFAULT AND THE WIDENING IS A DECISION. A writable mount hands a
+    # process holding wallet RPC credentials write access to the desk's identity store.
+    assert mount.group(2) == ":ro", (
+        "the identity volume is mounted writable. If dfx genuinely needs to write its "
+        "config root, that is a deliberate widening and this assertion is where it gets "
+        "argued -- not somewhere it can happen by a missing two characters"
     )

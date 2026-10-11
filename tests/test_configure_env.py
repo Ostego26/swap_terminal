@@ -728,8 +728,19 @@ def test_an_overlays_prose_example_is_not_read_as_a_requirement():
             f"{filename}'s prose example was read as {asset}'s requirement, so the block "
             f"would tell an operator to set a variable that does not exist"
         )
-        assert variable, f"{filename} declares no required variable at all"
-        assert variable in pathlib.Path(filename).read_text(), "the variable is not in that file"
+        # AN EMPTY VARIABLE IS A LEGITIMATE ANSWER and was not, until
+        # docker-compose.web.armed-icp.yml. This assertion read `assert variable` and
+        # failed the moment that overlay dropped its ${VAR:?} -- correctly, because the
+        # data model changed under it. ICP mounts the replica's identity volume instead
+        # of naming a host path, so it requires nothing and `ls` on the operator's host
+        # is why: `default` and `minter` both live on the volume, with no host file to
+        # point at. What still must hold is that a variable REPORTED is a variable the
+        # file actually interpolates.
+        if variable:
+            assert variable in pathlib.Path(filename).read_text(), (
+                f"{filename} does not interpolate {variable}, so the block would tell an "
+                f"operator to set something that file never reads"
+            )
 
 
 def test_the_arming_block_reports_presence_and_never_a_value(capsys):
@@ -760,7 +771,11 @@ def test_the_arming_block_says_whether_the_overlay_is_actually_in_use(capsys):
     operator who has done one of the two has done nothing, and the block has to tell them
     which half is missing.
     """
-    overlays = configure_env.arming_overlays()
+    # OVERLAYS THAT REQUIRE A VARIABLE, because the variable name is how a line is
+    # found. ICP requires none -- it mounts the replica's identity volume -- so there
+    # is no name to grep for and its own case is covered by the test below.
+    overlays = [entry for entry in configure_env.arming_overlays() if entry[2]]
+    assert len(overlays) >= 2, f"fewer than two overlays take a variable: {overlays}"
     first = overlays[0]
 
     configure_env.say_arming({"COMPOSE_FILE": f"docker-compose.yml:{first[1]}"})
@@ -771,6 +786,31 @@ def test_the_arming_block_says_whether_the_overlay_is_actually_in_use(capsys):
     for _asset, filename, variable in overlays[1:]:
         other = [line for line in printed.splitlines() if variable in line]
         assert other and "NOT in COMPOSE_FILE" in other[0], f"{filename} was reported as active"
+
+
+def test_an_overlay_that_needs_no_variable_says_so_rather_than_printing_a_blank(capsys):
+    """MUTATION: drop the `if not variable` branch from say_arming().
+
+    Without it the line reads "needs   <- NOT set in .env" -- a missing name where the
+    operator looks for what to set, in the one block whose entire job is to say what is
+    missing. That is rule 14's blank gap, and worse than silence because it reads as a
+    variable whose name failed to render.
+
+    DOCKER-COMPOSE.WEB.ARMED-ICP.YML IS THAT CASE and it is why this exists: its signing
+    identity is created by dfx inside the replica container and lives on the `icp-state`
+    named volume, so there is no host path to demand. The overlay mounts that volume
+    read-only, nothing is copied, and naming the file on the command line is the act.
+    """
+    without = [entry for entry in configure_env.arming_overlays() if not entry[2]]
+    assert without, "no overlay requires zero variables; this test has stopped measuring"
+
+    configure_env.say_arming({})
+    printed = capsys.readouterr().out
+
+    assert "needs no variable" in printed
+    assert "naming the file IS the arming" in printed
+    # And no line offers an empty name to set.
+    assert "needs   <-" not in printed, "a line printed a blank where a variable name belongs"
 
 
 def test_the_arming_block_is_a_result_when_there_is_no_overlay(env_file, capsys):

@@ -23,18 +23,39 @@
 # derived can_spend from 2026-10-02, SOL only after "whoa we have to be able to
 # swap TO SOL too" on 2026-10-03, ICP today.
 #
-# ONE ${VAR:?} AND IT IS THE PEM, which is the rule
-# tests/test_docker_build_context.py enforces and the reason is quoted from
-# docker-compose.web.armed-sol.yml: "compose interpolates EVERY variable in EVERY
-# file it is given before it looks at which service was named, so two required
-# variables in one file mean you must supply BOTH to use EITHER."
+# NO ${VAR:?} AT ALL, AND THAT IS THE CORRECTION THIS FILE EXISTS IN ITS SECOND
+# FORM TO MAKE.
 #
-# SO THE IDENTITY NAME IS A LITERAL HERE AND NOT A SECOND VARIABLE. dfx resolves
-# `--identity <name>` against ~/.config/dfx/identity/<name>/identity.pem, so the
-# mount PATH is what decides the name -- mounting to .../desk/identity.pem makes
-# the name `desk`, and ICP_PAYOUT_IDENTITY below says so. The operator supplies
-# one thing: where their PEM is. Making the name a variable too would mean two
-# values that must agree, which is rule 8's shape and buys nothing.
+# The first version, shipped 2026-10-11 and wrong within the hour, demanded
+# ICP_IDENTITY_PEM_HOST_FILE and mounted it as a bind -- mirroring
+# docker-compose.web.armed-sol.yml without checking that the two cases are not
+# alike. SOL's keypair genuinely IS a host file: the operator makes it with
+# `solana-keygen new -o <path>` and it sits in their home directory. ICP's
+# identity is not. It is created by dfx INSIDE the replica container, under
+# DFX_CONFIG_ROOT=/state, which docker-compose.icp.yml backs with the `icp-state`
+# named volume. Measured on the operator's host 2026-10-11:
+#
+#     docker compose exec -T icp-replica sh -c 'ls "$DFX_CONFIG_ROOT/.config/dfx/identity/"'
+#     default
+#     minter
+#
+# Both on the volume, created 2026-10-06. THERE IS NO HOST PATH TO GIVE, so the
+# variable the first version demanded could not be filled in -- and filling it in
+# would have meant copying a signing key out of a volume onto the host, which is
+# the one thing chain-safety forbids outright.
+#
+# SO THE VOLUME IS MOUNTED INSTEAD AND NOTHING IS COPIED. The credential never
+# leaves the compose project, never touches the host filesystem, and never appears
+# on a screen. That also removes the operator variable entirely: the volume name
+# and the identity name are both fixed by the project, so NAMING THIS FILE IS THE
+# WHOLE ACT. tests/test_docker_build_context.py requires "AT MOST ONE" required
+# variable per file, so zero is allowed, and arming is still an act taken on the
+# command line and visible in shell history.
+#
+# READ-ONLY, AND THAT IS THE ONE THING NOT MEASURED -- see the block at the foot of
+# this file. A writable mount would give a process holding wallet RPC credentials
+# write access to the desk's identity store, which is the wrong direction to be
+# wrong in, so `:ro` is the default and the fallback is stated rather than guessed.
 #
 # WHICH IDENTITY IT MUST BE IS NOT A FREE CHOICE. The ledger's `transfer` debits
 # the CALLER, and every ICP deposit address this terminal hands out is a
@@ -66,17 +87,49 @@
 # docker-compose.web.yml, so both arrive with it, and naming one again would hand
 # compose the same file twice.
 #
-# AND HERE IS THE PART THAT IS NOT ESTABLISHED (rule 17: say which you have). NO
-# ICP PAYOUT HAS EVER BEEN SIGNED OR BROADCAST BY THIS CODE, on any network. The
-# arming path is new today, the derivation is unit-tested, and what has NOT
-# happened is a transfer leaving the desk's account on the local replica and a
-# block index coming back. That is the proof this repository asks for and it is
-# outstanding. The first run of it belongs on the local replica, where ICP is
-# play money, and it is the operator's to make.
+# TWO THINGS ARE NOT ESTABLISHED AND BOTH ARE NAMED RATHER THAN LEFT TO BE FOUND
+# (rule 17: say which you have).
+#
+# FIRST, WHETHER dfx TOLERATES A READ-ONLY DFX_CONFIG_ROOT. It has no reason to
+# write one for `canister call --network <url> --identity <name>` -- the identities
+# are already there, so the first-run bootstrap that generates a key and echoes its
+# mnemonic has nothing to do -- but "has no reason to" is a reading of its behavior
+# and not a measurement. dfx is not installed in the environment this file was
+# written in, so it could not be run. CHECK IT BEFORE YOU RELY ON IT, with one
+# read-only command on your own host:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.web.armed-icp.yml #             run --rm --entrypoint sh web -c 'dfx identity list'
+#
+# `default` and `minter` in that output means the read-only mount is enough. A
+# permission or "failed to create" error means dfx wants to write, and the fix is to
+# drop `:ro` from the mount below -- which is a real widening of what the web
+# container can do to the desk's identity store, so it is a decision rather than a
+# default, and it belongs to whoever runs this.
+#
+# SECOND, NO ICP PAYOUT HAS EVER BEEN SIGNED OR BROADCAST BY THIS CODE, on any
+# network. The arming path is new, the derivation is unit-tested, and what has NOT
+# happened is a transfer leaving the desk's account on the local replica and a block
+# index coming back. That is the proof this repository asks for and it is
+# outstanding. The first run belongs on the local replica, where ICP is play money,
+# and it is the operator's to make.
 services:
   web:
     volumes:
-      - "${ICP_IDENTITY_PEM_HOST_FILE:?set ICP_IDENTITY_PEM_HOST_FILE to the dfx identity PEM whose principal IS ICP_OWNER_PRINCIPAL -- on a local replica that is the replica container's own default identity. It is mounted READ-ONLY and its contents are never read, printed or copied by anything in this repository}:/home/swap/.config/dfx/identity/desk/identity.pem:ro"
+      # THE REPLICA'S OWN dfx CONFIG, READ-ONLY. `icp-state` is declared by
+      # docker-compose.icp.yml, which docker-compose.yml `include:`s, so it arrives
+      # with the project and is the SAME volume the replica has at /state -- not a
+      # copy of it. That is what makes the desk's identity reachable from `web`
+      # without any signing material being moved, copied or read.
+      - "icp-state:/icp-dfx-config:ro"
     environment:
-      # The name dfx resolves, fixed by the mount path above rather than supplied.
-      ICP_PAYOUT_IDENTITY: desk
+      # dfx looks for identities under $DFX_CONFIG_ROOT/.config/dfx/identity/<name>,
+      # so pointing it at the mount above is what makes `--identity default` resolve
+      # to the replica's own default identity -- the one whose principal IS
+      # ICP_OWNER_PRINCIPAL, which is where that value was read from in the first
+      # place. Any other identity arms the adapter, reaches the ledger, and has no
+      # coins.
+      DFX_CONFIG_ROOT: /icp-dfx-config
+      # The name dfx resolves, fixed by the project rather than supplied. `minter`
+      # is deliberately NOT used: it signs mints from the ledger's minting account,
+      # which is fund_desk.py's business and not a customer payout.
+      ICP_PAYOUT_IDENTITY: default
