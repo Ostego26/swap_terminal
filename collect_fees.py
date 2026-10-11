@@ -457,7 +457,7 @@ def apply_sweep(db, config, adapters, plan) -> list[str]:
     try:
         try:
             with payout_unlock_context(asset, adapters[asset]):
-                txid = broadcast_payout(adapters[asset], asset, config, plan.destination, amount)
+                txid = broadcast_payout(adapters[asset], config, plan.destination, amount)
                 written = record_sweep_broadcast(db, sweep_id, txid)
                 recorded = True
                 lines.append(f"  {asset} BROADCAST txid={txid}  <- final; this cannot be unsent. "

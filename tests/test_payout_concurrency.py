@@ -685,6 +685,14 @@ def test_a_failed_payout_names_the_reason_in_the_log(db_path, caplog, monkeypatc
         The real shape of a wrong passphrase: walletpassphrase is accepted at the
         transport level and the wallet stays shut, so the send is what reports it.
         """
+        #: WHICH CHAIN THIS STANDS IN FOR. services/payout_service.broadcast_payout()
+        #: derives the asset from the adapter rather than taking it as an argument (since
+        #: 2026-10-11), so a stub with no `asset` is REFUSED before anything is sent
+        #: rather than silently taking the two-positional branch. That refusal is the
+        #: point: the fall-through is correct for BTC/LTC/GRC and wrong for every chain
+        #: needing keywords, so "no asset" must not look like "a chain needing nothing".
+        asset = "GRC"
+
 
         def call(self, method, *params):
             return {}
@@ -726,6 +734,14 @@ def test_a_locked_wallet_leaves_the_swap_terminally_failed(db_path, monkeypatch)
     seed_payout_pending_swap(conn, "s_locked")
 
     class LockedWallet:
+        #: WHICH CHAIN THIS STANDS IN FOR. services/payout_service.broadcast_payout()
+        #: derives the asset from the adapter rather than taking it as an argument (since
+        #: 2026-10-11), so a stub with no `asset` is REFUSED before anything is sent
+        #: rather than silently taking the two-positional branch. That refusal is the
+        #: point: the fall-through is correct for BTC/LTC/GRC and wrong for every chain
+        #: needing keywords, so "no asset" must not look like "a chain needing nothing".
+        asset = "GRC"
+
         def call(self, method, *params):
             return {}
 
@@ -815,6 +831,14 @@ class GridcoinWalletStub:
     code -4)". A stub that accepted any send would let every test below pass against
     a version that never unlocked anything.
     """
+    #: WHICH CHAIN THIS STANDS IN FOR. services/payout_service.broadcast_payout()
+    #: derives the asset from the adapter rather than taking it as an argument (since
+    #: 2026-10-11), so a stub with no `asset` is REFUSED before anything is sent
+    #: rather than silently taking the two-positional branch. That refusal is the
+    #: point: the fall-through is correct for BTC/LTC/GRC and wrong for every chain
+    #: needing keywords, so "no asset" must not look like "a chain needing nothing".
+    asset = "GRC"
+
 
     def __init__(self):
         self.fully_unlocked = False
@@ -956,6 +980,14 @@ def test_a_chain_that_needs_no_unlock_is_not_given_one(db_path, monkeypatch):
     conn.commit()
 
     class BitcoinStub(GridcoinWalletStub):
+        #: WHICH CHAIN THIS STANDS IN FOR. services/payout_service.broadcast_payout()
+        #: derives the asset from the adapter rather than taking it as an argument (since
+        #: 2026-10-11), so a stub with no `asset` is REFUSED before anything is sent
+        #: rather than silently taking the two-positional branch. That refusal is the
+        #: point: the fall-through is correct for BTC/LTC/GRC and wrong for every chain
+        #: needing keywords, so "no asset" must not look like "a chain needing nothing".
+        asset = "BTC"
+
         def send_to_address(self, address, amount):
             self.sends += 1
             return "btc-txid-1"

@@ -118,7 +118,7 @@ from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR, signing_seed, signing_s
 from chains.xrp_signing import CONFIRM_XRP_SEND
 from modules.address_authority import check_address
 
-from .helpers import utc_now_iso
+from .helpers import iso_to_epoch_nanos, utc_now_iso
 from .swap_service import SHARED_ACCOUNT_PAYOUT_ASSETS, payout_source_account, set_swap_status
 
 logger = logging.getLogger(__name__)
@@ -514,7 +514,8 @@ class PayoutSigningUnavailable(RuntimeError):
     """
 
 
-def broadcast_payout(adapter, asset: str, config, address: str, amount: float) -> str:
+def broadcast_payout(adapter, config, address: str, amount: float,
+                     *, created_at: str = "") -> str:
     """Send one payout on `asset`, with whatever that chain's send actually needs. Returns the txid.
 
     THE DECISION THIS HOLDS is "which keywords does this chain's send require", and
@@ -609,7 +610,43 @@ def broadcast_payout(adapter, asset: str, config, address: str, amount: float) -
     always got. That is deliberate rather than incidental: adding keywords to a BTC
     send would be a change to the one function in this suite that moves money, for no
     behavioral gain.
+
+    THE ASSET IS DERIVED FROM THE ADAPTER AND IS NOT A PARAMETER, SINCE 2026-10-11.
+    It used to be the second positional argument, beside the adapter, and the two
+    could DISAGREE: nothing but the caller's discipline stopped
+    `broadcast_payout(grc_adapter, "ICP", ...)` from handing a Gridcoin daemon an
+    ICRC-1 idempotency key, or `(icp_adapter, "GRC", ...)` from paying ICP with the
+    two-positional branch and no key at all. Every production caller already fetched
+    the adapter out of a dict keyed by that same asset -- measured: all three of them,
+    here, collect_fees.py and xrp_payout_verify.py -- so the argument was a second
+    spelling of something already in hand, which is rule 8's "two copies of one rule
+    is a bug with a delay on it".
+
+    WHAT MADE ME LOOK WAS ruff's PLR0913 when `created_at` became the sixth argument.
+    Rule 12's reading of a complexity code applies to an arity one: the fix is to
+    find what the function should not have been carrying, not to raise the ceiling
+    (rule 19). The redundant one was the asset.
+
+    AN ADAPTER THAT CANNOT NAME ITS ASSET IS REFUSED rather than defaulted, and that
+    refusal is the whole reason this is safe. The fall-through below is the correct
+    send for BTC, LTC and GRC, so an adapter with no `asset` would silently take it
+    -- an XRP payout unsigned, a SOL payout unarmed, an ICP payout with no
+    idempotency key, each of them looking like a chain that simply did not need
+    keywords. chains/registry.build_adapters() keys all six adapters by the string
+    its class carries, and tests/test_every_adapter_names_its_own_asset.py asserts
+    that for every one the registry can build.
     """
+    asset = getattr(adapter, "asset", "")
+    if not asset:
+        raise PayoutSigningUnavailable(
+            f"the adapter for this payout ({type(adapter).__name__}) does not name its asset, so "
+            "there is no way to choose which chain's send keywords to pass and NOTHING WAS SENT. "
+            "An adapter with no `asset` would fall through to the two-positional branch, which is "
+            "right for BTC/LTC/GRC and silently wrong for every chain needing more. Every adapter "
+            "chains/registry.build_adapters() produces carries one; a stub or a new adapter class "
+            "that omits it is the defect."
+        )
+
     if asset == "SOL":
         # THE TOKEN IS SPELLED BY IMPORTING THE CONSTANT, never by copying its text,
         # for the reason the XRP branch below records: `grep -rn CONFIRM_SOL_SEND`
@@ -617,6 +654,45 @@ def broadcast_payout(adapter, asset: str, config, address: str, amount: float) -
         # local literal would hide from it -- while a literal that drifted by one
         # character would refuse every payout with a message about the token.
         return adapter.send_to_address(address, amount, confirm_send=CONFIRM_SOL_SEND)
+
+    # ICP NEEDS A THIRD ARGUMENT AND THIS FUNCTION DID NOT MENTION ICP AT ALL.
+    # `grep -c ICP` on this file was 0 until 2026-10-11, so every ICP payout fell through
+    # to the two-positional call below, created_at_time arrived as None, and
+    # chains/icp.ICPAdapter.send_to_address() REFUSED before any ledger call. Measured
+    # through the real process_pending_payouts(): zero ledger calls, swaps.status failed,
+    # payouts.txid NULL, and the customer's deposit already credited. Five `* -> ICP`
+    # directions were offerable against a path that refused 100% of the time.
+    #
+    # THE KEY MUST BE THE SWAP'S RECORDED CREATION TIME, and the adapter's own docstring
+    # is why: the ledger deduplicates on (from, to, amount, fee, memo, created_at_time)
+    # for 24 hours and returns the ORIGINAL block index for a repeat -- but only if the
+    # field is given. A CLOCK value satisfies "real time" and breaks dedup, so a retry
+    # after a timeout DOUBLE-PAYS; measured both arms on a stubbed ledger, a clock key
+    # applied TWO transfers where the row's own key applied one and returned the first
+    # block index. A FIXED CONSTANT breaks the other constraint -- the replica answered
+    # TxTooOld with allowed_window_nanos 86_400_000_000_000 on 2026-10-06.
+    #
+    # NO SCHEMA CHANGE AND NO NEW COLUMN. swaps.created_at is written by
+    # helpers.utc_now_iso() and helpers.iso_to_epoch_nanos() already exists for exactly
+    # this conversion -- both were there; only the argument was missing.
+    #
+    # THE REFUSAL WHEN created_at IS EMPTY is deliberate rather than a fallback to a
+    # clock. A caller that forgot to pass it gets a loud PayoutSigningUnavailable naming
+    # what is missing, which is the one failure this function must never paper over: the
+    # paper-over is the double-pay.
+    #
+    # KEYWORD-ONLY WITH A DEFAULT, so no existing caller changes. BTC, LTC and GRC still
+    # take the two-positional call below and are unaffected.
+    if asset == "ICP":
+        if not created_at:
+            raise PayoutSigningUnavailable(
+                "an ICP payout needs the swap's recorded creation time as the ledger's "
+                "idempotency key and this call supplied none, so NOTHING was sent. The ICP "
+                "ledger deduplicates on created_at_time for 24 hours; without it every retry "
+                "is a new transaction and a timeout that the daemon actually accepted would "
+                "pay the customer twice. Pass created_at=swap[\"created_at\"]."
+            )
+        return adapter.send_to_address(address, amount, iso_to_epoch_nanos(created_at))
 
     if asset not in SHARED_ACCOUNT_PAYOUT_ASSETS:
         return adapter.send_to_address(address, amount)
@@ -1122,7 +1198,9 @@ def pay_one_swap(db, config, adapters: dict, swap):
                 # positional arguments this line used to pass. The dispatch is a
                 # function so it can be tested with a stub adapter and a seeded
                 # environment; see its docstring for the full refusal order.
-                txid = broadcast_payout(adapter, destination_asset, config, swap["payout_address"], amount)
+                txid = broadcast_payout(adapter, config,
+                                        swap["payout_address"], amount,
+                                        created_at=swap["created_at"])
                 # RECORDED INSIDE THE CONTEXT, BEFORE THE RE-LOCK CAN RAISE.
                 #
                 # This block sat AFTER the `with` until 2026-09-26, and the first

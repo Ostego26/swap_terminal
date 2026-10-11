@@ -198,7 +198,15 @@ def test_every_asset_this_terminal_can_reach_has_a_validator():
         "XRP": {"url": "http://127.0.0.1:5005"},
     }
     # build_adapters() opens no socket -- chains/registry.py's header states it and its own
-    # tests hold it -- so this constructs six adapters and touches nothing.
+    # tests hold it -- so this constructs an adapter per configured chain and touches
+    # nothing.
+    #
+    # THIS SAID "six adapters" UNTIL 2026-10-11 AND THE MAPPING CONFIGURES FIVE. ICP is
+    # absent, so build_adapters() skips it and the reachable set never contained it --
+    # which did not weaken the assertion below, because ICP reaches it through
+    # Config.ALLOWED_PAIRS instead. It is corrected rather than deleted because a reader
+    # counting adapters off this comment gets the wrong denominator (rule 3), and the
+    # all-six mapping now lives in tests/test_every_adapter_names_its_own_asset.py.
     reachable = set(build_adapters(fully_configured))
     swappable = {asset for pair in Config.ALLOWED_PAIRS for asset in pair}
 
@@ -585,6 +593,14 @@ def test_a_chain_whose_addresses_carry_no_network_says_the_check_was_skipped():
 
 class RecordingAdapter:
     """A payout adapter that records sends instead of making them. Opens no socket."""
+    #: WHICH CHAIN THIS STANDS IN FOR. services/payout_service.broadcast_payout()
+    #: derives the asset from the adapter rather than taking it as an argument (since
+    #: 2026-10-11), so a stub with no `asset` is REFUSED before anything is sent
+    #: rather than silently taking the two-positional branch. That refusal is the
+    #: point: the fall-through is correct for BTC/LTC/GRC and wrong for every chain
+    #: needing keywords, so "no asset" must not look like "a chain needing nothing".
+    asset = "LTC"
+
 
     can_spend = True
     payout_refusal = ""

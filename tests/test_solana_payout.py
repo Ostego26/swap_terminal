@@ -1379,11 +1379,20 @@ class RecordingAdapter:
     inputs".
     """
 
+    #: "STUB" NAMES NO CHAIN ON PURPOSE, and since 2026-10-11 it is also a DEFAULT
+    #: rather than a fixed answer. services/payout_service.broadcast_payout() derives
+    #: the asset from the adapter instead of taking it as an argument, so a stub that
+    #: could only ever say "STUB" would take the two-positional fall-through for every
+    #: test -- which is the branch BTC, LTC and GRC want and the wrong one for every
+    #: chain whose dispatch this file is about. Constructing it with an asset is how a
+    #: test now says which chain it is standing in for, and leaving it unset still
+    #: means "a chain nothing special is claimed about".
     asset = "STUB"
     can_spend = True
     payout_refusal = ""
 
-    def __init__(self):
+    def __init__(self, asset: str = "STUB"):
+        self.asset = asset
         self.calls = []
 
     def send_to_address(self, address, amount, **kwargs):
@@ -1678,7 +1687,7 @@ def test_the_keypair_PATH_VALUE_reaches_no_attribute_no_log_and_no_refusal_messa
     adapter = ready_adapter(genesis=MAINNET_BETA, hot_wallet=valid_addresses.SOL_DEPOSIT_ACCOUNT)
     assert adapter.can_spend is True, "the point of this test is a value PRESENT in the environment"
     with pytest.raises(SolanaClusterRefused) as refused:
-        broadcast_payout(adapter, "SOL", SOL_PAYOUT_CONFIG, DESTINATION, 1.0)
+        broadcast_payout(adapter, SOL_PAYOUT_CONFIG, DESTINATION, 1.0)
 
     captured = capsys.readouterr()
     for where, text in (
@@ -1719,8 +1728,8 @@ def test_a_SOL_payout_gets_the_ARMING_TOKEN_and_nothing_else(monkeypatch):
     empty kwargs.
     """
     monkeypatch.setenv(KEYPAIR_PATH_VARIABLE, SENTINEL_KEYPAIR_PATH)
-    adapter = RecordingAdapter()
-    assert broadcast_payout(adapter, "SOL", SOL_PAYOUT_CONFIG, DESTINATION, 0.25) == "stub-signature"
+    adapter = RecordingAdapter("SOL")
+    assert broadcast_payout(adapter, SOL_PAYOUT_CONFIG, DESTINATION, 0.25) == "stub-signature"
 
     (address, amount, kwargs) = adapter.calls[0]
     assert len(adapter.calls) == 1
@@ -1746,8 +1755,8 @@ def test_the_TOKEN_IS_PASSED_WHETHER_OR_NOT_THE_HOST_IS_ARMED(monkeypatch):
     environment rather than a boolean somebody can flip in a config file.
     """
     _unarmed(monkeypatch)
-    adapter = RecordingAdapter()
-    broadcast_payout(adapter, "SOL", SOL_PAYOUT_CONFIG, DESTINATION, 0.25)
+    adapter = RecordingAdapter("SOL")
+    broadcast_payout(adapter, SOL_PAYOUT_CONFIG, DESTINATION, 0.25)
     assert adapter.calls[0][2] == {"confirm_send": CONFIRM_SOL_SEND}
 
 
@@ -1763,8 +1772,8 @@ def test_every_other_chain_still_gets_exactly_two_positional_arguments(monkeypat
     """
     monkeypatch.setenv(KEYPAIR_PATH_VARIABLE, SENTINEL_KEYPAIR_PATH)
     for asset in ("BTC", "LTC", "GRC"):
-        adapter = RecordingAdapter()
-        broadcast_payout(adapter, asset, SOL_PAYOUT_CONFIG, valid_addresses.GRC_PAYOUT, 1.0)
+        adapter = RecordingAdapter(asset)
+        broadcast_payout(adapter, SOL_PAYOUT_CONFIG, valid_addresses.GRC_PAYOUT, 1.0)
         assert adapter.calls == [(valid_addresses.GRC_PAYOUT, 1.0, {})], f"{asset} gained a keyword"
 
 
@@ -1799,7 +1808,7 @@ def test_an_UNARMED_SOL_payout_gets_the_PREVIEW_in_the_refusal_and_broadcasts_NO
     _unarmed(monkeypatch)
     adapter = ready_adapter(hot_wallet=valid_addresses.SOL_DEPOSIT_ACCOUNT)
     with pytest.raises(SolanaSendNotArmed) as refused:
-        broadcast_payout(adapter, "SOL", SOL_PAYOUT_CONFIG, DESTINATION, 1.0)
+        broadcast_payout(adapter, SOL_PAYOUT_CONFIG, DESTINATION, 1.0)
 
     message = str(refused.value)
     assert KEYPAIR_PATH_VARIABLE in message
@@ -1828,7 +1837,7 @@ def test_THE_DEVNET_GUARD_STILL_REFUSES_A_MAINNET_GENESIS_EVEN_WHEN_ARMED(tmp_pa
     adapter, _seed, _public = armed(tmp_path, monkeypatch, genesis=MAINNET_BETA)
     assert adapter.can_spend is True, "this test is worthless unless the process really is armed"
     with pytest.raises(SolanaClusterRefused) as refused:
-        broadcast_payout(adapter, "SOL", SOL_PAYOUT_CONFIG, DESTINATION, 1.0)
+        broadcast_payout(adapter, SOL_PAYOUT_CONFIG, DESTINATION, 1.0)
 
     # MEASURED off the real refusal rather than written from memory: the message
     # spells the cluster "MAINNET-BETA" in capitals. The first version of this line

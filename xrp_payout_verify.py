@@ -231,7 +231,7 @@ def via_service(amount: float, destination: str, send: bool) -> int:
         return 1
 
     try:
-        tx_hash = broadcast_payout(adapter, "XRP", config, destination, amount)
+        tx_hash = broadcast_payout(adapter, config, destination, amount)
     except Exception as error:  # noqa: BLE001 -- checked: same set as above plus PayoutSigningUnavailable and the ValueError from payout_source_account. All mean nothing was sent; the type name is printed and the exit code is non-zero, so a refusal can never read as a success.
         print(f"\n{type(error).__name__}: {error}", flush=True)
         print("\nNOT SENT. Read the reason above.", file=sys.stderr)

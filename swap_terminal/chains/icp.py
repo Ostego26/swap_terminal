@@ -591,6 +591,25 @@ class ICPAdapter:
     checkout builds no ICP adapter at all rather than one aimed at mainnet.
     """
 
+    #: WHAT THIS ADAPTER IS FOR, in the same vocabulary every other adapter uses
+    #: (rule 11: one vocabulary, derived in ONE place). This class does NOT subclass
+    #: base.RPCAdapter, where `asset` is declared and the three Bitcoin-style
+    #: subclasses override it, so ICP was the one adapter in the tree that could not
+    #: name its own chain -- measured 2026-10-11 by grepping all seven adapter
+    #: modules for an `asset` assignment and finding six.
+    #:
+    #: THAT ABSENCE WAS LOAD-BEARING THE WRONG WAY. services/payout_service.
+    #: broadcast_payout() chooses which keywords a chain's send needs, and it took
+    #: the asset as a SEPARATE argument beside the adapter -- so the two could
+    #: disagree, and nothing but the caller's discipline stopped
+    #: `broadcast_payout(grc_adapter, "ICP", ...)` from calling a Gridcoin daemon
+    #: with an ICRC-1 idempotency key. It now derives the asset from the adapter,
+    #: which it can only do if every adapter answers. chains/registry.build_adapters()
+    #: keys each one by exactly this string, and
+    #: tests/test_every_adapter_names_its_own_asset.py asserts the two agree for
+    #: every adapter the registry can build.
+    asset = "ICP"
+
     # WHY ICP CANNOT PAY OUT, SAID OUT LOUD. The verdict was already correct and
     # SILENT, which is the half this fixes.
     #

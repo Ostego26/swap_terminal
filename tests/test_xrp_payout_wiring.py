@@ -161,11 +161,20 @@ class RecordingAdapter:
     bag would pass whether or not a BTC send had grown a `seed=` keyword.
     """
 
+    #: "STUB" NAMES NO CHAIN ON PURPOSE, and since 2026-10-11 it is also a DEFAULT
+    #: rather than a fixed answer. services/payout_service.broadcast_payout() derives
+    #: the asset from the adapter instead of taking it as an argument, so a stub that
+    #: could only ever say "STUB" would take the two-positional fall-through for every
+    #: test -- which is the branch BTC, LTC and GRC want and the wrong one for every
+    #: chain whose dispatch this file is about. Constructing it with an asset is how a
+    #: test now says which chain it is standing in for, and leaving it unset still
+    #: means "a chain nothing special is claimed about".
     asset = "STUB"
     can_spend = True
     payout_refusal = ""
 
-    def __init__(self):
+    def __init__(self, asset: str = "STUB"):
+        self.asset = asset
         self.calls: list[tuple[tuple, dict]] = []
 
     def send_to_address(self, *args, **kwargs) -> str:
@@ -370,8 +379,8 @@ def test_every_other_chain_still_gets_exactly_two_positional_arguments():
     MUTATION: make broadcast_payout() pass source= unconditionally. This fails,
     naming the keyword that arrived.
     """
-    adapter = RecordingAdapter()
-    txid = broadcast_payout(adapter, "GRC", {}, GRC_PAYOUT, 55.5)
+    adapter = RecordingAdapter("GRC")
+    txid = broadcast_payout(adapter, {}, GRC_PAYOUT, 55.5)
 
     assert txid == "stub-txid"
     assert adapter.calls == [((GRC_PAYOUT, 55.5), {})], (
@@ -398,9 +407,9 @@ def test_an_xrp_send_gets_the_source_the_seed_and_the_arming_token(monkeypatch):
     for ("the assertion is the outcome, not the absence of an exception").
     """
     monkeypatch.setenv(SIGNING_SEED_ENV_VAR, NOT_A_SEED)
-    adapter = RecordingAdapter()
+    adapter = RecordingAdapter("XRP")
 
-    broadcast_payout(adapter, "XRP", armed_config(XRP_HOT_ACCOUNT), XRP_CUSTOMER_PAYOUT, 2.5)
+    broadcast_payout(adapter, armed_config(XRP_HOT_ACCOUNT), XRP_CUSTOMER_PAYOUT, 2.5)
 
     (args, kwargs) = adapter.calls[0]
     assert args == (XRP_CUSTOMER_PAYOUT, 2.5)
@@ -421,7 +430,7 @@ def test_the_return_value_is_the_txid_and_nothing_else(monkeypatch):
     written to the database by the next statement.
     """
     monkeypatch.setenv(SIGNING_SEED_ENV_VAR, NOT_A_SEED)
-    returned = broadcast_payout(RecordingAdapter(), "XRP", armed_config(XRP_HOT_ACCOUNT), XRP_CUSTOMER_PAYOUT, 1)
+    returned = broadcast_payout(RecordingAdapter("XRP"), armed_config(XRP_HOT_ACCOUNT), XRP_CUSTOMER_PAYOUT, 1)
 
     assert returned == "stub-txid"
     assert NOT_A_SEED not in returned
@@ -447,7 +456,7 @@ def test_an_unset_payout_account_refuses_before_any_network_call(ledger, monkeyp
     adapter = XRPAdapter(url=TESTNET_URL, min_confirmations=1)
 
     with pytest.raises(ValueError, match="XRP_DEPOSIT_ACCOUNT"):
-        broadcast_payout(adapter, "XRP", dict(CONFIG_BASE), XRP_CUSTOMER_PAYOUT, 1)
+        broadcast_payout(adapter, dict(CONFIG_BASE), XRP_CUSTOMER_PAYOUT, 1)
 
     assert recorder.calls == [], "the account check must precede every network call"
     assert ledger.submitted == []
@@ -466,7 +475,7 @@ def test_an_unset_seed_refuses_before_any_network_call(ledger):
     adapter = XRPAdapter(url=TESTNET_URL, min_confirmations=1)
 
     with pytest.raises(PayoutSigningUnavailable, match=SIGNING_SEED_ENV_VAR):
-        broadcast_payout(adapter, "XRP", armed_config(XRP_HOT_ACCOUNT), XRP_CUSTOMER_PAYOUT, 1)
+        broadcast_payout(adapter, armed_config(XRP_HOT_ACCOUNT), XRP_CUSTOMER_PAYOUT, 1)
 
     assert recorder.calls == [], "the seed check must precede every network call"
     assert ledger.submitted == []
@@ -494,7 +503,7 @@ def test_a_mainnet_server_refuses_before_account_info_and_before_signing(ledger,
     adapter = XRPAdapter(url=TESTNET_URL, min_confirmations=1)
 
     with pytest.raises(XRPMainnetRefused, match="MAINNET"):
-        broadcast_payout(adapter, "XRP", armed_config(XRP_HOT_ACCOUNT), XRP_CUSTOMER_PAYOUT, 1)
+        broadcast_payout(adapter, armed_config(XRP_HOT_ACCOUNT), XRP_CUSTOMER_PAYOUT, 1)
 
     assert recorder.methods == ["server_info"], "account_info must not be read on a mainnet endpoint"
     assert ledger.submitted == [], "nothing may be signed for a mainnet ledger, by any route"
@@ -522,7 +531,7 @@ def test_a_seed_for_another_account_refuses_through_the_service_path(ledger, mon
     adapter = XRPAdapter(url=TESTNET_URL, min_confirmations=1)
 
     with pytest.raises(XRPSigningRefused, match="REFUSING to sign") as caught:
-        broadcast_payout(adapter, "XRP", armed_config(announced.classic_address), XRP_CUSTOMER_PAYOUT, 1)
+        broadcast_payout(adapter, armed_config(announced.classic_address), XRP_CUSTOMER_PAYOUT, 1)
 
     assert ledger.submitted == [], "a mismatched seed must not reach submit_and_wait"
     message = str(caught.value)
@@ -549,7 +558,7 @@ def test_a_payment_that_would_breach_the_reserve_refuses_before_signing(ledger, 
     adapter = XRPAdapter(url=TESTNET_URL, min_confirmations=1)
 
     with pytest.raises(XRPReserveRefused, match="short by"):
-        broadcast_payout(adapter, "XRP", armed_config(paying.classic_address), XRP_CUSTOMER_PAYOUT, 1)
+        broadcast_payout(adapter, armed_config(paying.classic_address), XRP_CUSTOMER_PAYOUT, 1)
 
     assert ledger.submitted == []
 
@@ -567,7 +576,7 @@ def test_the_payment_that_reaches_the_ledger_carries_no_partial_payment_bit(ledg
     ledger.answer(server_info=server_info(), account_info=account_info(drops="1000000000"))
     adapter = XRPAdapter(url=TESTNET_URL, min_confirmations=1)
 
-    txid = broadcast_payout(adapter, "XRP", armed_config(paying.classic_address), XRP_CUSTOMER_PAYOUT, 1.5)
+    txid = broadcast_payout(adapter, armed_config(paying.classic_address), XRP_CUSTOMER_PAYOUT, 1.5)
 
     assert txid == "B" * 64
     assert len(ledger.submitted) == 1
@@ -714,29 +723,29 @@ def test_no_refusal_message_on_this_path_carries_the_seed(ledger, monkeypatch):
     # mainnet
     ledger.answer(server_info=server_info(network_id=0), account_info=account_info())
     with pytest.raises(XRPMainnetRefused) as caught:
-        broadcast_payout(adapter, "XRP", armed_config(paying.classic_address), XRP_CUSTOMER_PAYOUT, 1)
+        broadcast_payout(adapter, armed_config(paying.classic_address), XRP_CUSTOMER_PAYOUT, 1)
     messages.append(str(caught.value))
 
     # the reserve
     ledger.answer(server_info=server_info(), account_info=account_info(drops="1500000"))
     with pytest.raises(XRPReserveRefused) as caught:
-        broadcast_payout(adapter, "XRP", armed_config(paying.classic_address), XRP_CUSTOMER_PAYOUT, 1)
+        broadcast_payout(adapter, armed_config(paying.classic_address), XRP_CUSTOMER_PAYOUT, 1)
     messages.append(str(caught.value))
 
     # a seed for another account
     ledger.answer(server_info=server_info(), account_info=account_info(drops="1000000000"))
     with pytest.raises(XRPSigningRefused) as caught:
-        broadcast_payout(adapter, "XRP", armed_config(other.classic_address), XRP_CUSTOMER_PAYOUT, 1)
+        broadcast_payout(adapter, armed_config(other.classic_address), XRP_CUSTOMER_PAYOUT, 1)
     messages.append(str(caught.value))
 
     # a bad destination, refused locally before anything is read
     with pytest.raises(XRPRPCError) as caught:
-        broadcast_payout(adapter, "XRP", armed_config(paying.classic_address), "not-an-address", 1)
+        broadcast_payout(adapter, armed_config(paying.classic_address), "not-an-address", 1)
     messages.append(str(caught.value))
 
     # an unset account, with the seed present
     with pytest.raises(ValueError) as caught:
-        broadcast_payout(adapter, "XRP", dict(CONFIG_BASE), XRP_CUSTOMER_PAYOUT, 1)
+        broadcast_payout(adapter, dict(CONFIG_BASE), XRP_CUSTOMER_PAYOUT, 1)
     messages.append(str(caught.value))
 
     assert len(messages) == 5, "every refusal on this path must be exercised, or the set is not the set"
@@ -810,7 +819,13 @@ def test_reverting_the_call_site_to_two_positional_arguments_fails_the_payout(tm
     monkeypatch.setattr(
         payout_module,
         "broadcast_payout",
-        lambda adapter, asset, config, address, amount: adapter.send_to_address(address, amount),
+        # **_kwargs ABSORBS created_at, which broadcast_payout() takes since the ICP
+        # branch landed. Without it this lambda raises TypeError and the swap fails on
+        # THAT rather than on the missing source account -- a test passing for the wrong
+        # reason, measured on 2026-10-11 when it did exactly that. The point of the
+        # stand-in is to be the OLD two-positional call, so it must accept the current
+        # signature and ignore the parts the old one did not have.
+        lambda adapter, config, address, amount, **_kwargs: adapter.send_to_address(address, amount),
     )
 
     conn = connect_db(db_path, create=True)

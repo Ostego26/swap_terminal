@@ -300,11 +300,11 @@ def payout_rows(conn, swap_id: str = "s_to_icp") -> list[dict]:
 # =========================================================================
 
 
-def test_the_real_payout_worker_reaches_the_ledger_ZERO_TIMES_and_strands_the_swap(conn, monkeypatch):
-    """THE DEFECT. Every `* -> ICP` payout fails, and the ledger is never even asked.
+def test_the_real_payout_worker_reaches_the_ledger_and_pays_the_swap(conn, monkeypatch):
+    """`* -> ICP` pays. INVERTED 2026-10-11 when broadcast_payout() learned about ICP.
 
-    MEASURED 2026-10-11 on this host by running the real process_pending_payouts() over
-    the real schema with a real ICPAdapter:
+    WHAT THIS TEST MEASURED WHEN IT WAS WRITTEN, hours earlier the same day, running
+    the real process_pending_payouts() over the real schema with a real ICPAdapter:
 
         ledger calls              []          not even icrc1_fee
         swaps.status              failed
@@ -312,7 +312,20 @@ def test_the_real_payout_worker_reaches_the_ledger_ZERO_TIMES_and_strands_the_sw
         payouts row               status 'failed', txid None
         completed returned        0
 
-    THE CAUSE IS ONE LINE IN A FILE THIS TEST MAY NOT EDIT.
+    AND WHAT IT MEASURES NOW, same seeded row, same adapter, same stub ledger:
+
+        ledger calls              ['icrc1_fee', 'transfer']
+        swaps.status              completed
+        swaps.payout_txid         1           the block index
+        payouts row               status 'broadcast', txid 1
+        completed returned        1 swap
+
+    The before/after is kept in full rather than replaced, because the drift is the
+    point (rule 1) and because the two columns together are the only honest statement
+    of what the one-line change bought. The diagnosis follows unedited, since it is
+    what produced the fix.
+
+    THE CAUSE WAS ONE LINE IN A FILE THIS TEST MAY NOT EDIT.
     services/payout_service.broadcast_payout() dispatches on the asset: SOL gets
     `confirm_send=`, XRP gets a source and a seed, and `asset not in
     SHARED_ACCOUNT_PAYOUT_ASSETS` -- which is every other chain, ICP included -- gets
@@ -333,12 +346,19 @@ def test_the_real_payout_worker_reaches_the_ledger_ZERO_TIMES_and_strands_the_sw
     is the safe one -- nothing is sent, so nothing is sent twice -- and it is still a
     customer whose money this desk holds and whose payout cannot happen.
 
-    THIS ASSERTION IS INVERTED WHEN broadcast_payout() LEARNS ABOUT ICP, which is the
-    convention this suite already uses (tests/test_htlc_locktime_encoding.py's DEFECT
-    assertions were inverted when the locktime encoder landed). The replacement is
-    test_a_payout_driven_with_the_swaps_own_key_completes below, which already passes:
-    it drives the identical swap row through the identical adapter with the key the
-    row carries, and the transfer goes out. Only the one line joining them is missing.
+    THE INVERSION FOLLOWS THE CONVENTION THIS SUITE ALREADY USES --
+    tests/test_htlc_locktime_encoding.py's DEFECT assertions were inverted when the
+    locktime encoder landed -- rather than deleting the test and writing a fresh one.
+    It asserts the same claim with the sign flipped, so a regression lands HERE rather
+    than in a file nobody connects back to the defect.
+
+    THE KEY IS ASSERTED, NOT MERELY THE SUCCESS, and that is the line worth having. A
+    payout that completed with `time.time_ns()` in `created_at_time` would satisfy
+    every other assertion below and be a DOUBLE PAY waiting on one retry: the ledger
+    deduplicates on that field for 24 hours, so a fresh clock value makes each retry a
+    new transaction. The swap's own `created_at` is retry-stable, and
+    test_the_same_swap_paid_twice_with_its_own_key_is_ONE_transfer below measures the
+    consequence directly.
     """
     seed_payout_pending(conn)
     ledger = StubLedger()
@@ -346,35 +366,41 @@ def test_the_real_payout_worker_reaches_the_ledger_ZERO_TIMES_and_strands_the_sw
 
     completed = process_pending_payouts(conn, CONFIG, {"ICP": adapter})
 
-    assert completed == [], "a payout completed; if broadcast_payout() now knows about ICP, invert this test"
-    assert ledger.calls == [], (
-        f"the ledger was asked {ledger.calls!r}. The refusal is meant to come before any "
-        f"network call at all, which is the ordering rule 14 asks for."
+    assert len(completed) == 1, f"the swap did not complete: {completed!r}"
+    assert [method for method, _ in ledger.calls] == ["icrc1_fee", "transfer"], (
+        f"the ledger was asked {ledger.calls!r}; the fee must be read from it immediately "
+        f"before the send rather than taken from a constant"
     )
-    assert ledger.applied == [], "a transfer was applied; this test's premise is wrong"
+    assert len(ledger.applied) == 1, f"expected exactly one transfer, got {ledger.applied!r}"
+    sent = ledger.applied[0]
+    assert sent["to"] == CUSTOMER_ACCOUNT, "the destination is not the customer's account"
+    assert sent["created_at"] == EXPECTED_KEY_NANOS, (
+        f"created_at_time is {sent['created_at']} and the swap's own key is "
+        f"{EXPECTED_KEY_NANOS}. Anything else -- a clock read above all -- breaks the "
+        f"ledger's 24-hour deduplication and makes a retry a second payment."
+    )
 
     row = swap_row(conn)
-    assert row["status"] == "failed"
-    assert row["payout_txid"] is None
-    assert "created_at_time unset" in (row["failed_reason"] or ""), (
-        f"the recorded reason does not name the cause: {row['failed_reason']!r}"
-    )
-    assert "NOTHING was sent" in (row["failed_reason"] or ""), (
-        "the reason does not state that nothing was sent, which is the one fact an "
-        "operator reading this row has to be able to act on"
-    )
+    assert row["status"] == "completed", f"the swap is {row['status']!r}: {row['failed_reason']!r}"
+    assert row["payout_txid"] == "1", f"the block index did not reach the row: {row['payout_txid']!r}"
+    assert not row["failed_reason"], f"a completed payout carries a failure reason: {row['failed_reason']!r}"
     rows = payout_rows(conn)
-    assert [r["status"] for r in rows] == ["failed"]
-    assert rows[0]["txid"] is None
+    assert [r["status"] for r in rows] == ["broadcast"]
+    assert rows[0]["txid"] == "1"
 
 
-def test_the_customers_deposit_is_already_ours_when_that_happens(conn, monkeypatch):
-    """WHY THE ABOVE IS AN EXPOSURE AND NOT AN INCONVENIENCE. The money is in.
+def test_the_customers_deposit_and_the_payout_both_survive_the_worker(conn, monkeypatch):
+    """INVERTED 2026-10-11 with the test above, and the DEPOSIT half is unchanged.
 
-    `payout_pending` is only reached through services/deposit_service crediting a
-    deposit, so this asserts on the row the worker leaves behind: the deposit txid, the
-    credited amount and credited_at all survive the failure. The desk holds 100 GRC and
-    owes 0.985 ICP it cannot send.
+    WHAT IT ASSERTED BEFORE: that the stranded payout was an EXPOSURE rather than an
+    inconvenience, because `payout_pending` is only reached through
+    services/deposit_service crediting a deposit -- so the desk held 100 GRC and owed
+    0.985 ICP it could not send.
+
+    The three deposit assertions below are the same lines they always were; only the
+    status flipped. That is deliberate: this test's job is to hold the DEPOSIT side
+    still while the payout side changes, so a future regression that loses the
+    credited deposit is caught by the same row that caught the unpayable obligation.
     """
     seed_payout_pending(conn)
     process_pending_payouts(conn, CONFIG, {"ICP": armed_adapter(StubLedger(), monkeypatch)})
@@ -383,7 +409,10 @@ def test_the_customers_deposit_is_already_ours_when_that_happens(conn, monkeypat
     assert row["actual_input_amount"] == 100.0
     assert row["deposit_txid"] == "a_real_grc_txid"
     assert row["credited_at"] is not None, "the premise is wrong: this swap was never credited"
-    assert row["status"] == "failed"
+    assert row["status"] == "completed", (
+        f"the deposit is credited and the payout is {row['status']!r} -- the desk holds the "
+        f"customer's 100 GRC and owes them ICP: {row['failed_reason']!r}"
+    )
 
 
 def test_the_swap_row_already_carries_everything_the_send_needs(conn):
