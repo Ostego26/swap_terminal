@@ -269,7 +269,7 @@ function wireCopyButtons() {
  * NO WALLET LIBRARY. chains/solana_pay.py built the request and the browser
  * hands it over unaltered. The usual adapters are a megabyte of third-party code
  * that would have the deposit address passing through it, and a buggy or
- * compromised copy substitutes one base58 string for another with every
+ * compromised copy substitutes one near-identical address for another with every
  * server-side check still passing.
  *
  * WHAT IS NOT ESTABLISHED, and the operator will find out before I do: whether
@@ -393,3 +393,135 @@ wireLivePolling();
 clearBrowserFilledPayoutAddress();
 wireCopyButtons();
 wireWalletMenu();
+
+
+// =============================================================================
+// IN-SITU PAYOUT ADDRESS VERDICT. Operator, 2026-10-11:
+//
+//   "any address must be verfied on the UI in situ after being entered with a
+//    green check or a red x and not being able to proceed. it should be both a
+//    regex and a blockchain check."
+//
+// NO ADDRESS RULES LIVE HERE, and that is not laziness -- it is the standing rule
+// templates/_atm_payout_address.html already stated: "NO BROWSER VALIDATION
+// PATTERN. A pattern here would be a third spelling of the per-chain address rule,
+// in a language the server cannot check." So this asks the server, which runs the
+// SAME two checks create_swap will run (services/address_check.py). A green check
+// that is followed by a refusal is worse than no check at all.
+//
+// THREE STATES, NOT TWO. The server answers good / bad / unknown, and `unknown`
+// means the daemon could not be asked -- which is NOT a red x, because the address
+// may be perfect and our chain may be down. It still blocks Next, because a swap
+// created against an unreachable chain chokes exactly where the operator's
+// GRC -> LTC attempt choked, but the message sends somebody to the daemon rather
+// than to the customer's clipboard.
+//
+// `may_proceed` IS READ FROM THE SERVER AND NEVER COMPUTED HERE. The submit gate is
+// a fund-path decision and it lives in services/address_check.py where a test can
+// assert it -- not in a `state === "good"` comparison that a later edit could widen
+// without anything failing.
+// =============================================================================
+
+// How long after the last keystroke to ask. Milliseconds because that is what
+// setTimeout takes (CLAUDE.md rule 6: seconds and ms stay where an interface
+// demands them, and the conversion happens at the print -- nothing here prints a
+// duration).
+//
+// 450 is chosen against the two costs it sits between: asking per keystroke would
+// put one RPC pass on every character of a 34-character address, and waiting longer
+// makes the mark feel detached from the typing. A paste -- which is what the field
+// is for, and what its own note tells the customer to do -- fires one check, because
+// a paste is a single input event.
+const ADDRESS_CHECK_DELAY_MS = 450;
+
+function wirePayoutAddressVerdict() {
+  const field = document.getElementById("payout_address");
+  if (!field) return;
+  const form = field.closest("form");
+  if (!form) return;
+  const asset = field.getAttribute("data-asset") || "";
+  const submit = form.querySelector("button[type=submit]");
+  const mark = document.getElementById("payout_address_verdict");
+  if (!mark || !asset) return;
+
+  let timer = null;
+  let sequence = 0;
+
+  // `mayProceed` IS A PARAMETER AND NEVER DERIVED FROM `state`. This function read
+  // `state !== "good"` in its first draft, which put the submit gate -- a fund-path
+  // decision -- in a browser comparison no test can reach, and a later edit could
+  // have widened it to let "unknown" through without anything failing. Caught by
+  // tests/test_live_address_verdict.test_the_browser_reads_may_proceed_and_never_
+  // decides_it, which is to say by the gate written in the same hour, against its
+  // author.
+  //
+  // Every call passes false except the one that passes the server's own boolean.
+  function render(state, headline, mayProceed) {
+    mark.className = "address-verdict " + state;
+    mark.textContent = headline;
+    // ARIA, because a customer using a screen reader gets the mark as text or not
+    // at all: a glyph conveying "you may not proceed" that is invisible to them
+    // would make the gate unexplainable rather than merely unseen.
+    mark.setAttribute("role", "status");
+    if (submit) submit.disabled = !mayProceed;
+  }
+
+  function check() {
+    const address = field.value.trim();
+    if (!address) {
+      render("empty", "", false);
+      return;
+    }
+    const mine = ++sequence;
+    render("checking", "Checking with " + asset + "…", true);
+    fetch("/api/address/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ asset: asset, address: address })
+    })
+      .then(function (response) { return response.json(); })
+      .then(function (verdict) {
+        // A STALE REPLY MUST NOT OVERWRITE A FRESH ONE. Two checks in flight can
+        // land out of order -- the chain half is an RPC and its duration varies by
+        // orders of magnitude between a reachable daemon and a dropping one (0.002s
+        // against 5s, measured 2026-10-11) -- so a slow verdict for an address the
+        // customer has already edited would render a green check beside different
+        // text. The sequence number is what makes that impossible.
+        if (mine !== sequence) return;
+        render(verdict.state, verdict.headline, verdict.may_proceed);
+      })
+      .catch(function (error) {
+        if (mine !== sequence) return;
+        // THE NETWORK FAILED, WHICH IS NOT A VERDICT ON THE ADDRESS. Blocks Next,
+        // like the server's own `unknown`, and says which thing broke.
+        render("unknown", "Could not reach the terminal to check the address (" + error + ").", false);
+      });
+  }
+
+  field.addEventListener("input", function () {
+    // DISABLED THE INSTANT THE FIELD CHANGES, before the check is even scheduled.
+    // Otherwise a customer who edits a green address has a brief window in which
+    // Next is still enabled against the OLD verdict, and a fast click lands a swap
+    // on an address nothing checked.
+    if (submit) submit.disabled = true;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(check, ADDRESS_CHECK_DELAY_MS);
+  });
+
+  // AND ON LOAD, because the field can arrive non-empty: the server re-renders the
+  // step with the previous answer when a later step sends the customer back. An
+  // unchecked value sitting in a field beside an enabled button is the state this
+  // whole function exists to prevent.
+  //
+  // clearBrowserFilledPayoutAddress() runs first and empties a browser-filled value
+  // (the 2026-10-01 Brave incident, in that function's own comment), so a field that
+  // is still non-empty here holds something the SERVER put there.
+  if (field.value.trim()) {
+    check();
+  } else if (submit) {
+    submit.disabled = true;
+  }
+}
+
+
+wirePayoutAddressVerdict();

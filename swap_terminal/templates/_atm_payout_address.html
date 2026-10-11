@@ -42,13 +42,48 @@
 #}
 <div class="field">
   <label for="payout_address">Your {{ answers.to_asset }} address</label>
+  {#
+    data-asset IS WHAT static/script.js READS, and it is rendered rather than
+    hardcoded or inferred: the chain is the server's answer (answers.to_asset) and
+    the browser must not have a second opinion about which chain this field is for.
+    A mismatch would check the address against the wrong chain and render a green
+    check for an address on another one -- which is the shape of the 2026-10-01
+    incident in the comment above, where a Bitcoin testnet address passed a Gridcoin
+    check because the two share a version byte.
+  #}
   <input id="payout_address" name="payout_address" type="text"
          value="{{ answers.payout_address or '' }}"
+         data-asset="{{ answers.to_asset }}"
          autocomplete="one-time-code" spellcheck="false"
          class="mono" required>
+  {#
+    THE VERDICT LANDS HERE. Empty on render and filled by script.js from
+    POST /api/address/check, which runs modules/address_authority's local decode AND
+    the chain's own validator -- both halves the operator asked for, in one call.
+
+    IT IS EMPTY IN THE HTML AND NOT PRE-FILLED WITH "unchecked", deliberately. A
+    server-rendered verdict would be a SECOND verdict, computed at a different moment
+    from the one the button reads, and the two could disagree for exactly as long as a
+    customer takes to look. The one rule this file has carried since it was written is
+    that the verdict is address_authority's and not this screen's; the live check keeps
+    that by asking, and the button is disabled until it has an answer.
+  #}
+  <p id="payout_address_verdict" class="address-verdict empty" role="status"></p>
   <p class="field-note">This is where the {{ answers.to_asset }} goes. It is checked against
-     {{ answers.to_asset }}'s own rules before you can go on, but nothing can check that it is
-     <em>yours</em> -- paste it from your wallet rather than typing it.</p>
+     {{ answers.to_asset }}'s own rules AND with the {{ answers.to_asset }} network itself
+     before you can go on, but nothing can check that it is <em>yours</em> -- paste it from
+     your wallet rather than typing it.</p>
 </div>
 
-<button type="submit" class="primary">Next</button>
+{#
+  DISABLED IN THE MARKUP, not only by script.js. A customer with JavaScript blocked
+  would otherwise get an always-enabled button and no verdict at all -- the exact
+  state before this change, reached by a different route. script.js enables it only
+  when the server says may_proceed, so no-JS means no submit, which is a refusal and
+  not a silent pass.
+
+  THE SERVER STILL CHECKS EVERYTHING. refuse_unusable_payout_address() runs on the
+  POST regardless of what the browser did, and this button is a courtesy on top of
+  it -- never the gate. A disabled attribute is one devtools click from gone.
+#}
+<button type="submit" class="primary" disabled>Next</button>

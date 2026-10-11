@@ -2200,6 +2200,89 @@ h2:target {
 }
 
 /* ===========================================================================
+ * THE IN-SITU ADDRESS VERDICT. Operator, 2026-10-11: "any address must be
+ * verfied on the UI in situ after being entered with a green check or a red x
+ * and not being able to proceed."
+ *
+ * FOUR STATES AND NOT TWO, and the palette already had the distinction this
+ * needs. --halted (red) is "this is wrong"; --unknown (purple) is "nobody
+ * answered", which is what the terminal has when its own daemon is unreachable.
+ * Rendering that as a red x would blame the customer's clipboard for our outage
+ * -- the exact collapse chains/base.py has been burned by twice (validate_address
+ * returning False for a daemon that was down until 2026-09-24, owns_address
+ * returning None for both a transport failure and a missing field until
+ * 2026-10-01). So the third color is not decoration; it is the third answer.
+ *
+ * THE GLYPH IS CSS AND THE SENTENCE IS THE SERVER'S. ::before carries the mark
+ * so services/address_check.py never has to name a character, and the text node
+ * is `headline` verbatim. A template that chose its own glyph from its own
+ * reading of `state` would be a second opinion about a fund-path verdict.
+ *
+ * COLOR IS NEVER THE ONLY CHANNEL. Each state has a distinct glyph as well, and
+ * the element carries role="status" so a screen reader is told the verdict
+ * changed. A gate whose reason is conveyed only by hue is a gate roughly 8% of
+ * men cannot read.
+ * ======================================================================== */
+.address-verdict {
+  margin: var(--s1) 0 0;
+  font-size: var(--t-sm);
+  line-height: 1.45;
+  display: flex;
+  gap: var(--s1);
+  align-items: baseline;
+}
+
+/* Nothing typed yet: the element holds no text and must take no vertical space,
+   so the field does not jump as the first character arrives. */
+.address-verdict.empty {
+  display: none;
+}
+
+.address-verdict::before {
+  font-weight: 700;
+  /* The glyph must not shrink or wrap away from its sentence. */
+  flex: 0 0 auto;
+}
+
+.address-verdict.good {
+  color: var(--ok);
+}
+.address-verdict.good::before {
+  content: "\2713";  /* CHECK MARK */
+}
+
+.address-verdict.bad {
+  color: var(--halted);
+}
+.address-verdict.bad::before {
+  content: "\2717";  /* BALLOT X */
+}
+
+/* NOT RED. See the block comment above: this is our daemon, not their address. */
+.address-verdict.unknown {
+  color: var(--unknown);
+}
+.address-verdict.unknown::before {
+  content: "?";
+}
+
+.address-verdict.checking {
+  color: var(--working);
+}
+.address-verdict.checking::before {
+  content: "\22EF";  /* MIDLINE HORIZONTAL ELLIPSIS */
+}
+
+/* THE DISABLED NEXT BUTTON HAS TO LOOK DISABLED. It is disabled in the markup and
+   stays that way until the server says may_proceed, so a customer meets it in that
+   state on every render of this step -- a primary button that looks pressable and
+   does nothing reads as a broken page rather than as a gate. */
+button.primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ===========================================================================
  * THE OPERATOR SURFACE'S TAB STRIP. Operator, 2026-10-08: "make all the admin
  * pages under one admin page that is found with tabls or hyperlinks."
  *

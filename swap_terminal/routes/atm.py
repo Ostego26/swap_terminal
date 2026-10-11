@@ -78,9 +78,10 @@ from chains.amount_solve import (
     quantize_down,
 )
 from db import get_db
-from flask import Blueprint, current_app, redirect, render_template, request, url_for
+from flask import Blueprint, current_app, jsonify, redirect, render_template, request, url_for
 from modules.address_authority import check_address
 from modules.htlc_assets import custodial_customer_note
+from services.address_check import live_address_verdict
 from services.pair_view import (
     CUSTOMER_STATES,
     allowed_pair_rows,
@@ -521,3 +522,44 @@ def _commit(answers: dict):
     except Exception as error:  # noqa: BLE001 -- checked: every refusal on this path raises, and the caller is a customer who must be shown the sentence rather than a 500. The message is the service's own and says which gate refused; nothing is swallowed, because it is rendered.
         return render_step(answers, str(error))
     return redirect(url_for("ui.swap_page", swap_id=swap["id"]))
+
+
+@bp.post("/api/address/check")
+def check_address_route():
+    """The in-situ verdict for the address the customer is typing. Operator, 2026-10-11.
+
+        "any address must be verfied on the UI in situ after being entered with a
+         green check or a red x and not being able to proceed. it should be both a
+         regex and a blockchain check."
+
+    Both halves, one call: services/address_check.live_address_verdict() runs the
+    local decode (modules/address_authority) and the chain's own validator, and the
+    chain half is ONE RPC pass rather than two -- see chains/base.AddressReport for
+    why that mattered enough to change.
+
+    THE SAME CODE create_swap WILL RUN. Not a second opinion for the browser: a green
+    check that is followed by a refusal is worse than no check, so the verdict here and
+    the verdict at submit come from one function. templates/_atm_payout_address.html's
+    standing rule holds -- the browser gets NO address rules of its own.
+
+    POST AND NOT GET, deliberately. A customer's payout address is not a secret but it
+    IS theirs, and a GET would put it in the access log, the browser history and any
+    proxy in between. Rule 14's "never print a secret" is about keys; this is the
+    weaker neighbour of the same habit, and it costs nothing to honor.
+
+    NEVER 500s, WHICH IS THE WHOLE POINT. live_address_verdict() is documented never to
+    raise and turns every failure into a state plus a sentence, so a keystroke against
+    an unreachable daemon renders "could not be confirmed" beside the field instead of
+    an internal server error -- the failure the operator hit on their GRC -> LTC
+    attempt, arriving one step earlier where it is still recoverable.
+    """
+    payload = request.get_json(silent=True) or {}
+    verdict = live_address_verdict(
+        current_app.config["ADAPTERS"],
+        str(payload.get("asset", "")).strip().upper(),
+        str(payload.get("address", "")),
+    )
+    # _asdict() rather than a hand-built dict: a field added to LiveAddressVerdict
+    # reaches the browser without a second place needing the edit (rule 8), and the
+    # names are the ones the tests assert on.
+    return jsonify(verdict._asdict()), 200
