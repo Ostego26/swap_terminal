@@ -882,9 +882,16 @@ def test_no_exit_added_later_can_skip_the_arming_report():
     main = next(node for node in ast.walk(ast.parse(source))
                 if isinstance(node, ast.FunctionDef) and node.name == "main")
 
+    # EITHER REPORTER COUNTS, and the second was added when `--arm` grew its own exit.
+    # The gate's claim is that no exit leaves the operator thinking the 17 variables are
+    # the whole story -- and an exit that is ABOUT arming carries that by construction.
+    # Accepting only say_arming() would have forced the --arm run to print the full
+    # four-chain survey as well, which is two answers to one question on one screen.
+    REPORTERS = {"say_arming", "say_arm_result"}
+
     def calls_arming(statements):
         return any(isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
-                   and getattr(stmt.value.func, "id", "") == "say_arming"
+                   and getattr(stmt.value.func, "id", "") in REPORTERS
                    for stmt in statements)
 
     returns = 0
@@ -1294,3 +1301,192 @@ def test_the_conf_reader_uses_the_parser_that_already_exists(tmp_path, env_file,
         "re-implemented here instead of coming from the shared parser"
     )
     assert awkward not in capsys.readouterr().out
+
+
+# ===========================================================================
+# ARMING A CHAIN BY CHANGING COMPOSE_FILE, rather than by hand-editing a file
+# that holds a wallet passphrase
+# ===========================================================================
+#
+# 2026-10-11. Arming ICP is one change to one line of .env. What the operator got was
+#
+#     :docker-compose.web.armed-icp.yml
+#
+# in a code block, which they pasted at a shell prompt, which said "command not found".
+# Then they recreated the container -- unarmed, because the line had never changed.
+#
+# THE DEFECT WAS THAT THERE WAS NOTHING TO RUN. .env holds GRIDCOIN_WALLET_PASSPHRASE,
+# and asking somebody to hand-append a colon-separated fragment to one line of it is
+# asking for the edit that takes the passphrase with it. write_env() has done this
+# safely since the file was written.
+
+
+@pytest.fixture
+def env_file_with_overlays(env_file, tmp_path):
+    """env_file, plus the REAL arming overlays copied in where REPO_ROOT now points.
+
+    COPIED RATHER THAN PATCHED, so arm_verdict() runs the real glob over the real file
+    contents -- including the prose that quotes `${VAR:?}` while explaining the
+    one-required-variable rule, which is what arming_overlays()' comment filter exists
+    for. Monkeypatching arming_overlays() to return a literal list would make these
+    tests pass with that filter deleted.
+
+    THE env_file FIXTURE POINTS REPO_ROOT AT tmp_path, which it must: write_env() puts
+    its temp file there before the rename, so a real REPO_ROOT would mean a test writing
+    `.env.new.*` into the checkout. That redirect is also why the glob found nothing
+    until this fixture existed -- four arming tests failed with "this tree has (none)",
+    which is the fixture telling the truth about an empty directory.
+    """
+    real_root = pathlib.Path(configure_env.__file__).resolve().parent
+    copied = 0
+    for overlay in sorted(real_root.glob("docker-compose.web.armed-*.yml")):
+        (tmp_path / overlay.name).write_text(overlay.read_text())
+        copied += 1
+    assert copied >= 3, f"only {copied} overlay(s) copied; this fixture has stopped measuring"
+    return env_file
+
+
+def test_arming_appends_the_overlay_and_keeps_the_rest_of_compose_file(env_file_with_overlays):
+    """MUTATION: build the new value from the overlay alone instead of appending.
+
+    COMPOSE_FILE is ordered and cumulative: the base file defines the services, the
+    overlays add to them. Replacing rather than appending would disarm GRC in the act of
+    arming ICP -- and the operator's .env has carried armed-grc all day.
+    """
+    env_file_with_overlays.write_text(
+        "COMPOSE_FILE=docker-compose.yml:docker-compose.web.armed-grc.yml\n"
+        "GRIDCOIN_WALLET_PASSPHRASE='must survive'\n"
+    )
+    already = configure_env.existing_assignments()
+
+    value, why = configure_env.arm_verdict("icp", already)
+
+    assert value == ("docker-compose.yml:docker-compose.web.armed-grc.yml"
+                     ":docker-compose.web.armed-icp.yml"), value
+    assert "armed-grc" in value, "arming ICP disarmed GRC"
+    assert "ICP" in why
+    # And writing it keeps every other line, which is the reason to go through write_env.
+    configure_env.write_env({configure_env.COMPOSE_FILE_VARIABLE: value})
+    written = env_file_with_overlays.read_text()
+    assert "GRIDCOIN_WALLET_PASSPHRASE='must survive'" in written
+    assert written.count("COMPOSE_FILE") == 1, "two COMPOSE_FILE lines; the effective value now "
+    "depends on which parser reads it"
+
+
+def test_arming_is_refused_when_the_overlays_own_variable_is_unset(env_file_with_overlays):
+    """THE GUARD THAT MATTERS. MUTATION: drop the `variable and not already.get` branch.
+
+    compose interpolates EVERY variable in EVERY file it is given BEFORE it looks at
+    which service was named. So a COMPOSE_FILE naming armed-sol with no
+    SOL_PAYOUT_KEYPAIR_HOST_FILE does not break the SOL payout -- it breaks EVERY docker
+    compose command in the project, `up` and `ps` and `config` alike. That defect landed
+    twice in one day on 2026-10-05.
+
+    AND WRITING IT TO .env WOULD MAKE IT SURVIVE THE SHELL, which is worse than the
+    original: the next command fails and nothing typed in that shell explains why.
+    """
+    env_file_with_overlays.write_text("COMPOSE_FILE=docker-compose.yml\n")
+    already = configure_env.existing_assignments()
+
+    value, why = configure_env.arm_verdict("sol", already)
+
+    assert value == "", "armed SOL with no keypair variable, breaking every compose command"
+    assert "SOL_PAYOUT_KEYPAIR_HOST_FILE" in why
+    assert "every docker compose command" in why.lower()
+    # ICP takes no variable, so the same call for ICP must SUCCEED on the same .env --
+    # which is what makes this a test of the guard rather than of refusing everything.
+    assert configure_env.arm_verdict("icp", already)[0], "ICP needs no variable and was refused"
+
+
+def test_arming_a_chain_that_is_already_armed_changes_nothing(env_file_with_overlays):
+    """Rule 13: "skipped" and "success" must not share an output.
+
+    A second --arm is the ordinary case -- an operator who cannot remember whether they
+    ran it. Appending a second copy of the same overlay is what compose would then be
+    handed, and the same file twice is a state the overlays' own headers warn about.
+    """
+    env_file_with_overlays.write_text("COMPOSE_FILE=docker-compose.yml:docker-compose.web.armed-icp.yml\n")
+    already = configure_env.existing_assignments()
+
+    value, why = configure_env.arm_verdict("icp", already)
+
+    assert value == "", "arming an armed chain produced a new value"
+    assert "already armed" in why
+
+
+def test_arming_an_unknown_chain_lists_the_ones_that_exist(env_file_with_overlays):
+    """MUTATION: return a bare refusal with no list.
+
+    "BTC has no arming overlay" leaves an operator guessing which chains do. The list is
+    derived from the overlays on disk, so it cannot name one that was deleted.
+    """
+    env_file_with_overlays.write_text("COMPOSE_FILE=docker-compose.yml\n")
+    value, why = configure_env.arm_verdict("doge", configure_env.existing_assignments())
+
+    assert value == ""
+    for armed in ("GRC", "ICP", "SOL", "XRP"):
+        assert armed in why, f"the refusal does not say {armed} can be armed: {why}"
+
+
+def test_a_dry_run_arm_writes_nothing_and_says_so(env_file_with_overlays, monkeypatch, capsys):
+    """The default is still to report. MUTATION: drop the `args.apply` guard on the write."""
+    env_file_with_overlays.write_text("COMPOSE_FILE=docker-compose.yml\n")
+    before = env_file_with_overlays.read_text()
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--arm", "icp"])
+
+    assert configure_env.main() == 0
+
+    assert env_file_with_overlays.read_text() == before, "--arm without --apply modified .env"
+    assert "Nothing was written" in capsys.readouterr().out
+
+
+def test_an_apply_arm_writes_and_demands_a_recreate(env_file_with_overlays, monkeypatch, capsys):
+    """End to end through main(). MUTATION: drop the recreate line from say_arm_result().
+
+    AN ALREADY-RUNNING CONTAINER WAS CREATED FROM THE OLD COMPOSE_FILE. Writing .env
+    changes which files the NEXT command reads and nothing about the process that is
+    serving -- which the operator hit on this exact change: they recreated the container
+    before the line was edited, so it came up unarmed, and nothing said why.
+    """
+    env_file_with_overlays.write_text("COMPOSE_FILE=docker-compose.yml\n")
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--arm", "icp", "--apply"])
+
+    assert configure_env.main() == 0
+
+    assert "armed-icp" in env_file_with_overlays.read_text()
+    printed = capsys.readouterr().out
+    assert "--force-recreate web" in printed, "the required next step was not named"
+    assert "custody posture" in printed
+    # And it does not claim the payout works, which it never has on any chain.
+    assert "never been exercised" in printed
+
+
+def test_a_refused_arm_exits_nonzero(env_file_with_overlays, monkeypatch, capsys):
+    """MUTATION: `return 0` unconditionally.
+
+    An exit code is what a script wrapping this reads. A refusal that exits 0 makes
+    `configure_env.py --arm sol --apply && docker compose up -d web` bring up a stack
+    whose compose files name a file whose variable is unset -- which fails on the next
+    command, after the && has already succeeded.
+    """
+    env_file_with_overlays.write_text("COMPOSE_FILE=docker-compose.yml\n")
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--arm", "sol", "--apply"])
+
+    assert configure_env.main() == 1
+    assert "REFUSED" in capsys.readouterr().out
+    assert "armed-sol" not in env_file_with_overlays.read_text(), "a refused arm wrote to .env anyway"
+
+
+def test_compose_files_parses_a_quoted_and_an_unquoted_line(env_file_with_overlays):
+    """write_env() single-quotes what it writes; a hand-edited line may not be.
+
+    MUTATION: drop the .strip("'\\"").  Two readers of one file disagreeing about its
+    syntax is rule 8's shape in the small, and the operator's .env has lines of both
+    kinds in it right now -- COMPOSE_FILE unquoted from a hand edit,
+    GRIDCOIN_WALLET_PASSPHRASE single-quoted by set_grc_passphrase.sh.
+    """
+    for line in ("COMPOSE_FILE=docker-compose.yml:a.yml\n",
+                 "COMPOSE_FILE='docker-compose.yml:a.yml'\n"):
+        env_file_with_overlays.write_text(line)
+        parsed = configure_env.compose_files(configure_env.existing_assignments())
+        assert parsed == ["docker-compose.yml", "a.yml"], f"{line!r} parsed as {parsed}"

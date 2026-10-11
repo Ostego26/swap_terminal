@@ -957,6 +957,121 @@ def _port_help(variable: str) -> str:
     return f"{variable} -- could not be discovered. Leave BLANK to leave it unset."
 
 
+#: The one variable that selects which compose files the project uses. Not a chain
+#: variable, which is why it is not in every_variable_this_tool_can_set() -- discovery
+#: cannot find it and nothing is "still unset" about it.
+COMPOSE_FILE_VARIABLE = "COMPOSE_FILE"
+
+
+def compose_files(already: dict) -> list[str]:
+    """The current COMPOSE_FILE as a list, in order, with empties dropped.
+
+    THE SEPARATOR IS A COLON and that is compose's own convention on this platform,
+    the same one .env already carries:
+
+        COMPOSE_FILE=docker-compose.yml:docker-compose.web.armed-grc.yml
+
+    Quotes are stripped because .env values written by write_env() are single-quoted and
+    a hand-edited line may not be, and both have to parse the same way -- two readers of
+    one file disagreeing about its syntax is rule 8's shape in the small.
+    """
+    raw = (already.get(COMPOSE_FILE_VARIABLE) or "").strip().strip("'\"")
+    return [part for part in raw.split(":") if part]
+
+
+def arm_verdict(chain: str, already: dict) -> tuple[str, str]:
+    """The COMPOSE_FILE this chain's overlay should produce, and why -- or ("", why not).
+
+    =========================================================================
+    THE OPERATOR HAD TO HAND-EDIT A FILE HOLDING THEIR WALLET PASSPHRASE, AND
+    I GAVE THEM A FRAGMENT TO PASTE INSTEAD OF A COMMAND
+    =========================================================================
+
+    2026-10-11. Arming ICP is one change to one line of .env. What they got from me was
+
+        :docker-compose.web.armed-icp.yml
+
+    in a code block, which they pasted at a shell prompt, which said "command not
+    found". Then they recreated the container, which recreated it UNARMED, because the
+    line had never changed. That was the third fragment-in-a-code-block of the day and
+    the standing instruction against it is explicit.
+
+    THE REAL DEFECT IS THAT THERE WAS NOTHING TO RUN. .env holds
+    GRIDCOIN_WALLET_PASSPHRASE. Asking somebody to edit that file by hand, in a
+    terminal, to append a colon-separated fragment to the end of one line, is asking
+    for the edit that takes the passphrase with it -- and write_env() already does
+    exactly this safely: atomic through a temp file and a rename, mode 600 with the
+    umask set before the file exists, every line it does not own carried through byte
+    for byte, and a name it owns REPLACED rather than duplicated.
+
+    TWO COMPOSE_FILE LINES IS THE FAILURE A HAND EDIT INVITES. dotenv parsers disagree
+    about which wins, so the effective value would depend on the reader -- and compose
+    and config.read_env_file() are two different readers of this same file.
+    tests/test_configure_env.py::test_a_name_it_owns_is_replaced_and_not_duplicated
+    already pins that for every other variable.
+
+    IT REFUSES WHEN THE OVERLAY'S REQUIRED VARIABLE IS UNSET, and that guard is the
+    reason this returns a verdict rather than just doing it. compose interpolates EVERY
+    variable in EVERY file it is given BEFORE it looks at which service was named, so a
+    COMPOSE_FILE naming docker-compose.web.armed-sol.yml with no
+    SOL_PAYOUT_KEYPAIR_HOST_FILE set does not break the SOL payout -- it breaks EVERY
+    docker compose command in the project, including `up`, `ps` and `config`. That
+    defect landed twice in one day on 2026-10-05 and
+    tests/test_docker_build_context.py carries the measurement. Writing it into .env
+    would make it survive the shell, which is worse than the original: the operator's
+    next command fails and nothing they typed in that shell explains why.
+
+    ARMING IS STILL AN ACT. The overlays argue at length that naming the file should
+    take a deliberate step rather than being inherited from whatever happens to be
+    exported, and `--arm icp` is that step: explicit, named, and in shell history. What
+    it changes is that the step PERSISTS -- which is what the operator has asked for
+    all day, and what their .env already does for armed-grc.
+    """
+    overlays = {asset: (filename, variable) for asset, filename, variable in arming_overlays()}
+    asset = chain.strip().upper()
+    if asset not in overlays:
+        return "", (f"{asset} has no arming overlay. There is one per chain that needs a signing "
+                    f"credential, and this tree has {', '.join(sorted(overlays)) or '(none)'}.")
+    filename, variable = overlays[asset]
+    if variable and not already.get(variable):
+        return "", (f"{asset}'s overlay {filename} requires {variable} and it is not set in .env. "
+                    f"NOTHING was changed, on purpose: compose interpolates every variable in every "
+                    f"file it is given before it looks at which service was named, so arming "
+                    f"{asset} without it would not break {asset} -- it would break EVERY docker "
+                    f"compose command in this project. Set {variable} first.")
+    current = compose_files(already)
+    if filename in current:
+        return "", f"{asset} is already armed: {filename} is in {COMPOSE_FILE_VARIABLE} already."
+    if not current:
+        # BASE FIRST, because an overlay alone defines no services. A COMPOSE_FILE of
+        # just the overlay would leave compose with a `web` that has volumes and no
+        # image -- and .env with no COMPOSE_FILE at all is a state a fresh checkout is
+        # in, so this is reachable rather than defensive.
+        current = ["docker-compose.yml"]
+    return ":".join([*current, filename]), (
+        f"{asset} armed by appending {filename} to {COMPOSE_FILE_VARIABLE}"
+    )
+
+
+def say_arm_result(chain: str, value: str, why: str, *, apply: bool) -> None:
+    """What arming did or refused to do, and the step that is REQUIRED after it."""
+    say(f"  ARMING {chain.strip().upper()}")
+    if not value:
+        say(f"    REFUSED: {why}")
+        return
+    say(f"    {why}")
+    say(f"    {COMPOSE_FILE_VARIABLE} becomes {value}")
+    if not apply:
+        say("    Nothing was written. Re-run with --apply to change .env.")
+        return
+    say("")
+    say("  NOT YET ARMED IN ANY RUNNING CONTAINER. .env selects the compose files for the")
+    say("  NEXT command; the container that is running was created from the old list:")
+    say("      docker compose up -d --force-recreate web")
+    say("  Arming is a custody posture. Nothing here signed anything, and the payout path")
+    say("  for this chain has still never been exercised on a chain.")
+
+
 def say_banner(apply: bool, already: dict) -> None:
     """What this run is about to do, before it does any of it (rule 14).
 
@@ -1335,11 +1450,29 @@ def main() -> int:
               "Gridcoin mainnet wallet is typically a live staking wallet. Requires "
               "--read-daemon-confs."),
     )
+    parser.add_argument(
+        "--arm", metavar="CHAIN", default="",
+        help=("Add that chain's docker-compose.web.armed-<chain>.yml to COMPOSE_FILE in .env, so "
+              "the container can SIGN that chain's payouts. Needs --apply to write. REFUSED when "
+              "the overlay's own required variable is unset, because compose would then fail every "
+              "command in the project rather than just that chain's payout."),
+    )
     args = parser.parse_args()
 
     secrets = secret_names()
     already = existing_assignments()
     say_banner(args.apply, already)
+
+    # ARMING IS ITS OWN RUN AND RETURNS, rather than being folded into discovery. It
+    # changes a custody posture and nothing else, so mixing it with a credential sweep
+    # would make one command do two unrelated things to .env -- and the operator reading
+    # the output could not tell which half did what (rule 14).
+    if args.arm:
+        value, why = arm_verdict(args.arm, already)
+        say_arm_result(args.arm, value, why, apply=args.apply)
+        if value and args.apply:
+            write_env({COMPOSE_FILE_VARIABLE: value})
+        return 0 if value else 1
 
     discovered = discover_all(already)
 
