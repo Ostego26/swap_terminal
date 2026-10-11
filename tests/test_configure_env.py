@@ -491,3 +491,243 @@ def test_every_help_string_tells_the_operator_what_to_do(env_file):
     # A name with no entry anywhere must still get a usable prompt rather than a KeyError:
     # a crash in a configuration tool is worse than an unhelpful prompt.
     assert configure_env._port_help("SOMETHING_NEW").strip()
+
+
+# =============================================================================
+# READING CREDENTIALS OUT OF EACH DAEMON'S OWN CONF
+# =============================================================================
+#
+# Operator, 2026-10-11, after the tool prompted for six credentials: "ji don't know any
+# of those passwords". They were right not to. Measured on their host: their LTC and GRC
+# confs both carry rpcuser and rpcpassword, and ~/.bitcoin/bitcoin.conf does not exist at
+# all with bitcoind not running.
+#
+# I DECLINED TO BUILD THIS AT FIRST, citing chain-safety's "never move, copy, or read back
+# a credential", and that refusal is what left them stuck. The rule is about CLAUDE: a
+# credential must not be pulled into a conversation. A tool that runs on their machine,
+# reads their conf, writes it into their .env and never prints it is a different thing.
+# It is opt-in so the move is theirs.
+
+#: A value that must never reach stdout. The tests below assert its ABSENCE from captured
+#: output, which is the only way to test a negative about printing.
+LEAK_SENTINEL = "a-password-that-must-never-be-printed"
+
+
+@pytest.fixture
+def litecoin_conf(tmp_path, monkeypatch, env_file):
+    """A real litecoin.conf with credentials at the top level and the port in [test].
+
+    THAT LAYOUT IS THE CONVENTIONAL ONE and chains/daemon_conf.parse_daemon_conf()'s
+    docstring records why: "a regtest daemon is conventionally configured with rpcuser and
+    rpcpassword at the top level and rpcport inside [regtest], because the port differs per
+    network and the credentials do not." A fixture with everything at the top level would
+    not exercise the section logic at all.
+    """
+    conf = tmp_path / "litecoin.conf"
+    conf.write_text(
+        f"# a comment\nrpcuser=ltcuser\nrpcpassword={LEAK_SENTINEL}\n[test]\nrpcport=19332\n"
+    )
+    monkeypatch.setattr(
+        configure_env, "DAEMON_CONFS",
+        {"LTC": (str(conf), "LTC_RPC_USER", "LTC_RPC_PASS")},
+    )
+    monkeypatch.setattr(configure_env, "listening_ports", lambda: {19332})
+    return conf
+
+
+def test_a_credential_is_written_and_NEVER_printed(litecoin_conf, env_file, monkeypatch, capsys):
+    """THE ONE THAT CANNOT BE GOT WRONG. MUTATION: put the value in the reason string.
+
+    Scrollback cannot be unseen, and an operator pastes a configuration tool's output into
+    a chat or an issue without thinking about it -- this conversation is full of exactly
+    that. So the assertion is on the ABSENCE of the value from everything the tool said,
+    which is the only way to test a negative about printing.
+    """
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--apply", "--read-daemon-confs"])
+    monkeypatch.setenv("ST_ANSWERS", "")
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+
+    assert LEAK_SENTINEL not in printed, "the rpcpassword was printed to stdout"
+    assert LEAK_SENTINEL in env_file.read_text(), "the rpcpassword was not stored"
+    assert "LTC_RPC_USER='ltcuser'" in env_file.read_text()
+    # The REASON names the file and says the value was withheld, which is the same split
+    # chains/daemon_conf.describe() makes.
+    assert str(litecoin_conf) in printed
+    assert "NOT shown" in printed
+
+
+def test_the_section_comes_from_the_probed_port_not_a_fixed_default(litecoin_conf, env_file, monkeypatch, capsys):
+    """MUTATION: pass network="regtest" as chains/daemon_conf.CONF_FALLBACK_NETWORK does.
+
+    That table hardcodes regtest for LTC. The operator's litecoind answers on 19332, which
+    is TESTNET, so a fixed regtest would read the wrong section of their real conf. Here it
+    is asserted by the reason line naming the section that was actually consulted.
+    """
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--read-daemon-confs"])
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+
+    assert "[test]" in printed, (
+        "the conf was read without the section the probed port implies; 19332 is testnet and "
+        "chains/daemon_conf.CONF_FALLBACK_NETWORK would have said regtest"
+    )
+    assert "[regtest]" not in printed
+
+
+def test_gridcoin_is_refused_without_its_own_flag(tmp_path, env_file, monkeypatch, capsys):
+    """chains/daemon_conf.py excludes Gridcoin from conf resolution, and the reason is money.
+
+    Its conf is shared by mainnet and testnet, and a Gridcoin mainnet wallet is typically a
+    live staking wallet. A single --read-daemon-confs would let an operator accept that
+    without reading it, so the hazard has its own flag.
+    """
+    conf = tmp_path / "gridcoinresearch.conf"
+    conf.write_text(f"rpcuser=grcuser\nrpcpassword={LEAK_SENTINEL}\n")
+    monkeypatch.setattr(configure_env, "DAEMON_CONFS",
+                        {"GRC": (str(conf), "GRC_RPC_USER", "GRC_RPC_PASS")})
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--apply", "--read-daemon-confs"])
+    monkeypatch.setenv("ST_ANSWERS", "")
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+
+    assert "GRC_RPC_PASS" not in env_file.read_text(), "Gridcoin's credential was read without the flag"
+    assert LEAK_SENTINEL not in printed
+    assert "NOT READ" in printed
+    assert "live staking wallet" in printed, "the hazard was not stated, so the refusal is unexplained"
+    assert "--read-gridcoin-conf" in printed, "the way to proceed was not named"
+
+
+def test_gridcoin_is_read_when_its_flag_is_passed(tmp_path, env_file, monkeypatch, capsys):
+    """The opt-in works, or the refusal above is a dead end rather than a gate.
+
+    The operator's GRC testnet daemon's credentials genuinely are in that shared file, and
+    GRC_RPC_PORT is established by probing -- so the port decides which daemon they reach,
+    and chains/daemon_network.test_network_verdict() is still the backstop that refuses a
+    mainnet answer before anything is asked of a wallet.
+    """
+    conf = tmp_path / "gridcoinresearch.conf"
+    conf.write_text(f"rpcuser=grcuser\nrpcpassword={LEAK_SENTINEL}\n")
+    monkeypatch.setattr(configure_env, "DAEMON_CONFS",
+                        {"GRC": (str(conf), "GRC_RPC_USER", "GRC_RPC_PASS")})
+    monkeypatch.setattr(
+        "sys.argv", ["configure_env.py", "--apply", "--read-daemon-confs", "--read-gridcoin-conf"])
+    monkeypatch.setenv("ST_ANSWERS", "")
+
+    configure_env.main()
+
+    written = env_file.read_text()
+    assert "GRC_RPC_USER='grcuser'" in written
+    assert LEAK_SENTINEL in written
+    assert LEAK_SENTINEL not in capsys.readouterr().out
+
+
+def test_the_gridcoin_flag_alone_does_nothing_and_says_so(env_file, monkeypatch, capsys):
+    """A flag that silently did nothing would be the worst of the three outcomes.
+
+    An operator who passes only --read-gridcoin-conf has stated an intent; the tool cannot
+    act on it without the other flag, so it says that rather than appearing to comply.
+    """
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--read-gridcoin-conf"])
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+
+    assert "DOES NOTHING ON ITS OWN" in printed
+    assert "READING CREDENTIALS" not in printed
+
+
+def test_a_missing_conf_is_a_reported_result_not_a_crash(tmp_path, env_file, monkeypatch, capsys):
+    """The operator's BTC case exactly: no conf, and bitcoind not running.
+
+    A configuration tool that raised here would be unusable on precisely the host that
+    needs it, and `(none)` is a result (rule 14).
+    """
+    monkeypatch.setattr(configure_env, "DAEMON_CONFS",
+                        {"BTC": (str(tmp_path / "nothing-here.conf"), "BTC_RPC_USER", "BTC_RPC_PASS")})
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--read-daemon-confs"])
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+
+    assert "no conf at" in printed
+    assert "nothing to read" in printed
+    # And it still queues the credential as a question, so the chain is not silently lost.
+    assert "BTC_RPC_USER" in printed.split("WOULD ASK FOR", 1)[1]
+
+
+def test_an_rpcauth_only_conf_says_a_hash_is_not_a_password(tmp_path, env_file, monkeypatch, capsys):
+    """rpcauth= is a salted hash and cannot be used as a password. Saying so is the fix.
+
+    chains/base.py authenticates with auth=(user, password) and has no rpcauth path, so a
+    conf using it has no usable credential here -- and an operator told only "no
+    rpcpassword" would go looking for a line that is deliberately absent.
+    """
+    conf = tmp_path / "bitcoin.conf"
+    conf.write_text("rpcauth=someuser:deadbeef$cafebabe\n")
+    monkeypatch.setattr(configure_env, "DAEMON_CONFS",
+                        {"BTC": (str(conf), "BTC_RPC_USER", "BTC_RPC_PASS")})
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--read-daemon-confs"])
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+
+    assert "has no rpcuser, rpcpassword" in printed
+    assert "rpcauth" in printed and "HASH" in printed
+
+
+def test_a_value_read_from_a_conf_is_not_ALSO_asked_for(litecoin_conf, env_file, monkeypatch, capsys):
+    """Rule 13: 'skipped' plus 'success' in one output is a defect in the output.
+
+    MUTATION: drop `name not in values` from the `needed` filter.
+
+    The first real run of --read-daemon-confs printed, in order: the credential read from
+    the conf, a prompt for it, "skipped LTC_RPC_USER (left unset)", and then LTC_RPC_USER
+    in the WROTE list. Four lines, each true of the step that printed it, saying three
+    incompatible things -- and the prompt was worse than the wording: an operator pressing
+    enter past a value that was already found has been asked a question with no right
+    answer.
+    """
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--apply", "--read-daemon-confs"])
+    monkeypatch.setenv("ST_ANSWERS", "")
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+
+    assert "skipped LTC_RPC_USER" not in printed, (
+        "a value read from the conf was also asked for and then reported as skipped, while "
+        "being written"
+    )
+    assert "LTC_RPC_USER" in env_file.read_text()
+
+
+def test_the_conf_reader_uses_the_parser_that_already_exists(tmp_path, env_file, monkeypatch, capsys):
+    """Rule 8: chains/daemon_conf.parse_daemon_conf() owns the two things this gets wrong.
+
+    A `#` ONLY STARTS A COMMENT AT THE START OF A LINE, which that module records against a
+    measurement: "an rpcpassword containing `#` is both legal and likely from a generator.
+    Stripping inline would silently truncate it, and the failure would arrive as a 401 from
+    the daemon with nothing pointing here."
+
+    So a password containing `#` must survive intact, and that property comes free from
+    using the shared parser -- which is the point. A hand-rolled reader here would be the
+    second place to get it wrong.
+    """
+    conf = tmp_path / "litecoin.conf"
+    awkward = "pass#with$hash"
+    conf.write_text(f"rpcuser=ltcuser\nrpcpassword={awkward}\n")
+    monkeypatch.setattr(configure_env, "DAEMON_CONFS",
+                        {"LTC": (str(conf), "LTC_RPC_USER", "LTC_RPC_PASS")})
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--apply", "--read-daemon-confs"])
+    monkeypatch.setenv("ST_ANSWERS", "")
+
+    configure_env.main()
+
+    assert f"LTC_RPC_PASS='{awkward}'" in env_file.read_text(), (
+        "a password containing '#' was truncated, which means the inline-comment rule was "
+        "re-implemented here instead of coming from the shared parser"
+    )
+    assert awkward not in capsys.readouterr().out

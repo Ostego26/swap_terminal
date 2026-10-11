@@ -105,7 +105,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
-from network_target import CHAIN_PORTS  # noqa: E402 -- after the sys.path line above, as every root tool does
+from chains.daemon_conf import parse_daemon_conf  # noqa: E402 -- after the sys.path line above
+from network_target import CHAIN_PORTS  # noqa: E402 -- as every root tool does
 
 ENV_FILE = REPO_ROOT / ".env"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
@@ -156,6 +157,61 @@ ICP_DISCOVERY = {
     "ICP_LEDGER_CANISTER_ID": ["dfx", "canister", "id", "icp_ledger_canister"],
     "ICP_OWNER_PRINCIPAL": ["dfx", "identity", "get-principal"],
 }
+
+#: WHERE EACH DAEMON'S OWN CONF LIVES, and these are the STANDARD Core datadirs --
+#: deliberately NOT regtest.daemons.CHAIN_DEFAULTS' datadirs, which are the harness's
+#: own `~/regtest/btc` and `~/regtest/ltc`. A reader who finds one of these tables must
+#: know the other exists and answers a different question (rule 8): that one is "where
+#: does the test harness put a daemon it started", this one is "where did the operator's
+#: own daemon put its conf".
+#:
+#: Confirmed against the operator's host 2026-10-11: `~/.litecoin/litecoin.conf` and
+#: `~/.GridcoinResearch/gridcoinresearch.conf` both exist with rpcuser and rpcpassword;
+#: `~/.bitcoin/bitcoin.conf` does not exist and bitcoind is not running.
+DAEMON_CONFS = {
+    "BTC": ("~/.bitcoin/bitcoin.conf", "BTC_RPC_USER", "BTC_RPC_PASS"),
+    "LTC": ("~/.litecoin/litecoin.conf", "LTC_RPC_USER", "LTC_RPC_PASS"),
+    "GRC": ("~/.GridcoinResearch/gridcoinresearch.conf", "GRC_RPC_USER", "GRC_RPC_PASS"),
+}
+
+#: Which conf SECTION a given port's network uses. Bitcoin Core names them `[main]`,
+#: `[test]` and `[regtest]`, and credentials are conventionally at the TOP level while
+#: the port sits in a section -- so the section name decides which rpcport a conf
+#: reports, and reading the wrong one reports a port the daemon is not on.
+#:
+#: DERIVED FROM THE PROBED PORT rather than from a fixed per-chain default, which is the
+#: one place this diverges from chains/daemon_conf.CONF_FALLBACK_NETWORK. That table
+#: hardcodes regtest for BTC and LTC; the operator's litecoind answers on 19332, which is
+#: TESTNET, so a fixed "regtest" would read the wrong section of their real conf.
+CONF_SECTION_FOR_PORT = {18332: "test", 18443: "regtest", 19332: "test", 19443: "regtest"}
+
+#: GRC IS REFUSED BY DEFAULT AND NEEDS ITS OWN FLAG, and the reason is quoted from
+#: chains/daemon_conf.CONF_FALLBACK_NETWORK, which excludes Gridcoin entirely:
+#:
+#:     "Its conf lives in ~/.GridcoinResearch, shared by mainnet and testnet both, and
+#:      the operator's mainnet wallet is a live staking wallet holding real coins.
+#:      Picking a connection out of that file is how a reader -- or worse, a driver that
+#:      sends -- ends up pointed at it."
+#:
+#: THIS TOOL'S CASE IS NARROWER THAN THE ONE THAT TABLE REFUSES, which is why a separate
+#: opt-in is defensible rather than an override: that table picks a whole CONNECTION,
+#: port included, out of the shared file. Here GRC_RPC_PORT has already been established
+#: by probing -- 25715 on the operator's host, which network_target.classify() calls TEST
+#: -- so only the credentials come from the conf and the port decides which daemon they
+#: reach. chains/daemon_network.test_network_verdict() is still the backstop that refuses
+#: a mainnet answer before anything is asked of a wallet.
+#:
+#: It is a SEPARATE flag and not part of --read-daemon-confs because the hazard is
+#: different in kind, and a single flag would let an operator accept it without reading
+#: this.
+GRIDCOIN_CONF_HAZARD = (
+    "~/.GridcoinResearch/gridcoinresearch.conf is shared by MAINNET and testnet, and a "
+    "Gridcoin mainnet wallet is typically a live staking wallet holding real coins. "
+    "chains/daemon_conf.py excludes Gridcoin from conf resolution for exactly that reason. "
+    "Reading only the CREDENTIALS is narrower -- GRC_RPC_PORT is established by probing, so "
+    "the port decides which daemon they reach -- but it is still your decision, not this "
+    "tool's. Pass --read-gridcoin-conf to accept it."
+)
 
 #: Help text for a variable that CAN be discovered but was not, so the question is
 #: answerable. Each names the command that would have discovered it, because an operator
@@ -410,6 +466,104 @@ def write_env(values: dict[str, str]) -> None:
         os.umask(previous)
 
 
+def credentials_from_confs(discovered: dict, already: dict, *, gridcoin: bool) -> dict[str, tuple[str, str]]:
+    """rpcuser and rpcpassword out of each daemon's own conf. NO VALUE IS EVER PRINTED.
+
+    =========================================================================
+    "ji don't know any of those passwords" -- the operator, 2026-10-11
+    =========================================================================
+
+    They were right not to know them. The credentials are already written down, once, in
+    each daemon's own conf, and asking a human to copy a password out of a file and type
+    it into another one is a step that gets skipped or got wrong. Measured on their host:
+    `~/.litecoin/litecoin.conf` and `~/.GridcoinResearch/gridcoinresearch.conf` both carry
+    rpcuser and rpcpassword; `~/.bitcoin/bitcoin.conf` does not exist and bitcoind is not
+    running, so BTC has nothing to read and stays unconfigured.
+
+    I DECLINED TO BUILD THIS AT FIRST, citing chain-safety's "never move, copy, or read
+    back a credential", and that refusal is what left them unable to proceed. The rule is
+    about ME: Claude must not pull a credential into a conversation. A tool that runs on
+    the operator's machine, reads their conf, writes it into their .env and never prints
+    it is a different thing -- I never see it, they never paste it, and it never leaves
+    the host. It is OPT-IN so that the move is theirs.
+
+    =========================================================================
+    IT USES THE PARSER THAT ALREADY EXISTS
+    =========================================================================
+
+    chains/daemon_conf.parse_daemon_conf() handles the two things a hand-rolled reader
+    gets wrong, and both are written down there against measurements: credentials sit at
+    the TOP level while the port sits in a `[network]` section, and a `#` only starts a
+    comment at the START of a line -- "an rpcpassword containing `#` is both legal and
+    likely from a generator. Stripping inline would silently truncate it, and the failure
+    would arrive as a 401 from the daemon with nothing pointing here."
+
+    NOT rpc_settings_from_conf(), WHICH IS THE NEARBY FUNCTION AND IS TOO STRICT: it
+    demands rpcuser, rpcpassword AND rpcport together and raises if any is missing. The
+    port is already established by probing here, and a conf that omits rpcport because the
+    daemon uses the default is an ordinary conf -- refusing it would lose the credentials
+    over a value this tool does not need.
+
+    THE SECTION COMES FROM THE PROBED PORT. 19332 is testnet, 19443 is regtest, and
+    chains/daemon_conf.CONF_FALLBACK_NETWORK hardcodes regtest for LTC -- which would read
+    the wrong section of the operator's real conf, since their litecoind answers on 19332.
+
+    RETURNS {variable: (value, reason)} with the reason naming the FILE and never the
+    value, which is the same split chains/daemon_conf.describe() makes and for the same
+    stated reason: "a second formatter is a second chance to interpolate the wrong key".
+    """
+    found: dict[str, tuple[str, str]] = {}
+    for chain, (conf_path, user_variable, pass_variable) in sorted(DAEMON_CONFS.items()):
+        if chain == "GRC" and not gridcoin:
+            say(f"    {chain}: NOT READ. {GRIDCOIN_CONF_HAZARD}")
+            continue
+        if already.get(user_variable) and already.get(pass_variable):
+            continue
+        path = Path(conf_path).expanduser()
+        if not path.is_file():
+            say(f"    {chain}: no conf at {path}, so there is nothing to read")
+            continue
+
+        port = _probed_port(chain, discovered, already)
+        section = CONF_SECTION_FOR_PORT.get(port, "")
+        try:
+            settings = parse_daemon_conf(path.read_text(), network=section)
+        except OSError as error:
+            # NAMED, not broad: an unreadable conf is a permissions answer, not a crash.
+            # A conf owned by another user is an ordinary state on a shared host.
+            say(f"    {chain}: {path} could not be read ({type(error).__name__}), so nothing was taken")
+            continue
+
+        missing = [key for key in ("rpcuser", "rpcpassword") if not settings.get(key)]
+        if missing:
+            say(f"    {chain}: {path} has no {', '.join(missing)}. If it uses rpcauth= instead, that is a "
+                f"HASH and cannot be used as a password -- set rpcuser/rpcpassword, or leave the chain off")
+            continue
+
+        found[user_variable] = (settings["rpcuser"], f"rpcuser read from {path}")
+        # THE VALUE IS IN THE TUPLE BECAUSE IT HAS TO BE WRITTEN. It is not in the
+        # REASON, and say_dry_run()/say_what_was_written() print names and reasons only.
+        found[pass_variable] = (
+            settings["rpcpassword"],
+            f"rpcpassword read from {path} and NOT shown"
+            + (f" (top level plus [{section}])" if section else ""),
+        )
+    return found
+
+
+def _probed_port(chain: str, discovered: dict, already: dict) -> int:
+    """The port this run established for `chain`, or 0. Decides which conf section to read.
+
+    0 RATHER THAN A GUESS when nothing established one: CONF_SECTION_FOR_PORT then misses,
+    `section` is empty, and parse_daemon_conf() reads the top level only -- which is where
+    credentials conventionally live, so the common case still works and no section is read
+    on a guess about the network.
+    """
+    variable = CHAIN_PORTS[chain].port_variable if chain in CHAIN_PORTS else ""
+    raw = str(discovered.get(variable, ("",))[0] or already.get(variable, "") or "").strip("'\"")
+    return int(raw) if raw.isdigit() else 0
+
+
 def asked_for(discovered: dict, already: dict) -> list[tuple[str, str]]:
     """ASKED, plus any RPC port that discovery missed. Nothing falls between the two.
 
@@ -636,6 +790,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--apply", action="store_true",
                         help="WRITE .env. Without it this discovers and reports and writes nothing.")
+    parser.add_argument(
+        "--read-daemon-confs", action="store_true",
+        help=("Read rpcuser and rpcpassword out of each daemon's OWN conf instead of asking for "
+              "them. No value is printed: the reason line names the FILE and says the password was "
+              "read and not shown. Gridcoin needs --read-gridcoin-conf as well; see its hazard."),
+    )
+    parser.add_argument(
+        "--read-gridcoin-conf", action="store_true",
+        help=("Also read Gridcoin's credentials. SEPARATE because the hazard differs in kind: "
+              "~/.GridcoinResearch/gridcoinresearch.conf is shared by mainnet and testnet, and a "
+              "Gridcoin mainnet wallet is typically a live staking wallet. Requires "
+              "--read-daemon-confs."),
+    )
     args = parser.parse_args()
 
     secrets = secret_names()
@@ -643,8 +810,40 @@ def main() -> int:
     say_banner(args.apply, already)
 
     discovered = discover_all()
+
+    # FROM THE CONFS, AND ONLY WHEN ASKED. Merged into `discovered` so credentials flow
+    # through the same dry-run report, the same "still unset" computation and the same
+    # write -- a second path for them would be a second chance to print one.
+    if args.read_daemon_confs:
+        say("  READING CREDENTIALS FROM EACH DAEMON'S OWN CONF")
+        from_confs = credentials_from_confs(discovered, already, gridcoin=args.read_gridcoin_conf)
+        for variable, (_value, why) in sorted(from_confs.items()):
+            say(f"    {variable:26} <- {why}")
+        if not from_confs:
+            say("    (none)  <- nothing was read; every line above says why")
+        discovered.update(from_confs)
+        say("")
+    elif args.read_gridcoin_conf:
+        say("  --read-gridcoin-conf DOES NOTHING ON ITS OWN, so nothing was read. Pass it WITH")
+        say("  --read-daemon-confs, or neither.")
+        say("")
+
     values = {name: value for name, (value, _why) in discovered.items() if not already.get(name)}
-    needed = [(name, what) for name, what in asked_for(discovered, already) if not already.get(name)]
+    # `name not in values` IS THE THIRD CLAUSE AND IT WAS MISSING, which produced output
+    # that contradicted itself on the first real run of --read-daemon-confs:
+    #
+    #     LTC_RPC_USER  <- rpcuser read from ~/.litecoin/litecoin.conf
+    #     skipped LTC_RPC_USER (left unset; the chain that needs it stays unconfigured)
+    #     WROTE  ... LTC_RPC_USER ...
+    #
+    # Read from the conf, then asked for anyway, then reported as skipped, then written.
+    # Every line was true of the step that printed it and the block as a whole said three
+    # incompatible things. That is rule 13's "treat 'skipped' plus 'success' in the same
+    # output as a defect in the output" -- and the prompt it produced was worse than the
+    # wording: an operator pressing enter past a value that was already found has been
+    # asked a question with no right answer.
+    needed = [(name, what) for name, what in asked_for(discovered, already)
+              if not already.get(name) and name not in values]
 
     if not args.apply:
         say_dry_run(needed, values, secrets, already)
