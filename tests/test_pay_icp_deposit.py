@@ -20,6 +20,32 @@ row" was a swap from three hours earlier.
 
 So a test that sent successfully would prove the easy half. These prove the half
 that costs money when it is missing.
+
+AND ONE OF THEM WAS PROVING A REFUSAL WHOSE REASON WAS FALSE (2026-10-11).
+test_an_expired_swap_is_refused asserted on the word "expired" and its docstring
+repeated the claim the code made -- "credits into review, not into a payout" --
+which measurement showed to be the opposite of what this system does. A test whose
+docstring restates the code's own sentence cannot catch that sentence being wrong.
+See test_the_lapsed_quote_refusal_says_what_actually_happens for the figures.
+
+THE LAPSED-QUOTE WORK WAS MUTATION-CHECKED, one change at a time, reverted between
+each, 39 of 39 green before and after every one:
+
+    mutation applied to pay_icp_deposit.py   tests that then FAILED
+    ---------------------------------------  ---------------------------------
+    the original FALSE sentence restored     3: the default-refusal test, the
+    verbatim                                 says-what-happens test, and the
+                                             preflight-silence test
+    --honor-lapsed-quote returns [] from     1: the only-that-one test, on the
+    refuse() entirely                        swap that already has a deposit
+                                             event -- i.e. the flag would have
+                                             allowed a second send
+    lapsed_quote_lines() dropped from        1: the preflight-prints-it test
+    preflight()'s print list
+    the banner's ", HONORING A LAPSED        1: the banner test
+    QUOTE" suffix removed
+    lapsed_quote_lines() ignores the flag    2: the announced-vs-not test and
+    and always announces                     the preflight-silence test
 """
 
 from __future__ import annotations

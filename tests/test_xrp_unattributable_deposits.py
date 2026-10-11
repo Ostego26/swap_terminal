@@ -53,8 +53,54 @@ WHAT EACH TEST FAILS FOR, so a regression says WHICH mechanism stopped holding
 
 Written one mechanism per test rather than as one end-to-end test of the happy
 path, for the reason tests/test_xrp_adapter.py's header gives: a guard with no
-test that fails when it is DISABLED is not a guard. Every test below was run
-with the fix reverted or its key line broken, and the failure recorded.
+test that fails when it is DISABLED is not a guard.
+
+SO EACH LINE OF THE FIX WAS BROKEN IN TURN AND THE FAILURE RECORDED. Run
+2026-10-11, one mutation at a time, reverted between each, 17 of 17 green before
+and after every one:
+
+    mutation applied to chains/xrp.py        tests that then FAILED
+    ---------------------------------------  ---------------------------------
+    the drops are never assigned off         6: the row, the amount, the
+    untagged_payments()                      delivered-vs-Amount check, the
+                                             discriminator, the credit count,
+                                             the why, and the last-scan one
+    amount=from_drops(_intended), i.e.       1: the delivered-vs-Amount test,
+    credit the CLAIMED `Amount`              which recorded 1000000.0 XRP for
+                                             a payment that delivered 2.5
+    the `self.unattributable_drops = []`     1: the failed-scan test
+    clear at the top of the scan
+    the tesSUCCESS comparison                2: the tec* test and the
+                                             mixed-list test
+    the "XRP NOT RECORDED" print loop        2: the unvalidated test and the
+                                             issued-currency test
+    the attribute's initialization in        1: the before-any-scan test
+    __init__
+
+TWO OF THOSE ROWS ARE THERE BECAUSE THE FIRST VERSION OF THIS FILE FAILED THE
+CHECK, and they are the reason the check is worth running at all:
+
+  the clear-at-the-top line        the test written for it ("a second scan that
+                                   finds nothing leaves the list empty") passed
+                                   with the line DELETED, 16 of 16 green,
+                                   because the assignment at the end of a
+                                   successful scan already replaces the list.
+                                   test_a_failed_scan_leaves_no_stale_drops is
+                                   what replaced it, and it targets the only
+                                   thing that line does.
+  the tesSUCCESS comparison        the single-case tec* test passed with the
+                                   comparison removed, because a tec* entry
+                                   then fell through into the `unreadable` list
+                                   rather than into the drops -- so no ROW
+                                   appeared either way. The assertion on the
+                                   absence of a console line is what catches it.
+
+AND THE MIXED-LIST TEST AT THE BOTTOM FOUND A REAL DEFECT IN THE FIX, which is
+the argument for writing it: a tec* payment was being announced as "no
+unattributable_deposits ROW WAS WRITTEN for it", which is true and misleading --
+a tec* code claims a fee and transfers nothing, so it sends an operator looking
+for coins that do not exist. Every single-case test passed with that defect in
+place.
 """
 
 from __future__ import annotations
@@ -71,20 +117,33 @@ sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
 from chains.xrp import XRPAdapter, XRPRPCError, untagged_payments  # noqa: E402
 from db import SCHEMA, connect_db  # noqa: E402
+from valid_addresses import XRP_ACCOUNT_ZERO, XRP_CUSTOMER_PAYOUT  # noqa: E402
 
 from swap_terminal.services import deposit_service  # noqa: E402
 
-#: The shared deposit account every XRP swap pays into. A classic address, so
-#: chains/xrp_address.is_valid_classic_address() accepts it -- a made-up string
-#: would be refused by validate_address() and the test would pass for the wrong
-#: reason. This one is XRPL's own ACCOUNT_ZERO, which can never hold funds and so
-#: can never be mistaken for a real destination somebody should pay.
-ACCOUNT = "rrrrrrrrrrrrrrrrrrrrrhoLvTp"
+#: The shared deposit account every XRP swap pays into, and NOT A LITERAL.
+#:
+#: Both of these are imported from tests/valid_addresses.py, which derives them, and
+#: the FIRST VERSION OF THIS FILE PASTED TWO LITERALS INSTEAD -- XRPL's reserved
+#: ACCOUNT_ZERO and ACCOUNT_ONE. tests/test_address_literals_are_valid.py caught it
+#: immediately: the tree-wide ceiling on pasted address literals is 60 and they made
+#: it 62. Rule 19 says a change that needs a new baseline entry to pass IS the defect,
+#: so the ceiling was left alone and the literals went, which is the remedy that gate
+#: names in its own message ("use tests/valid_addresses.py rather than writing one --
+#: a derived address cannot be mistyped and says what it is for").
+#:
+#: Derived rather than recalled matters here beyond the count. valid_addresses.py's
+#: own comment on XRP_ACCOUNT_ZERO records getting it wrong from memory -- `...hoLvTq`
+#: for `...hoLvTp` -- and chains/xrp_address.is_valid_classic_address() checks a real
+#: base58check checksum, so a mistyped literal would be refused by validate_address()
+#: and the test would fail for a reason that has nothing to do with deposits.
+ACCOUNT = XRP_ACCOUNT_ZERO
 
-#: Somewhere that is NOT this desk's shared account, for the payment-OUT case.
-#: XRPL's ACCOUNT_ONE, the other reserved address, for the same reason: it can
-#: never be a real destination anybody should pay.
-OTHER_ACCOUNT = "rrrrrrrrrrrrrrrrrrrrBZbvji"
+#: Somewhere that is NOT this desk's shared account, for the payment-OUT case. A
+#: SECOND address rather than a reuse, for the reason XRP_CUSTOMER_PAYOUT's own
+#: comment gives: a test that used one address for both ends would be asserting the
+#: Destination check against itself and would pass with that check deleted.
+OTHER_ACCOUNT = XRP_CUSTOMER_PAYOUT
 
 #: 64 hex characters, which is the shape of a real XRP Ledger transaction hash.
 #: Distinct first characters so a failure message says which payment it is about.
@@ -525,6 +584,60 @@ def test_the_list_describes_the_LAST_scan_only(adapter, monkeypatch):
 
     assert instance.unattributable_drops == [], (
         "the list describes THIS scan, and this scan found nothing untagged"
+    )
+
+
+def test_rescanning_the_same_untagged_payment_touches_one_row(db, adapter):
+    """Three cycles, one row, and last_seen_at advancing. The watcher polls forever.
+
+    THIS INTERACTION HAD TO BE ESTABLISHED RATHER THAN ASSUMED (rule 17), because the
+    two tag chains behave differently here and the difference is not in this file.
+
+    services/deposit_service.skip_txids() unions in
+    unattributable_deposit_service.skippable_unattributable_txids(), whose SQL skips a
+    recorded row when `u.discriminator IS NULL` -- "a payment with no memo and no tag is
+    unclaimable by construction, not by circumstance". Every row this fix writes has a
+    NULL discriminator, so every one of them lands in that skip set from its first
+    sighting onward.
+
+    AND chains/xrp.py IGNORES skip_txids, which its own docstring says: XRP discovery is
+    a single `account_tx` call, so there is no per-transaction cost to avoid. Solana
+    ignores nothing -- there each skipped signature is one getTransaction saved, and that
+    saving is the 2026-10-01 rate-limit fix.
+
+    So on XRP the payment IS re-read every cycle, and what matters is that re-reading is
+    harmless. MEASURED 2026-10-11 over three cycles, passing the real skip set each time:
+
+        cycle 1  skip=(none)   drops=1  new_rows=1  total=1
+        cycle 2  skip={txid}   drops=1  new_rows=0  total=1
+        cycle 3  skip={txid}   drops=1  new_rows=0  total=1
+        first_seen_at frozen at cycle 1; last_seen_at advancing every cycle
+
+    One row, because record() UPSERTs on (asset, txid). `first_seen_at` is what a human
+    matching the payment works from and it does not move. `last_seen_at` keeps advancing,
+    which for XRP means the column does what show_unattributable.py labels it -- "when
+    the scan last READ this on-chain" -- rather than freezing the way it does for a
+    skipped SOL row. That is strictly more information at no cost, and it is the reason
+    this test asserts on the UPSERT rather than on the skip.
+    """
+    instance = adapter([payment(UNTAGGED_HASH)])
+    seen = []
+    for _cycle in range(3):
+        instance.find_deposits_to_address(
+            ACCOUNT, skip_txids=deposit_service.skip_txids(db, "XRP", address=ACCOUNT)
+        )
+        deposit_service.record_what_nobody_can_claim(db, "XRP", instance)
+        row = rows_in(db)[0]
+        seen.append((row["first_seen_at"], row["last_seen_at"]))
+
+    assert len(rows_in(db)) == 1, (
+        f"three sightings of one payment are one row, not three: {rows_in(db)}"
+    )
+    assert len({first for first, _last in seen}) == 1, (
+        f"first_seen_at is the figure a human works from and must not move: {seen}"
+    )
+    assert seen[-1][1] >= seen[0][1], (
+        f"last_seen_at answers 'is it still there' and must not go backwards: {seen}"
     )
 
 

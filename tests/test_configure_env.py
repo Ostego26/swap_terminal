@@ -279,21 +279,71 @@ def test_a_value_containing_a_single_quote_is_refused_rather_than_mangled(env_fi
 def test_the_ports_come_from_the_shared_table_and_never_mainnet(env_file, monkeypatch):
     """Rule 8: network_target.CHAIN_PORTS is the one place that answers this.
 
-    AND MAINNET IS NEVER OFFERED. ChainPorts carries the mainnet port in order to
-    CLASSIFY a configured one, not to suggest it -- config.py's header records what
-    suggesting it cost: the three defaults used to be mainnet and
-    refresh_wallet_inventory() polled the operator's live staking wallet on a loop.
+    =========================================================================
+    THE FIRST VERSION OF THIS TEST PASSED WITHOUT EXECUTING THE LINE IT TESTED
+    =========================================================================
+
+    It monkeypatched `listening_ports` to return EVERY port in the table, so every chain
+    had two or more listening test ports, `len(candidates) == 1` was never true, and
+    discover_ports() returned {}. The assertions were a `for` loop over an empty dict,
+    which passes. Meanwhile the line inside that loop said `ports.variable` and
+    `ports.hint` -- neither of which is a field of ChainPorts -- and the operator got
+    `AttributeError: 'ChainPorts' object has no attribute 'hint'` on the first real run.
+
+    So: a non-empty assertion FIRST, and exactly one listening test port per chain, which
+    is the configuration an operator is actually in. This is the same
+    "check passed by looking at the wrong thing" shape this suite has paid for four times
+    today, committed in the test written to prevent it.
+
+    MAINNET IS STILL NEVER OFFERED, and it is asserted by including every mainnet port in
+    the listening set. ChainPorts carries the mainnet port to CLASSIFY a configured one,
+    not to suggest it -- config.py's header records what suggesting it cost: the three
+    defaults used to be mainnet and refresh_wallet_inventory() polled the operator's live
+    staking wallet on a loop.
     """
     mainnet = {ports.mainnet_port for ports in CHAIN_PORTS.values()}
-    every_test_port = {port for ports in CHAIN_PORTS.values() for port in ports.test_ports}
+    # ONE test port per chain, plus every mainnet port. The mainnet ports must be ignored
+    # and the single test port must be offered.
+    one_test_port_each = {min(ports.test_ports) for ports in CHAIN_PORTS.values()}
+    monkeypatch.setattr(configure_env, "listening_ports", lambda: mainnet | one_test_port_each)
 
-    # Pretend every port on earth is listening; only test ports may be offered.
-    monkeypatch.setattr(configure_env, "listening_ports", lambda: mainnet | every_test_port)
     found = configure_env.discover_ports()
 
-    for variable, (value, _why) in found.items():
+    assert len(found) == len(CHAIN_PORTS), (
+        f"discover_ports() returned {sorted(found)} for {len(CHAIN_PORTS)} chains with exactly one "
+        f"listening test port each. An empty or short result makes every assertion below vacuous, "
+        f"which is how `ports.hint` reached the operator."
+    )
+    every_test_port = {port for ports in CHAIN_PORTS.values() for port in ports.test_ports}
+    for variable, (value, why) in found.items():
         assert int(value) in every_test_port, f"{variable} was offered {value}, which is not a test port"
         assert int(value) not in mainnet, f"{variable} was offered the MAINNET port {value}"
+        # AND THE REASON IS NON-EMPTY, which is what actually exercises `test_hint`: the
+        # crash was inside the f-string building this string, so an assertion that only
+        # looked at the value would still not have reached it.
+        assert why.strip(), f"{variable} was offered with no reason beside it"
+        assert str(value) in why, "the reason does not name the port it is about"
+
+
+def test_every_field_this_tool_reads_off_ChainPorts_exists(env_file):
+    """MUTATION: rename a field in network_target.ChainPorts and this fails, not the operator.
+
+    THE DIRECT ANSWER TO THE AttributeError. discover_ports() reads three fields --
+    test_ports, port_variable and test_hint -- and it got two of the three names wrong by
+    inferring them from the table's positional arguments. getattr() here is the assertion
+    that the names are real, independent of whether any port happens to be listening, so
+    it holds even on a machine where discover_ports() can return nothing at all.
+    """
+    for asset, ports in CHAIN_PORTS.items():
+        for field in ("test_ports", "port_variable", "test_hint", "mainnet_port"):
+            assert hasattr(ports, field), (
+                f"configure_env.discover_ports() reads ChainPorts.{field} and {asset}'s entry has "
+                f"no such field. This is what reached the operator as AttributeError on a real run."
+            )
+        assert ports.port_variable.endswith("_RPC_PORT"), (
+            f"{asset}'s port_variable is {ports.port_variable!r}; configure_env writes it into .env "
+            f"as a variable name, so a value that is not one would write a line compose never reads"
+        )
 
 
 def test_two_listening_test_ports_for_one_chain_are_not_resolved_by_guessing(env_file, monkeypatch):

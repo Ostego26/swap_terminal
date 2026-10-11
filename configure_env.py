@@ -133,6 +133,12 @@ _PROC_NET_MIN_FIELDS = 4
 #: What /proc/net/tcp writes in the state column for LISTEN.
 _PROC_NET_LISTEN = "0A"
 
+#: How many listening test ports a chain must have for this to offer one without
+#: guessing. Named because the bare `1` in that comparison is the entire policy: two
+#: means two networks of one chain are up and picking either would be a guess about what
+#: the operator means, so the value is asked for instead.
+_EXACTLY_ONE = 1
+
 #: Documented test endpoints, offered as defaults. TESTNET AND DEVNET ONLY -- a mainnet
 #: URL typed over one of these is the operator's decision and this script cannot tell.
 ENDPOINT_DEFAULTS = {
@@ -258,8 +264,21 @@ def discover_ports() -> dict[str, tuple[str, str]]:
     found: dict[str, tuple[str, str]] = {}
     for asset, ports in CHAIN_PORTS.items():
         candidates = sorted(ports.test_ports & live)
-        if len(candidates) == 1:
-            found[ports.variable] = (str(candidates[0]), f"{asset} answering on {candidates[0]} ({ports.hint})")
+        if len(candidates) == _EXACTLY_ONE:
+            # ports.port_variable AND ports.test_hint -- THE FIELD NAMES, READ OFF THE
+            # CLASS. The first version of this line said `ports.variable` and
+            # `ports.hint`, which are not fields of ChainPorts, and the operator got
+            #
+            #     AttributeError: 'ChainPorts' object has no attribute 'hint'
+            #
+            # on the first real run. I had read the TABLE -- four positional arguments
+            # per entry -- and inferred the names from their positions instead of
+            # reading the NamedTuple that defines them. That is rule 17 exactly: a
+            # reason to believe written in the same voice as having checked.
+            found[ports.port_variable] = (
+                str(candidates[0]),
+                f"{asset} answering on {candidates[0]} ({ports.test_hint})",
+            )
     return found
 
 
