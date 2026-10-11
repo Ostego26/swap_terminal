@@ -67,6 +67,7 @@ section at the foot of this file for what that meant and what was added.
 from __future__ import annotations
 
 import sqlite3
+import zlib
 
 import db
 import pytest
@@ -142,7 +143,7 @@ def database(tmp_path, monkeypatch):
     return path
 
 
-def seed_swap(path, *, from_asset, deposit_address, created_at, tag=None) -> str:
+def seed_swap(path, *, from_asset, deposit_address, created_at, credited=False) -> str:
     """One swap row, through the real columns, with its quote. Returns its id.
 
     THE QUOTE ROW IS INSERTED TOO because swaps.quote_id carries a FOREIGN KEY to
@@ -152,11 +153,21 @@ def seed_swap(path, *, from_asset, deposit_address, created_at, tag=None) -> str
 
     THE ID IS DERIVED AND RETURNED rather than passed in, which is ruff's PLR0913
     answered rather than suppressed (rule 19): it was the sixth argument and the only
-    one carrying no information -- the callers were passing "s1", "old" and "new". Asset
-    plus timestamp is unique by construction for any two rows a test here can seed,
-    because two rows that differ in neither would be the same row.
+    one carrying no information -- the callers were passing "s1", "old" and "new". Asset,
+    timestamp and address make it unique for any two rows a test here can seed, because
+    two rows agreeing on all three would be the same row.
+
+    THE DESTINATION TAG IS DERIVED TOO, and `credited` took its place as a parameter when
+    the decision started turning on credited_at -- PLR0913 again, and again answered by
+    removing the argument that carried the least. It is now set for every XRP swap and
+    for no other chain, which is not merely smaller but more faithful: `deposit_tag` is
+    "NULL for every chain that attributes a deposit BY ADDRESS, which is all of them
+    except XRP" (db.py), so an opt-in tag let a test seed an XRP swap with no tag at all
+    -- a row the application cannot produce. crc32 rather than hash() because hash() is
+    salted per process and a fixture that differs between runs is not a fixture.
     """
-    swap_id = f"{from_asset}-{created_at}"
+    swap_id = f"{from_asset}-{created_at}-{deposit_address[:8]}"
+    tag = zlib.crc32(swap_id.encode()) % 100_000 if from_asset == "XRP" else None
     with sqlite3.connect(path) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
@@ -168,11 +179,13 @@ def seed_swap(path, *, from_asset, deposit_address, created_at, tag=None) -> str
         connection.execute(
             "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, deposit_tag,"
             " payout_address, expected_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
-            " output_amount_estimate, status, min_confirmations, created_at, updated_at, expires_at)"
-            " VALUES (?, ?, ?, 'BTC', ?, ?, ?, 1.0, 1.0, 150, 0.0, 1.0, 'awaiting_deposit',"
-            " 2, ?, ?, ?)",
+            " output_amount_estimate, status, min_confirmations, created_at, updated_at,"
+            " expires_at, credited_at)"
+            " VALUES (?, ?, ?, 'BTC', ?, ?, ?, 1.0, 1.0, 150, 0.0, 1.0, ?,"
+            " 2, ?, ?, ?, ?)",
             (swap_id, f"quote-{swap_id}", from_asset, deposit_address, tag, PAYOUT_ADDRESS,
-             created_at, created_at, created_at),
+             "credited" if credited else "awaiting_deposit",
+             created_at, created_at, created_at, created_at if credited else None),
         )
     return swap_id
 
@@ -207,13 +220,22 @@ def test_xrp_is_read_the_same_way_and_the_tag_is_not_part_of_the_account(databas
     swap to one customer's tag, which is the same defect as a per-swap address one
     column over.
     """
-    seed_swap(database, from_asset="XRP", deposit_address=XRP_SHARED,
-              created_at="2026-10-01T00:00:00Z", tag=4242)
+    swap_id = seed_swap(database, from_asset="XRP", deposit_address=XRP_SHARED,
+                        created_at="2026-10-01T00:00:00Z")
 
     found = configure_env.accounts_from_the_database({})
 
     assert found["XRP_DEPOSIT_ACCOUNT"][0] == XRP_SHARED
-    assert "4242" not in found["XRP_DEPOSIT_ACCOUNT"][1], "the per-swap tag reached the reason line"
+    # READ BACK FROM THE COLUMN rather than compared against a value this test passed in,
+    # so the assertion is about what is actually stored on the row the tool read.
+    with sqlite3.connect(database) as connection:
+        stored_tag = connection.execute(
+            "SELECT deposit_tag FROM swaps WHERE id = ?", (swap_id,)).fetchone()[0]
+    assert stored_tag is not None, "an XRP swap was seeded with no destination tag"
+    assert str(stored_tag) not in found["XRP_DEPOSIT_ACCOUNT"][1], (
+        "the per-swap destination tag reached the reason line, which would pin every future "
+        "swap to one customer's tag"
+    )
     assert set(found) == {"XRP_DEPOSIT_ACCOUNT"}, "a chain with no swaps produced a value anyway"
 
 
@@ -245,16 +267,82 @@ def test_a_per_swap_chain_is_never_read_from(database, asset, capsys):
     )
 
 
-def test_the_newest_account_wins_and_the_repoint_is_visible(database, capsys):
-    """An account can be repointed, so the newest row is the live one.
+def test_the_newest_account_wins_when_it_is_the_one_money_arrived_at(database, capsys):
+    """A repoint where recency and the evidence AGREE, which is the clean case.
 
-    MUTATION: drop `ORDER BY MAX(created_at) DESC` and the answer becomes whichever row
-    sqlite happens to return first, which is a coin flip between the desk's current
-    account and one it moved off of.
+    MUTATION: drop `ORDER BY newest DESC` and the answer becomes whichever row sqlite
+    happens to return first, which is a coin flip between the desk's current account and
+    one it moved off of.
 
-    THE SECOND HALF IS THAT THE DISAGREEMENT IS SAID OUT LOUD. Taking the newest
-    silently would resolve the ambiguity without reporting it, and an operator looking
-    at one address would have no way to know the database holds two.
+    THE SECOND HALF IS THAT THE DISAGREEMENT IS SAID OUT LOUD. Taking the newest silently
+    would resolve the ambiguity without reporting it, and an operator looking at one
+    address would have no way to know the database holds two.
+
+    THIS TEST USED TO SEED NEITHER SWAP AS CREDITED, so it ran through the "nothing
+    corroborates any of these" branch while its name claimed the newest won on merit. It
+    passed either way, which is exactly the kind of test that stops measuring what it is
+    named for -- the branch changed under it and nothing said so.
+    """
+    seed_swap(database, from_asset="SOL", deposit_address=SOL_FORMER,
+              created_at="2026-09-01T00:00:00Z", credited=True)
+    seed_swap(database, from_asset="SOL", deposit_address=SOL_SHARED,
+              created_at="2026-10-05T00:00:00Z", credited=True)
+
+    found = configure_env.accounts_from_the_database({})
+
+    assert found["SOL_DEPOSIT_ACCOUNT"][0] == SOL_SHARED
+    why = found["SOL_DEPOSIT_ACCOUNT"][1]
+    assert "2 DISTINCT" in why, f"the repoint was resolved silently: {why}"
+    assert "repointed" in why
+    assert "deposits have arrived there" in why, f"the corroboration was not stated: {why}"
+    assert "RECENCY ALONE" not in why, "a corroborated account was labeled a guess"
+    del capsys
+
+
+def test_a_newest_account_nothing_arrived_at_is_refused_rather_than_written(database, capsys):
+    """THE ONE THAT GOES BACK TO THE OPERATOR. MUTATION: drop the refusal branch.
+
+    THIS IS THE CASE THE FIRST REAL RUN COULD HAVE BEEN IN. On 2026-10-11 the operator's
+    XRP swaps carried TWO distinct deposit accounts and the tool took the newest on
+    recency alone, named it, and moved on. A swap's deposit_address is written from the
+    configured variable at creation time, so a swap created while that variable held a
+    wrong value carries the wrong value -- and this configuration had been rewritten
+    repeatedly that week. The newest row can be a value that was configured and never
+    worked.
+
+    `credited_at` is the only evidence available that an account RECEIVES: it means a
+    deposit arrived there and this system saw it and attributed it. When the newest has
+    none and an older one does, the rows cannot say which is live -- so nothing is
+    offered, both addresses and their evidence are printed, and the variable falls
+    through to the question. A deposit address is where customer money goes (rule 16).
+    """
+    seed_swap(database, from_asset="SOL", deposit_address=SOL_FORMER,
+              created_at="2026-09-01T00:00:00Z", credited=True)
+    seed_swap(database, from_asset="SOL", deposit_address=SOL_SHARED,
+              created_at="2026-10-05T00:00:00Z", credited=False)
+
+    found = configure_env.accounts_from_the_database({})
+    printed = capsys.readouterr().out
+
+    assert "SOL_DEPOSIT_ACCOUNT" not in found, (
+        "an account that has never received a credited deposit was offered as the shared "
+        "account while an older, proven one existed"
+    )
+    # BOTH addresses and the evidence for each, because the operator is the one deciding
+    # and a refusal with no detail is just a different way of being unhelpful (rule 14).
+    assert SOL_SHARED in printed and SOL_FORMER in printed
+    assert "0 credited" in printed
+    assert "yours to say" in printed
+
+
+def test_when_nothing_was_ever_credited_the_newest_is_offered_AS_A_GUESS(database, capsys):
+    """MUTATION: drop the `guess` suffix.
+
+    No account on record has ever received a credited deposit, so the chain has never
+    completed a deposit under any of them. The newest is still the best available answer
+    -- refusing here would block a chain that has simply never run yet -- but it is a
+    hypothesis, and rule 17's whole subject is not presenting one in the register of a
+    measurement.
     """
     seed_swap(database, from_asset="SOL", deposit_address=SOL_FORMER,
               created_at="2026-09-01T00:00:00Z")
@@ -265,9 +353,44 @@ def test_the_newest_account_wins_and_the_repoint_is_visible(database, capsys):
 
     assert found["SOL_DEPOSIT_ACCOUNT"][0] == SOL_SHARED
     why = found["SOL_DEPOSIT_ACCOUNT"][1]
-    assert "2 DISTINCT" in why, f"the repoint was resolved silently: {why}"
-    assert "repointed" in why
+    assert "RECENCY ALONE" in why, f"an uncorroborated pick was reported as a finding: {why}"
+    assert "guess rather than a finding" in why
+    assert "NOTHING has ever been credited" in why
+
+
+def test_a_single_account_says_whether_money_has_ever_arrived_at_it(database, capsys):
+    """"The only account on record" and "the account that receives" are different claims.
+
+    MUTATION: collapse the two branches into one sentence. One account with credited
+    deposits is a measurement; one account with none is the only candidate and nothing
+    more, and an operator about to publish it as a deposit address should be told which
+    they are holding.
+    """
+    seed_swap(database, from_asset="XRP", deposit_address=XRP_SHARED,
+              created_at="2026-10-01T00:00:00Z", credited=True)
+    credited_why = configure_env.accounts_from_the_database({})["XRP_DEPOSIT_ACCOUNT"][1]
+    assert "deposits have arrived there" in credited_why
+    assert "NOTHING has ever been credited" not in credited_why
+
+    seed_swap(database, from_asset="SOL", deposit_address=SOL_SHARED,
+              created_at="2026-10-01T00:00:00Z")
+    bare_why = configure_env.accounts_from_the_database({})["SOL_DEPOSIT_ACCOUNT"][1]
+    assert "NOTHING has ever been credited" in bare_why
+    assert "0 credited deposits" in bare_why
     del capsys
+
+
+def test_the_decision_function_survives_an_empty_row_list():
+    """The caller guards it; a second caller would not. Tested directly, not through main.
+
+    A crash inside a configuration tool, on a machine whose stack is already broken, is
+    the one failure mode this file exists against -- so the branch is here even though
+    accounts_from_the_database() cannot reach it, and it is tested where it can be.
+    """
+    address, why = configure_env.choose_shared_account("SOL", [])
+
+    assert address == ""
+    assert why.strip(), "an empty list produced an empty explanation"
 
 
 def test_a_value_already_in_env_is_not_read_over(database):

@@ -102,6 +102,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
@@ -488,6 +489,126 @@ def write_env(values: dict[str, str]) -> None:
         os.umask(previous)
 
 
+class AccountRow(NamedTuple):
+    """One candidate shared account, as the GROUP BY returns it.
+
+    `credited` IS THE COLUMN THAT MATTERS and is why this is a NamedTuple rather than a
+    bare tuple: choose_shared_account() reads three of these fields in four branches, and
+    rows[1][2] in a decision about where customer deposits go is a line nobody can review.
+    """
+
+    address: str
+    swaps: int
+    credited: int
+    newest: str
+
+
+def choose_shared_account(asset: str, rows: list[AccountRow]) -> tuple[str, str]:
+    """Which of these accounts to offer, and why -- or ("", why not).
+
+    =========================================================================
+    THE FIRST REAL RUN REPOINTED, AND THE OLD RULE RESOLVED IT SILENTLY
+    =========================================================================
+
+    2026-10-11, on the operator's host, first run after the database read landed:
+
+        XRP_DEPOSIT_ACCOUNT  rnjG8n16JinjqkzZj5Jmw6NDMBMzhhNbVv
+          <- the deposit address on XRP's 3 most recent swap(s) ... ; 2 DISTINCT accounts
+             appear on XRP swaps, so this one has been repointed -- the newest is taken
+             and the others are history
+
+    SOL agreed with an independent measurement (tests/valid_addresses.py:249, recorded
+    from their host on 2026-10-01, the same 44 characters). XRP had two candidates and
+    the tool picked one on recency alone, named it, and moved on.
+
+    RECENCY IS THE RIGHT SIGNAL FOR "WHICH IS CURRENT" and it is not evidence that the
+    account WORKS. A swap's deposit_address is written from the configured variable at
+    creation time, so a swap created while that variable held a wrong value carries the
+    wrong value -- and this configuration has been rewritten repeatedly all week. The
+    newest row can be a misconfiguration that was never exercised.
+
+    `credited_at` IS THE CORROBORATION. A swap whose credited_at is set is one where a
+    deposit actually arrived at that account and this system saw it and attributed it. No
+    reading of the code can establish that; only the chain and the database together can,
+    and they already have.
+
+    SO THE TABLE, and the only case that comes back to the operator is the ambiguous one
+    (rule 16 -- a deposit address is fund movement):
+
+      one candidate              offer it. Say whether anything has ever been credited to
+                                 it, because "the only account on record" and "the account
+                                 that has received money" are different claims.
+      several, newest IS         offer the newest. Recency says current, the credited count
+      credited                   says it works, and they agree.
+      several, newest is NOT     REFUSE. Offer nothing, and say which addresses and what
+      credited, an older one IS  the evidence is. The newest may be a typo that was never
+                                 tested; the older one is proven but may be retired. That
+                                 is not derivable from the rows, and guessing it writes a
+                                 customer-facing deposit address. It falls through to the
+                                 question, where the operator answers it.
+      several, NONE credited     offer the newest and say plainly that nothing corroborates
+                                 it -- the chain has never completed a deposit under any of
+                                 these. Still the best available answer, and labeled as a
+                                 guess rather than a finding (rule 17).
+
+    THE REFUSAL IS THE WHOLE POINT. The old behavior had no refusal: every shape of
+    disagreement resolved to the newest row. The one shape that cannot be resolved from
+    the data now says so.
+
+    AND THE ADDRESS IS DELIBERATELY NOT RE-VALIDATED HERE, which is recorded because the
+    next reader will reach for it. modules/address_authority.check_receive_address() is
+    the right check for a deposit address -- it refuses a mainnet address while this
+    process is on testnet, and it refuses a wrong-chain one, which is not hypothetical:
+    on 2026-10-01 a Solana account reached XRP's validator and `POST /api/swaps` returned
+    400 with "CUBnQ5... is not a valid XRPL classic address", recorded at
+    services/xrp_tag_service.py:255.
+
+    IT IS ALREADY ENFORCED UPSTREAM OF EVERY ROW THIS READS. services/swap_service's
+    create_swap() runs that check before the INSERT and writes nothing when it fails --
+    tests/test_address_authority.py asserts COUNT(*) == 0 after the refusal. So an
+    address that is invalid for its chain cannot BE on a swaps row, and a check here
+    would be a second implementation of a rule that already has an owner (rule 8). The
+    one case it would add is a row created while this host was pointed at a different
+    network, and this tree refuses mainnet at every entry point rather than relying on a
+    configuration read.
+    """
+    if not rows:
+        # THE CALLER ALREADY GUARDS THIS (`if not rows: continue`), and it is here anyway
+        # because this function is public and a second caller would reach rows[0] on an
+        # empty list. A crash inside a configuration tool, on a machine whose stack is
+        # already broken, is the one failure mode this whole file is written against.
+        # Tested directly rather than through the caller, since the caller cannot produce it.
+        return "", "no deposit address on any swap of that asset"
+    top = rows[0]
+    proven = f"{top.credited} of its {top.swaps} swap(s) were credited, so deposits have arrived there"
+    unproven = (f"NOTHING has ever been credited to it -- {top.swaps} swap(s) on record and 0 "
+                f"credited deposits, so nothing here corroborates the address")
+    if len(rows) == 1:
+        return top.address, (f"the only deposit address on {asset} swaps, which IS the shared account "
+                             f"for a tag-attributed chain; " + (proven if top.credited else unproven))
+
+    credited_elsewhere = [row for row in rows[1:] if row.credited]
+    if not top.credited and credited_elsewhere:
+        other = credited_elsewhere[0]
+        return "", (
+            f"{asset} has {len(rows)} DISTINCT deposit accounts on its swaps and this cannot be "
+            f"resolved from them, so NOTHING is offered and the question is asked instead. The "
+            f"NEWEST is {top.address} ({top.swaps} swap(s), 0 credited -- it may be a value that "
+            f"was configured and never worked). An OLDER one, {other.address}, has {other.credited} "
+            f"credited deposit(s), so that account demonstrably receives and is watched -- but it "
+            f"may be retired. Which is live is yours to say; a deposit address is where customer "
+            f"money goes."
+        )
+
+    guess = "" if top.credited else " -- TAKEN ON RECENCY ALONE, as a guess rather than a finding"
+    return top.address, (
+        f"the deposit address on {asset}'s {top.swaps} most recent swap(s), which IS the shared "
+        f"account for a tag-attributed chain; {len(rows)} DISTINCT accounts appear on {asset} swaps, "
+        f"so it has been repointed and the newest is taken{guess}; "
+        + (proven if top.credited else unproven)
+    )
+
+
 def accounts_from_the_database(already: dict) -> dict[str, tuple[str, str]]:
     """The shared SOL and XRP deposit accounts, read off swaps that already ran.
 
@@ -544,12 +665,20 @@ def accounts_from_the_database(already: dict) -> dict[str, tuple[str, str]]:
             if already.get(variable):
                 continue
             try:
-                rows = connection.execute(
-                    "SELECT deposit_address, COUNT(*) AS swaps FROM swaps WHERE from_asset = ?"
+                # THE RANKING IS IN SQL (rule 20): it is an aggregate and an ORDER BY over
+                # rows already in this database, and a Python sort over the same rows would
+                # be the same logic somewhere only its author can inspect. The CASE counts
+                # credited swaps per account, which is choose_shared_account()'s evidence.
+                rows = [AccountRow(*row) for row in connection.execute(
+                    "SELECT deposit_address, COUNT(*) AS swaps,"
+                    " SUM(CASE WHEN credited_at IS NOT NULL AND credited_at != '' THEN 1 ELSE 0 END)"
+                    "   AS credited,"
+                    " MAX(created_at) AS newest"
+                    " FROM swaps WHERE from_asset = ?"
                     " AND deposit_address IS NOT NULL AND deposit_address != ''"
-                    " GROUP BY deposit_address ORDER BY MAX(created_at) DESC",
+                    " GROUP BY deposit_address ORDER BY newest DESC",
                     (asset,),
-                ).fetchall()
+                ).fetchall()]
             except sqlite3.Error as error:
                 # A database created before the `swaps` table existed, or one never
                 # initialized. Named rather than broad, and reported rather than raised.
@@ -559,15 +688,15 @@ def accounts_from_the_database(already: dict) -> dict[str, tuple[str, str]]:
                 say(f"    {asset}: no swap in {path.name} carries a deposit address, so there is "
                     f"nothing to read -- the account has to be given")
                 continue
-            address, swaps = rows[0][0], rows[0][1]
-            seen = (f"; {len(rows)} DISTINCT accounts appear on {asset} swaps, so this one has been "
-                    f"repointed -- the newest is taken and the others are history"
-                    if len(rows) > 1 else "")
-            found[variable] = (
-                str(address),
-                f"the deposit address on {asset}'s {swaps} most recent swap(s) in {path.name}, which "
-                f"IS the shared account for a tag-attributed chain{seen}",
-            )
+            address, why = choose_shared_account(asset, rows)
+            if not address:
+                # A REFUSAL IS A RESULT AND IS SAID IN FULL (rule 14). It is not merged into
+                # `found`, so the variable falls through to the question list exactly as if
+                # the database held nothing -- which is the honest state: it holds two
+                # answers and no way to choose between them.
+                say(f"    {asset}: {why}")
+                continue
+            found[variable] = (str(address), f"{why} (read from {path.name})")
     finally:
         connection.close()
     return found
