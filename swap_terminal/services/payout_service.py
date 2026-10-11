@@ -118,7 +118,11 @@ from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR, signing_seed, signing_s
 from chains.xrp_signing import CONFIRM_XRP_SEND
 from failure_signature import failure_signature
 from modules.address_authority import check_address
-from services.chain_reachability import record_reachability
+from services.chain_reachability import (
+    forget_reachability,
+    is_transport_failure,
+    record_reachability,
+)
 
 from .helpers import iso_to_epoch_nanos, utc_now_iso
 from .swap_service import SHARED_ACCOUNT_PAYOUT_ASSETS, payout_source_account, set_swap_status
@@ -1764,7 +1768,28 @@ def refresh_wallet_inventory(db, adapters: dict, should_stop=None):
             # SENTENCE to a human, and the row is a FACT whose freshness is what makes
             # it usable. A row written once and never refreshed would go stale and stop
             # gating -- see chain_reachability.STALE_AFTER_SECONDS.
-            record_reachability(db, asset, "get_balance", reachable=False, detail=str(exc)[:500])
+            # ONLY A TRANSPORT FAILURE IS A REACHABILITY FACT, and the first version of
+            # this line did not check. Measured on the operator's host 2026-10-11, the
+            # first run of the gate recorded:
+            #
+            #     XRP did NOT answer  via get_balance
+            #         get_balance() answers 'what is MY balance' and this adapter has no
+            #         account of its own, deliberately
+            #
+            # XRPAdapter.get_balance() REFUSES BY DESIGN -- it holds no account so that
+            # it is never one configuration value away from being a payout path -- and
+            # recording that as unreachable made the gate refuse every XRP pair for a
+            # chain that was perfectly fine. A working chain blocked by a check added to
+            # stop chains choking.
+            #
+            # forget_reachability() RATHER THAN SKIPPING THE WRITE, because the row the
+            # unchecked version already wrote would otherwise stand for ten minutes
+            # (STALE_AFTER_SECONDS) before it stopped gating. Deleting the claim
+            # self-heals on the first cycle after the deploy.
+            if is_transport_failure(exc):
+                record_reachability(db, asset, "get_balance", reachable=False, detail=str(exc)[:500])
+            else:
+                forget_reachability(db, asset)
             signature = failure_signature(asset, exc)
             if signature not in _REPORTED_INVENTORY_FAILURES:
                 _REPORTED_INVENTORY_FAILURES.add(signature)

@@ -63,6 +63,7 @@ for why silence is the only safe answer there.
 from __future__ import annotations
 
 import logging
+import subprocess
 from datetime import datetime
 
 from microfortnights import format_duration
@@ -89,6 +90,106 @@ logger = logging.getLogger(__name__)
 #: that actually touches the chain, with that step's own reason. The alternative --
 #: trusting an old row -- would refuse a pair whose daemon came back twenty minutes ago.
 STALE_AFTER_SECONDS = 600.0
+
+
+#: Failure classes that mean THE TRANSPORT ITSELF FAILED, as opposed to a chain that
+#: answered with an error or an adapter that declined to ask.
+#:
+#: OSError COVERS MOST OF IT AND THAT IS NOT A COINCIDENCE: requests.ConnectionError and
+#: requests.Timeout are both OSError subclasses (checked, not recalled -- their MRO is
+#: ConnectionError -> RequestException -> OSError), as is the builtin ConnectionError.
+#: So chains/base.RPCAdapter, which lets requests' exception propagate untouched, is
+#: covered by the first entry alone.
+#:
+#: subprocess.TimeoutExpired IS LISTED SEPARATELY because it is NOT an OSError -- it
+#: inherits SubprocessError -- and chains/icp.py talks to the replica by running `dfx`
+#: rather than by posting HTTP. A dfx call that never returns is as much a transport
+#: failure as a dropped SYN, and leaving it out would mean an unreachable ICP replica
+#: was never gated.
+_TRANSPORT_FAILURES = (OSError, subprocess.TimeoutExpired)
+
+
+def is_transport_failure(exc: BaseException) -> bool:
+    """Did the TRANSPORT fail, as opposed to the chain answering or the adapter declining?
+
+    THE DECISION THIS WHOLE MODULE TURNS ON, and it was missing for the first hour this
+    table existed. Measured on the operator's host 2026-10-11, the first run of the new
+    gate recorded:
+
+        XRP did NOT answer  via get_balance
+            get_balance() answers 'what is MY balance' and this adapter has no account
+            of its own, deliberately
+
+    THAT IS NOT AN OUTAGE. XRPAdapter.get_balance() refuses BY DESIGN -- the XRP Ledger
+    deposit and payout account is XRP_DEPOSIT_ACCOUNT, supplied at the call site, and
+    the adapter deliberately holds none so that it is never one configuration value away
+    from being a payout path (its own docstring argues this at length). Recording that
+    as unreachable made the gate refuse every XRP pair while XRP was perfectly fine --
+    a working chain blocked by a check added to stop chains choking.
+
+    This module's header already said the distinction mattered ("a chain whose
+    get_balance refuses by design is not an unreachable chain, and this column is what
+    lets the two be told apart") and then nothing told them apart. Rule 17: the comment
+    was a reason to believe, not a check.
+
+    THE CAUSE CHAIN IS WALKED, not just the exception, because two adapters re-raise:
+
+        chains/solana.py   `except requests.RequestException as exc: raise
+                           SolanaRPCError(...) from exc` -- so the OSError is the
+                           __cause__ and the outer class is not one.
+        chains/icp.py      wraps a dfx failure in ICPCallFailed(RuntimeError).
+
+    XRP's by-design refusal is a BARE raise with no `from`, so its __cause__ is None.
+    That absence IS the distinguishing fact, and it is what this function reads.
+
+    __context__ IS FOLLOWED AS WELL AS __cause__, because an adapter that re-raises
+    inside an `except` block without `from` still has the original attached there. A
+    `raise X` that happens NOT to be inside an except block has neither, which is the
+    deliberate-refusal case.
+
+    FALSE IS THE SAFE ANSWER AND IS WHAT UNKNOWN SHAPES GET. An adapter that invents a
+    new failure class and chains nothing will read as "not a transport failure", so no
+    row is written and nothing is gated -- the chain keeps being offered and fails at
+    the step that touches it, with that step's own reason. The opposite default would
+    refuse a working chain on an exception nobody anticipated, which is the defect this
+    function exists to undo.
+    """
+    seen = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, _TRANSPORT_FAILURES):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def forget_reachability(db, asset: str) -> None:
+    """Remove any stored claim about `asset`. For when the probe CANNOT establish one.
+
+    DELETE AND NOT A WRITE, because a missing row is already this table's "nobody has
+    asked" and reachability_refusal() is silent for it. An adapter that declines to
+    answer leaves no evidence either way, so the honest state is no claim at all.
+
+    WHY IT IS NOT ENOUGH TO JUST SKIP THE WRITE. The operator's database already held
+    `XRP did NOT answer`, written before is_transport_failure() existed. Skipping future
+    writes would leave that claim standing until it aged past STALE_AFTER_SECONDS -- ten
+    minutes of refusing every XRP pair, for a chain that was never down. Deleting it
+    self-heals on the first cycle after the fix, which is the difference between a fix
+    and a fix that arrives in ten minutes.
+
+    AN RPC ERROR REPLY IS EVIDENCE OF REACHABILITY AND IS DELIBERATELY NOT RECORDED AS
+    SUCH. A daemon that answers "insufficient funds", or a 401, has demonstrably been
+    reached -- so `reachable=True` would be defensible. It is not written, because this
+    table's one job is to say which chains are answering USEFULLY, and an operator
+    reading "GRC ANSWERED" for a daemon that rejects every call would be misled by a
+    technically true row. Both choices have the same effect on the gate -- neither
+    refuses -- so the tie is broken on which row reads honestly to a person.
+
+    NO COMMIT, for the same reason record_reachability() does not: the caller commits
+    once per cycle (rule 15, one writer lock).
+    """
+    db.execute("DELETE FROM chain_reachability WHERE asset = ?", (asset,))
 
 
 def record_reachability(db, asset: str, asked: str, reachable: bool, detail: str = "") -> None:

@@ -54,21 +54,27 @@ THE FOUR CLAIMS, AND WHY EACH NEEDS ITS OWN TEST
 from __future__ import annotations
 
 import sqlite3
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import requests
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
+from chains.icp import ICPCallFailed  # noqa: E402
+from chains.solana import SolanaRPCError  # noqa: E402
+from chains.xrp import XRPRPCError  # noqa: E402
 from db import SCHEMA, connect_db  # noqa: E402
 from prose import code_without_prose  # noqa: E402
 from services import pair_view, payout_service  # noqa: E402
 from services.chain_reachability import (  # noqa: E402
     STALE_AFTER_SECONDS,
+    is_transport_failure,
     reachability_refusal,
     reachability_rows,
     record_reachability,
@@ -548,3 +554,187 @@ def test_a_reachable_pair_is_not_stopped_by_the_gate(db):
 
     with pytest.raises(AssertionError, match="already known not to answer"):
         create_swap(db, swap_config(), adapters, quote, LTC_PAYOUT)
+
+
+# --- a by-design refusal is NOT an outage ----------------------------------------
+#
+# THE BUG THIS SECTION EXISTS FOR, measured on the operator's host 2026-10-11, in the
+# first run of the gate itself:
+#
+#     XRP did NOT answer  via get_balance
+#         get_balance() answers 'what is MY balance' and this adapter has no account
+#         of its own, deliberately
+#
+# XRPAdapter.get_balance() refuses BY DESIGN: the XRP Ledger deposit and payout account
+# is XRP_DEPOSIT_ACCOUNT, supplied at the call site, and the adapter deliberately holds
+# none so it is never one configuration value away from being a payout path. Recording
+# that as unreachable made the gate refuse EVERY XRP PAIR for a chain that was fine --
+# a working chain blocked by a check added to stop chains choking.
+#
+# chain_reachability.py's header already said this distinction mattered and nothing
+# implemented it. Rule 17: a comment is a reason to believe, not a check.
+
+
+class ByDesignRefusal:
+    """An adapter whose get_balance refuses deliberately, as XRPAdapter's does.
+
+    A BARE `raise` WITH NO `from`, which is the distinguishing fact and is why this
+    stub is written this way rather than with a chained cause: XRP's refusal is not
+    raised from inside an `except`, so it has neither __cause__ nor __context__, and
+    that absence is what is_transport_failure() reads.
+    """
+
+    can_spend = True
+
+    def __init__(self, asset):
+        self.asset = asset
+
+    def get_balance(self):
+        raise XRPRPCError(
+            "get_balance() answers 'what is MY balance' and this adapter has no account "
+            "of its own, deliberately"
+        )
+
+
+def chained(outer: BaseException, cause: BaseException) -> BaseException:
+    """`outer` with `cause` as its __cause__, exactly as `raise outer from cause` sets it.
+
+    BUILT RATHER THAN RAISED, and the first draft of these tests raised and caught with
+    `except Exception`, which ruff refused (BLE001) and was right to: a test that catches
+    everything cannot say which class it meant. Constructing the structure directly says
+    it, needs no try block, and is what is_transport_failure() actually walks.
+    """
+    outer.__cause__ = cause
+    return outer
+
+
+def test_a_propagated_transport_failure_IS_one():
+    """BTC, LTC and GRC: chains/base.RPCAdapter lets requests' exception through."""
+    assert is_transport_failure(requests.exceptions.ConnectTimeout("dropped SYN")) is True
+    assert is_transport_failure(ConnectionError("refused")) is True
+
+
+def test_a_WRAPPED_transport_failure_IS_one():
+    """SOL and ICP re-raise with `from exc`, so the cause chain has to be walked.
+
+    chains/solana.py: `except requests.RequestException as exc: raise SolanaRPCError(...)
+    from exc`. The outer class is not an OSError; the cause is. Checking only the
+    exception would leave a genuinely unreachable Solana cluster ungated.
+    """
+    wrapped = chained(
+        SolanaRPCError("could not reach the cluster"),
+        requests.exceptions.ConnectionError("dropped"),
+    )
+    assert is_transport_failure(wrapped) is True
+
+
+def test_a_dfx_TIMEOUT_is_one_even_though_it_is_not_an_OSError():
+    """chains/icp.py runs `dfx` as a subprocess. TimeoutExpired inherits SubprocessError.
+
+    Listed explicitly in _TRANSPORT_FAILURES because an OSError-only test would leave an
+    unreachable ICP replica permanently ungated.
+    """
+    wrapped = chained(ICPCallFailed("dfx did not answer"), subprocess.TimeoutExpired("dfx", 60))
+    assert is_transport_failure(wrapped) is True
+    # And the bare TimeoutExpired, since it is listed in its own right.
+    assert is_transport_failure(subprocess.TimeoutExpired("dfx", 60)) is True
+
+
+def test_a_BY_DESIGN_refusal_is_NOT_a_transport_failure():
+    """THE ASSERTION THE OPERATOR'S HOST WOULD HAVE FAILED."""
+    refusal = XRPRPCError("this adapter has no account of its own, deliberately")
+    assert refusal.__cause__ is None, "the absence of a cause IS the distinguishing fact"
+    assert is_transport_failure(refusal) is False, (
+        "a deliberate refusal reads as an outage, so the gate refuses every pair on a chain "
+        "that is working. This is the XRP row from 2026-10-11."
+    )
+
+
+def test_an_RPC_ERROR_REPLY_is_NOT_a_transport_failure():
+    """A daemon that answered "insufficient funds" was REACHED. It is not an outage."""
+    assert is_transport_failure(SolanaRPCError("insufficient funds for rent exemption")) is False
+
+
+def test_an_unknown_failure_shape_defaults_to_NOT_a_transport_failure():
+    """FALSE IS THE SAFE DEFAULT: silence, not a refusal of a chain that may be fine.
+
+    An adapter inventing a new failure class and chaining nothing must not cause its
+    chain to be gated. The opposite default would refuse a working chain on an
+    exception nobody anticipated -- the defect this function exists to undo.
+    """
+    assert is_transport_failure(RuntimeError("something nobody anticipated")) is False
+
+
+def test_a_by_design_refusal_writes_NO_row(db):
+    """Through the real refresh_wallet_inventory(). No claim, so nothing to gate on."""
+    payout_service._REPORTED_INVENTORY_FAILURES.clear()
+    payout_service.refresh_wallet_inventory(db, {"XRP": ByDesignRefusal("XRP")})
+    assert "XRP" not in reachability_rows(db), (
+        "a by-design refusal left a reachability claim standing, which refuses every pair "
+        "on that chain"
+    )
+
+
+def test_an_EXISTING_wrong_row_is_WITHDRAWN_on_the_next_cycle(db):
+    """SELF-HEALS, rather than waiting out STALE_AFTER_SECONDS.
+
+    The operator's database already held `XRP did NOT answer`, written before
+    is_transport_failure() existed. Merely skipping future writes would leave that claim
+    gating every XRP pair for ten minutes after the fix deployed. forget_reachability()
+    deletes it on the first cycle -- the difference between a fix and a fix that arrives
+    in ten minutes.
+    """
+    record_reachability(db, "XRP", "get_balance", reachable=False, detail="wrongly recorded")
+    db.commit()
+    assert reachability_rows(db)["XRP"]["reachable"] is False
+
+    payout_service._REPORTED_INVENTORY_FAILURES.clear()
+    payout_service.refresh_wallet_inventory(db, {"XRP": ByDesignRefusal("XRP")})
+    assert "XRP" not in reachability_rows(db)
+
+
+def test_a_by_design_refusal_does_not_stop_a_swap(db):
+    """The end of the chain: an XRP pair must not be refused by the gate.
+
+    Reaching the adapter is the assertion -- RefusesToBeAsked raises from
+    address_report(), so an AssertionError means the gate correctly stood aside.
+    """
+    # THE DESTINATION MUST ANSWER, and the first draft of this test used
+    # RefusesToBeAsked for it -- whose get_balance raises a REAL ConnectionError. So LTC
+    # was correctly marked unreachable and the gate correctly refused, and the test never
+    # exercised the by-design refusal it was named for. The gate working is what made the
+    # test wrong.
+    class AnswersButNotForAddresses:
+        can_spend = True
+        asset = "LTC"
+
+        def get_balance(self):
+            return 100.0
+
+        def address_report(self, address, want="both"):
+            raise AssertionError("the gate stood aside, which is what this test asserts")
+
+    quote = seed_quote(db, from_asset="GRC", to_asset="LTC")
+    adapters = {"GRC": ByDesignRefusal("GRC"), "LTC": AnswersButNotForAddresses()}
+    payout_service._REPORTED_INVENTORY_FAILURES.clear()
+    payout_service.refresh_wallet_inventory(db, adapters)
+    assert "GRC" not in reachability_rows(db), "a by-design refusal left a claim standing"
+    with pytest.raises(AssertionError, match="the gate stood aside"):
+        create_swap(db, swap_config(), adapters, quote, LTC_PAYOUT)
+
+
+def test_a_transport_failure_still_writes_its_row(db):
+    """The fix must not have turned the gate off. A real outage is still recorded."""
+
+    class RealOutage:
+        can_spend = True
+        asset = "LTC"
+
+        def get_balance(self):
+            raise requests.exceptions.ConnectTimeout(
+                "Connection to host.docker.internal timed out. (connect timeout=5.0)"
+            )
+
+    payout_service._REPORTED_INVENTORY_FAILURES.clear()
+    payout_service.refresh_wallet_inventory(db, {"LTC": RealOutage()})
+    assert reachability_rows(db)["LTC"]["reachable"] is False
