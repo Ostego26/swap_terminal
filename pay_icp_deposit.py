@@ -77,6 +77,28 @@ one-liner:
       operator remembering a flag.
 
 =============================================================================
+ONE OF THOSE GUARDS WAS REFUSING FOR A REASON THAT WAS FALSE (2026-10-11)
+=============================================================================
+
+The lapsed-quote refusal was unconditional and said a deposit against a stale
+quote "sends the swap to review rather than to a payout". MEASURED: it does not.
+A lapsed ICP swap with a confirmed deposit of the expected amount reaches
+`payout_pending` and pays out at the `quoted_rate` on the swap row. refuse()
+carries the figures and the method.
+
+That mattered beyond the wording, because swap_terminal/deposit_payers.py names
+this file as the ONLY payer for the ICP leg: a lapsed ICP swap could not have its
+deposit paid by anything in the tree, and the remedy the message printed --
+"create a new swap" -- costs the swap's ICP subaccount index, which db.py's
+BEFORE DELETE trigger makes permanent.
+
+It is still a refusal BY DEFAULT, with a true reason, plus --honor-lapsed-quote
+for an operator who means to honor the rate. Default-refusing is kept because
+honoring a stale rate changes what gets paid and at what rate, which is fund
+movement and the operator's decision (rule 16) -- not because the consequence is
+unknown.
+
+=============================================================================
 WHY IT DOES NOT USE THE ICP ADAPTER TO SEND
 =============================================================================
 
@@ -166,7 +188,95 @@ def deposit_rows_for(conn, swap_id: str) -> list[dict]:
     ]
 
 
-def refuse(swap: dict, deposits: list[dict], now_nanos: int) -> list[str]:
+def lapsed_seconds(swap: dict, now_nanos: int) -> float:
+    """How long ago this swap's quoted rate window passed, in SECONDS. PURE.
+
+    NEGATIVE WHEN IT HAS NOT PASSED, and that is the whole reason it returns a
+    signed number rather than a bool: the refusal below and the lines
+    lapsed_quote_lines() prints both need the same figure, and two call sites each
+    doing their own subtraction is rule 8's duplicate on the arithmetic that
+    decides whether a send is refused.
+
+    SECONDS AND NOT MICROFORTNIGHTS, deliberately. Rule 6's boundary is report
+    versus interface: this is arithmetic, every caller feeds it to
+    format_duration(), and converting here would put the display unit inside the
+    comparison. `>= 0` is the lapse test, matching the `expires_nanos <= now_nanos`
+    it replaces exactly at the boundary.
+
+    THERE IS A SECOND IMPLEMENTATION OF THIS QUESTION IN THE TREE AND IT IS A
+    DIFFERENT QUESTION (rule 8: when two genuinely differ, the difference is the
+    point and belongs in a comment naming the other). expire_swap.quote_window_lapsed()
+    takes ISO strings plus a GRACE WINDOW and answers "may this swap be retired
+    yet", which is deliberately slower than the clock -- a swap one second past its
+    window is not retirable. This answers "has the quoted rate window passed at
+    all", with no grace, because the operator is being asked whether to honor a
+    rate rather than whether to retire a row. Merging them would mean giving one of
+    the two the other's grace policy, and either direction is wrong: a grace window
+    here would silently pay lapsed swaps without the flag, and no grace there would
+    retire swaps the moment they lapsed.
+
+    IT DOES NOT CATCH A MALFORMED TIMESTAMP, and that is a difference from
+    expire_swap's, which returns "not lapsed" on one. The directions are opposite
+    for a reason: there, an unreadable timestamp must not RETIRE a swap, so
+    swallowing it fails safe. Here, an unreadable timestamp would make this read as
+    "the window has not passed" and let a send through with no refusal and no
+    sentence -- so iso_to_epoch_nanos()' own ValueError is left to propagate, where
+    main() turns it into a crash the operator can see rather than a silent pass.
+    `swaps.expires_at` is NOT NULL in the schema (db.py) and is written by
+    services/swap_service.create_swap() from the quote, so a row reaching here with
+    an unparseable one means something upstream is broken and that is worth
+    stopping for.
+    """
+    return (now_nanos - iso_to_epoch_nanos(swap["expires_at"])) / NANOS_PER_SECOND
+
+
+def lapsed_quote_lines(swap: dict, now_nanos: int, *, honor_lapsed_quote: bool) -> list[str]:
+    """What an HONORED lapsed quote prints, or [] when there is nothing to say. PURE.
+
+    [] FOR BOTH "not lapsed" AND "not honoring it", and the whole question living here
+    rather than at the call site is deliberate. preflight() is orchestration and a
+    branch there would be rule 12's C901 defect in miniature -- a decision one level up
+    from where it can be called with seeded inputs. Measured: adding the `if` at the
+    call site instead put preflight() at complexity 11 against a ceiling of 10.
+
+    WITHOUT THE FLAG THE LAPSE IS STILL SAID, by refuse(), as a refusal. So the two can
+    never both be silent on a lapsed swap and never both speak about it: the flag
+    chooses which of them does.
+
+    RULE 14: THE OPT-IN MUST NOT BE INVISIBLE IN THE OUTPUT. Suppressing the
+    refusal and sending is "did work" that would otherwise look identical to a send
+    on a swap that never lapsed -- same banner, same swap block, same SENT line --
+    so an operator reviewing pasted output a day later could not tell which rate
+    they had agreed to honor. These lines are the difference.
+
+    IT NAMES THE RATE, because that is the thing being honored. "The quote expired"
+    is a fact about a timestamp; "this pays out at 123.45 GRC per ICP, quoted
+    1234.5µfn ago" is the decision, and rule 14 asks for the number's meaning next
+    to the number.
+
+    RETURNS [] RATHER THAN A "not lapsed" LINE. A swap inside its window has
+    nothing to say here, and printing "the quote has not lapsed" on every ordinary
+    run is the noise-at-scale shape chains/xrp.py's deferral dedupe exists to
+    prevent -- an operator learns to skip the line, and then skips it on the run
+    where it said something else.
+    """
+    late_seconds = lapsed_seconds(swap, now_nanos)
+    if not honor_lapsed_quote or late_seconds < 0:
+        return []
+    return [
+        f"  LAPSED QUOTE  HONORED by --honor-lapsed-quote. The rate window passed "
+        f"{format_duration(late_seconds)} ago (expires_at {swap['expires_at']}).",
+        f"                This deposit WILL credit and WILL pay out, at the quoted_rate "
+        f"{swap['quoted_rate']} recorded on the swap -- measured 2026-10-11, nothing in "
+        f"the tree",
+        "                halts a lapsed swap, so the stale rate is honored rather than "
+        "reviewed. See refuse() for the measurement.",
+    ]
+
+
+def refuse(
+    swap: dict, deposits: list[dict], now_nanos: int, *, honor_lapsed_quote: bool = False
+) -> list[str]:
     """Every reason not to send, as sentences. Empty means the send may proceed.
 
     THE DECISION, PURE (rule 10). It takes the swap row, the deposits already
@@ -177,6 +287,80 @@ def refuse(swap: dict, deposits: list[dict], now_nanos: int) -> list[str]:
     RETURNS ALL OF THEM rather than the first. An operator who fixes one reason
     and re-runs only to meet a second has learned nothing about the state of the
     swap; rule 14's "state what the number means" applied to refusals.
+
+    =========================================================================
+    THE LAPSED-QUOTE REFUSAL SAID SOMETHING FALSE UNTIL 2026-10-11
+    =========================================================================
+
+    It was unconditional, and its stated consequence was:
+
+        "The quoted rate no longer holds, so a deposit now credits against a
+         stale quote -- which sends the swap to review rather than to a payout.
+         Create a new swap."
+
+    THE SECOND CLAUSE IS NOT WHAT THIS SYSTEM DOES. Measured 2026-10-11 by
+    seeding an ICP -> GRC swap whose `expires_at` was three hours in the past,
+    plus one confirmed deposit event of exactly `expected_input_amount`, into the
+    real db.py SCHEMA and running the real
+    services/deposit_service.process_active_swaps():
+
+        status                 payout_pending      <- NOT under_review
+        credited_at            2026-10-11T00:26:53.677702+00:00
+        actual_input_amount    2.44081155
+        failed_reason          (none)
+        quoted_rate            123.45               <- unchanged, and honored
+
+    So a lapsed-window deposit does not go to review. It credits, and it pays out
+    at the rate recorded on the swap. The cause is visible in the code the
+    measurement exercised: `advance_deposit_status()` branches only on `has_rows`,
+    `max_confirmations` and the tolerance band -- there is no expiry arm -- and
+    grepping `expires_at` across swap_terminal/ finds no worker reading
+    `swaps.expires_at` at all. The only reads are
+    services/swap_service.get_quote_or_raise(), which guards QUOTE reuse before
+    any swap exists, and expire_swap.py, an operator tool that writes only with
+    --apply. services/swap_view.quote_window() already carried that measurement
+    in words -- "NO WORKER STILL READS swaps.expires_at AND DECIDES ANYTHING" --
+    and this file disagreed with it.
+
+    AND SO DID A THIRD FILE, CORRECTLY, WHICH IS WHAT MAKES THIS RULE 8 AND NOT
+    ONLY RULE 16. pay_test_deposit.quote_age_line() asks the same question about
+    the SOL leg and answers it right: "NOTHING re-prices a swap -- no worker reads
+    swaps.expires_at and nothing sets status='expired' -- so this will pay out at
+    the OLD rate", with its own measurement (three SOL swaps quoted 2026-10-01 at
+    8995 GRC per SOL, worth 10719 four hours later -- about 16% short). It REPORTS
+    and does not refuse, because "whether a customer gets the old rate or a new
+    one changes what they are paid -- which is live posture and the operator's
+    decision". Three copies of one rule, and the copy that had it right was not
+    the one a reader of this file would ever find.
+
+    THE REMAINING COPY IS NAMED AND NOT FIXED HERE: pay_deposit.py carries the
+    same false sentence in the same shape for the BTC/LTC/GRC legs. Named rather
+    than baselined (rule 19) -- it is a change to a second fund-moving tool and
+    belongs in its own pass with its own tests.
+
+    WHY A FALSE REASON IS WORSE HERE THAN A MISSING ONE. swap_terminal/deposit_payers.py
+    names this file as the ONLY payer for the ICP leg, so a lapsed ICP swap could
+    not have its deposit paid by anything in the tree. The remedy the sentence
+    printed -- "create a new swap" -- costs the allocated subaccount index
+    (`icp_deposit_subaccounts` rows are never released; db.py has a BEFORE DELETE
+    trigger that RAISE(ABORT)s) and re-runs the whole flow, and the operator was
+    being told to pay that price to avoid a review that was never going to happen.
+
+    WHAT IT IS NOW: A REFUSAL BY DEFAULT WITH A TRUE REASON, AND AN OPT-IN.
+    Default-refusing is kept deliberately and is not a hedge. The honest
+    consequence -- the desk honors a rate it quoted a while ago -- is a decision
+    about what gets paid out and at what rate, which is fund movement and
+    therefore the operator's (rule 16). Nobody should pay a lapsed swap by
+    accident; they should be able to pay one on purpose, in one command, having
+    read what it means. `--honor-lapsed-quote` is that, and the run says so in
+    its own output rather than only in the absence of a refusal.
+
+    THE REFUSAL IS NOT MERELY SUPPRESSED WHEN THE FLAG IS SET. The caller prints
+    the lapse, the rate being honored and how long ago the window passed, so the
+    output of an honored run is DIFFERENT from the output of a run on a swap that
+    never lapsed (rule 14: "did nothing" and "did work" must not look the same).
+    This function stays pure and says only whether it refuses; see
+    lapsed_quote_lines().
     """
     reasons = []
 
@@ -203,13 +387,19 @@ def refuse(swap: dict, deposits: list[dict], now_nanos: int) -> list[str]:
             f"{detail}. That is money already sent. A second send is not a retry."
         )
 
-    expires_nanos = iso_to_epoch_nanos(swap["expires_at"])
-    if expires_nanos <= now_nanos:
-        late = format_duration((now_nanos - expires_nanos) / NANOS_PER_SECOND)
+    late_seconds = lapsed_seconds(swap, now_nanos)
+    if late_seconds >= 0 and not honor_lapsed_quote:
+        late = format_duration(late_seconds)
         reasons.append(
-            f"the swap expired {late} ago (expires_at {swap['expires_at']}). The quoted rate "
-            f"no longer holds, so a deposit now credits against a stale quote -- which sends "
-            f"the swap to review rather than to a payout. Create a new swap."
+            f"the quoted rate window lapsed {late} ago (expires_at {swap['expires_at']}). "
+            f"NOTHING IN THE TREE HALTS SUCH A SWAP -- measured 2026-10-11, a confirmed "
+            f"deposit of the expected amount credits and reaches payout_pending, paying out "
+            f"at the quoted_rate {swap['quoted_rate']} recorded on the swap row. See refuse() "
+            f"for the measurement. So this refusal is about whether the DESK means to honor a "
+            f"rate it quoted {late} ago, which is a fund-movement decision and not this "
+            f"tool's (CLAUDE.md rule 16). To honor it, re-run with --honor-lapsed-quote; to "
+            f"decline it, create a new swap -- but note that costs this swap's ICP "
+            f"subaccount index, which is never released."
         )
 
     created_nanos = iso_to_epoch_nanos(swap["created_at"])
@@ -275,8 +465,14 @@ def banner_lines(args, icp: Mapping) -> list[str]:
     """
     mode = "APPLY -- funds WILL move" if args.apply else "DRY RUN -- nothing will be sent"
     signer = f", with --identity {args.identity}" if args.identity else ", with dfx default identity"
+    # ECHOED IN THE BANNER BECAUSE IT DECIDES THE ANSWER (rule 14: "echo the parameters
+    # that decide the answer ... pasted output has to be self-describing a day later").
+    # It is appended to the MODE line rather than added as a row of its own so the
+    # existing six lines keep their shape -- and so the one line an operator reads first,
+    # the one that says whether funds move, also says on what terms.
+    lapsed = ", HONORING A LAPSED QUOTE" if args.honor_lapsed_quote else ""
     return [
-        f"{SELF}: {mode}",
+        f"{SELF}: {mode}{lapsed}",
         f"  database      {Config.DB_PATH}",
         f"  ledger        {icp['ledger_canister_id'] or '(unset)'}"
         "  <- not mainnet's ryjl3-tyaaa-aaaaa-aaaba-cai",
@@ -372,6 +568,15 @@ def parse_args(argv: list[str] | None = None):
         "the run says so when you do.",
     )
     parser.add_argument(
+        "--honor-lapsed-quote", action="store_true",
+        help="send even though the swap's quoted rate window has passed. WHAT THIS MEANS, "
+        "measured 2026-10-11 rather than inferred: nothing in this tree halts a lapsed "
+        "swap, so the deposit credits and pays out at the quoted_rate recorded on the swap "
+        "row -- it does NOT go to review. Honoring a stale rate is a fund-movement "
+        "decision, which is why it is a flag and not the default (CLAUDE.md rule 16). The "
+        "run prints the rate it is honoring and how long ago it was quoted.",
+    )
+    parser.add_argument(
         "--apply", action="store_true",
         help="actually call the ledger. Without it, nothing is sent.",
     )
@@ -421,10 +626,24 @@ def preflight(args, icp: Mapping) -> dict:
     amount = float(swap["expected_input_amount"])
 
     print()
-    for line in swap_lines(swap, deposits, key_nanos):
+    # THE LAPSE BELONGS IN THE SWAP BLOCK, BEFORE ANY VERDICT (rule 14: "announce
+    # before, not only after"), so the operator reads it next to the expires_at it is
+    # about rather than after a decision.
+    #
+    # ONE LOOP AND ONE LIST RATHER THAN A SECOND `if` HERE, and that is rule 12's C901
+    # applied rather than suppressed. The first version of this added a branch plus a
+    # loop and pushed preflight() to complexity 11 against a ceiling of 10. The fix rule
+    # 12 names is to extract the decision, not to raise the ceiling or write a noqa
+    # (rule 19), so the "is it lapsed AND am I honoring it" question lives entirely in
+    # lapsed_quote_lines() -- which returns [] when either half is false -- and this
+    # function does no branching at all. Measured: ruff reports 0 findings after.
+    for line in [
+        *swap_lines(swap, deposits, key_nanos),
+        *lapsed_quote_lines(swap, now_nanos, honor_lapsed_quote=args.honor_lapsed_quote),
+    ]:
         print(line)
 
-    reasons = refuse(swap, deposits, now_nanos)
+    reasons = refuse(swap, deposits, now_nanos, honor_lapsed_quote=args.honor_lapsed_quote)
     if reasons:
         raise Refused(1, [
             f"REFUSED, nothing sent. {len(reasons)} reason(s):",

@@ -201,8 +201,65 @@ import requests
 # import `chains.xrp` at all already has swap_terminal/ on the path.
 from microfortnights import format_duration
 
+# THE SHAPE A STRANDED DEPOSIT IS RECORDED IN, IMPORTED AND NOT RE-DECLARED HERE.
+#
+# services/deposit_service.record_what_nobody_can_claim() reads `unattributable_drops`
+# off the adapter by NAME and hands the list to
+# services/unattributable_deposit_service.stranded_rows(), which reads five attributes
+# off each element: `signature`, `credits`, `why`, `amount`, `address`. So the element
+# type is not a detail this module may choose -- it is the contract that writer already
+# speaks, and chains/solana.py is where it is declared.
+#
+# A SECOND NamedTuple WITH THE SAME FIELDS WOULD HAVE BEEN LESS WORK AND IS RULE 8'S
+# DEFECT WITH A DELAY ON IT, on exactly the record that says HOW MUCH MONEY IS
+# STRANDED. UnattributableCredit's own docstring records the version of itself that
+# carried only a COUNT and no amount -- "a record of money that omits the amount is not
+# a record of money" -- which is the kind of change a parallel copy here would not have
+# received. Rule 8: let the survivor own the concept.
+#
+# THE TYPE IS IN THE WRONG FILE AND THAT IS NAMED RATHER THAN GLOSSED (rule 17/19: say
+# what is outstanding, do not baseline it). It is chain-agnostic -- nothing in it is
+# Solana's except the field name `signature`, which on this ledger is a transaction
+# HASH -- so its home is a shared chains/ module that both adapters import, the way
+# chains/base.py is shared by the three UTXO adapters. Moving it is an edit to
+# chains/solana.py and to every one of its importers (two tests and
+# solana_chain_check.py name it directly), so it is named work rather than a change
+# smuggled into a defect fix. Until it moves, THIS import is the thing that keeps one
+# definition rather than two.
+from .solana import UnattributableCredit
 from .xrp_address import describe_address, is_valid_classic_address, looks_like_x_address
-from .xrp_payments import XRPPaymentError, deposit_events_from_transactions
+
+# EVERY NAME HERE IS PUBLIC, AND THAT IS A DELIBERATE CONSTRAINT RATHER THAN AN
+# ACCIDENT. untagged_payments() below re-asks chains/xrp_payments.py which entries it
+# held back instead of re-deciding it, so this module never grows a second copy of
+# "is this a Payment to us, did it succeed, did it carry a tag" -- the rule whose only
+# correct home is that file. See that function's docstring for why calling the same
+# public entry point per entry is cheaper to be right about than reading the fields.
+#
+# `_unwrap` IS THE ONE PRIVATE NAME AND IT IS A FIELD LOOKUP, NOT A DECISION.
+# untagged_payments() needs two values no public function there returns -- the
+# transaction HASH, which becomes the row's identifier, and the TransactionResult, which
+# says which of the classifier's two ordered refusals fired. Both live under a nesting
+# that was MEASURED on rippled 3.4.1 (`account_tx` nests the body under `tx`, `ledger`
+# with expand=true puts it flat beside `metaData`, and the v2 API calls it `tx_json`) and
+# that was MISCHARACTERIZED once already in this tree, which `_unwrap`'s own docstring
+# records against itself. A local copy of that nesting would be a second place to get it
+# wrong, on the value that becomes a money row's primary key; importing the measured
+# reader is strictly safer. It also cannot raise where it is called, because every entry
+# has already been unwrapped once by the whole-list scan.
+#
+# FIELD_HASH, FIELD_TRANSACTION_RESULT AND SUCCESS_RESULT ARE PUBLIC and are imported for
+# the same reason: so the field names and the one success code live in the module that
+# measured them against a real server, not as literals here.
+from .xrp_payments import (
+    FIELD_HASH,
+    FIELD_TRANSACTION_RESULT,
+    SUCCESS_RESULT,
+    XRPPaymentError,
+    _unwrap,
+    delivered_drops_to,
+    deposit_events_from_transactions,
+)
 
 # EVERY DECISION THE PAYOUT PATH MAKES IS IMPORTED, NOT SPELLED HERE. The
 # functions below are the guards, they live one layer down in the function layer
@@ -305,6 +362,263 @@ def new_deferrals(deferred: list[str], already_reported: set[str]) -> list[str]:
     fresh = [line for line in deferred if line not in already_reported]
     already_reported.update(fresh)
     return fresh
+
+
+def untagged_payments(
+    entries, address: str, min_confirmations: int
+) -> tuple[list[UnattributableCredit], list[str]]:
+    """Payments that arrived with NO DestinationTag, as records a table can hold.
+
+    Returns (credits, lines) -- the drops a durable row can be written from, and the
+    payments that arrived untagged and whose amount could NOT be established, as
+    sentences for the console. BOTH, because "nothing arrived untagged" and "something
+    arrived untagged and this function could not say how much" are different facts and
+    rule 14 forbids rendering them the same way.
+
+    PURE: the entries are passed in, so it is callable with a seeded account_tx response
+    and no server (rule 10). It is the whole decision this fix adds, which is why it is a
+    module-level function and not three lines inside the transport method.
+
+    =========================================================================
+    THE DEFECT, MEASURED END TO END 2026-10-11
+    =========================================================================
+
+    A customer sends XRP to XRP_DEPOSIT_ACCOUNT and omits the DestinationTag.
+    chains/xrp_payments._classify() correctly refuses to guess which swap it is for and
+    returns (None, reason), so it never becomes a deposit event. From there it reached NO
+    TABLE AT ALL. Measured by seeding one tagged and one UNTAGGED validated Payment into
+    the real XRPAdapter with requests.post replaced, then running the real
+    services/deposit_service functions against the real db.py SCHEMA:
+
+        events returned                            1   (the TAGGED one only)
+        getattr(adapter, "unattributable_drops")    <<ATTRIBUTE ABSENT>>
+        record_what_nobody_can_claim(db, "XRP")     0   rows written
+        deposit_events                              0 rows
+        unattributable_deposits                     0 rows
+        late_deposits                               0 rows
+        reconcile_shared_accounts(...)              1 row -- for the TAGGED payment whose
+                                                    tag matched no swap. `txid` of the
+                                                    untagged payment present? False
+
+    So 2.5 XRP arrived, was real, and existed in swap_terminal.db nowhere. Both database
+    paths need something this adapter did not produce:
+
+      record_what_nobody_can_claim()   reads `unattributable_drops` off the adapter BY
+                                       NAME (hasattr, deliberately -- the three UTXO
+                                       adapters cannot have unattributable deposits at
+                                       all). XRPAdapter had no such attribute, measured:
+                                       hasattr(XRPAdapter, "unattributable_drops") is
+                                       False and a constructed instance's vars() were
+                                       {_reported_deferrals, can_spend, min_confirmations,
+                                       payout_refusal, timeout, url}.
+      reconcile_shared_accounts()      hands `events` to unclaimed_rows(), which reads
+                                       event["vout"] and SKIPS a None -- its own comment
+                                       says "NO DISCRIMINATOR AT ALL is the adapter's
+                                       case, not this one". It is right, and the adapter
+                                       was not holding up its end.
+
+    The only trace was the `print` in find_deposits_to_address(), filtered through
+    `_reported_deferrals`, so it was emitted once per adapter instance and then never
+    again until a worker restart -- and nothing on /admin, in show_unattributable.py or
+    in any report can see it, because all of those read the table. Rule 5: a measurement
+    that only exists in a log is not learning, on the one path where the measurement is
+    somebody's deposit.
+
+    THIS IS SOL'S CASE AND SOL ALREADY HAD IT. chains/solana.py appends an
+    UnattributableCredit for a credit carrying no usable Memo and deposit_service writes
+    the row with no change at its call site. Rule 8: the concept exists, so this grows
+    the same attribute rather than inventing a second mechanism.
+
+    =========================================================================
+    WHY THE CLASSIFICATION IS RE-ASKED RATHER THAN RE-DECIDED
+    =========================================================================
+
+    The obvious simpler version reads the fields directly -- TransactionType == "Payment",
+    Destination == address, meta.TransactionResult == "tesSUCCESS", DestinationTag is
+    None -- and it is wrong because that conjunction IS
+    chains/xrp_payments._classify(), and a second copy of it is rule 8's bug with a delay
+    on it on the money path. The two would agree the day this was written. The day
+    somebody adds a fifth condition to the classifier, they would not, and nothing would
+    fail: the credit path would hold a payment back while this path recorded it as
+    stranded, or the reverse.
+
+    So each entry is handed back to `deposit_events_from_transactions`, the SAME public
+    entry point the credit path calls, one entry at a time, and the verdict is read off
+    the result:
+
+        events non-empty     it became a deposit event, so it carried a tag. Not ours.
+        deferred empty       `_classify` returned (None, None) -- not a Payment, or a
+                             payment OUT of this account. Not ours.
+        otherwise            ours, and held back. `_classify` has exactly two refusals
+                             and they are ORDERED: a non-tesSUCCESS result returns BEFORE
+                             the tag is looked at. So a held-back entry is either a tec*
+                             result or an untagged success, and ONE field comparison --
+                             not a second classifier -- says which.
+
+    THE tec* HALF IS DROPPED SILENTLY AND THE UNTAGGED HALF IS NOT, and that asymmetry
+    was a DEFECT IN THIS FUNCTION on the day it was written. See the comment at the
+    comparison itself: a tec* code claims a fee and transfers nothing, so printing "no
+    row was written for it" sends an operator looking for coins that do not exist, while
+    the deferred line has already reported the failure. The mixed-list test in
+    tests/test_xrp_unattributable_deposits.py is what found it, which is the argument for
+    writing that test at all -- every single-case test passed with the defect in place.
+
+    IT CANNOT RAISE WHERE THE WHOLE-LIST CALL DID NOT, and that is what makes the
+    per-entry call safe rather than a second place a scan can die. `_classify` is
+    per-entry, and the only whole-list check -- `_reject_duplicate_tags` -- cannot fail
+    over one entry. find_deposits_to_address() calls the whole list FIRST, so by the time
+    this function runs every entry has already been parsed once without raising. A
+    one-element list is strictly fewer code paths, not different ones.
+
+    THE COST IS N PURE-PYTHON CALLS AND NO NETWORK. `account_tx` is one request and the
+    entries are already in memory; nothing here opens a socket. A scan of 200 entries
+    does 200 more passes over one dict each, which is not measurable beside the HTTP call
+    that fetched them.
+
+    =========================================================================
+    WHAT GETS A ROW, AND WHAT DELIBERATELY DOES NOT
+    =========================================================================
+
+    `delivered_drops_to()` is the public reader for "what did the ledger actually move",
+    and it is used rather than a field read for the reason its own module's header gives
+    at length: `meta.delivered_amount` versus `Amount` is the partial-payment exploit
+    that has drained real exchanges, and a second module reading that figure for itself
+    is rule 8's duplicate on the single most expensive field this tree knows. It also
+    requires `validated is True`, which this function WANTS and does not merely tolerate:
+
+      an untagged payment in an    gets NO ROW THIS CYCLE and a console line saying so.
+      unvalidated ledger           An unvalidated ledger can still change, so writing a
+                                   money record from it would be recording an amount that
+                                   may not have arrived. The watcher polls, the ledger
+                                   validates in seconds, and the next cycle writes the
+                                   row. The delay is a few seconds; the alternative is a
+                                   row that can turn out to be about nothing.
+      an untagged payment          gets NO ROW, and a console line. The amount column is
+      delivering an ISSUED         whole units of XRP, and a stranger's IOU recorded there
+      CURRENCY, or with no         would be a number under the wrong label. There is no
+      delivered_amount at all      XRP figure to record, so none is invented (rule 17).
+
+    NEITHER OF THOSE IS SILENT, and that is the whole point of returning two lists. A
+    bare `except XRPPaymentError: continue` here would be rule 12's forbidden shape -- a
+    caught failure the caller cannot tell from a real answer -- on the path where the
+    failure means somebody's deposit has no record. The handler's output IS the return
+    value's second half.
+
+    THE REFUSAL IS CAUGHT NARROWLY AND IT MUST NOT BE WIDENED. XRPPaymentError and
+    nothing else: the entries have already survived one parse, so the only refusals
+    reachable here are the four delivered_drops_to() states above, and a broader catch
+    would swallow a programming error in this function as though a customer had sent an
+    IOU.
+    """
+    credits: list[UnattributableCredit] = []
+    unreadable: list[str] = []
+    for entry in entries or []:
+        # ONE ENTRY THROUGH THE REAL CLASSIFIER. See the docstring: the verdict is read
+        # off the same function the credit path uses, never re-derived from the fields.
+        one = deposit_events_from_transactions([entry], address, min_confirmations)
+        if one.events or not one.deferred:
+            continue
+        # EXACTLY ONE LINE, BY CONSTRUCTION. `_classify` returns at most one reason per
+        # entry, and the second thing that can append to `deferred` -- an event in a
+        # not-yet-validated ledger -- only runs when an event exists, which the branch
+        # above has already excluded. So this is the classifier's own refusal sentence.
+        reason = one.deferred[0]
+        # ===================================================================
+        # WHICH OF THE CLASSIFIER'S TWO REFUSALS WAS IT. THIS IS A
+        # DISAMBIGUATION AND NOT A SECOND COPY OF THE CLASSIFICATION
+        # ===================================================================
+        #
+        # `_classify` has exactly two refusals and they are ORDERED: a result that is not
+        # tesSUCCESS returns BEFORE the tag is looked at. So a held-back entry is either
+        # a tec* result or an untagged success, and one comparison tells them apart.
+        # Everything that DECIDES -- is it a Payment, is it to us, did it succeed -- was
+        # already decided by the call above; this reads the field to learn which answer
+        # came back, through the constants that module exports rather than literals.
+        #
+        # A tec* PAYMENT IS NOT RECORDED AND IS NOT ANNOUNCED HERE EITHER, and getting
+        # that wrong is a defect this function HAD on 2026-10-11 before
+        # tests/test_xrp_unattributable_deposits.py's mixed-list test caught it. Without
+        # this branch a tecUNFUNDED_PAYMENT fell into the `except XRPPaymentError` handler
+        # below and printed "AND NO unattributable_deposits ROW WAS WRITTEN for it", which
+        # is true and actively misleading: a tec* code is included in a ledger, claims a
+        # fee and transfers NOTHING, so there is no money to record and nothing for an
+        # operator to go looking for. The deferred line above has already said it failed.
+        # Rule 14 cuts both ways -- a line that invites an operator to chase coins that do
+        # not exist is as much a defect as silence about coins that do.
+        tx, meta = _unwrap(entry)
+        if meta.get(FIELD_TRANSACTION_RESULT) != SUCCESS_RESULT:
+            continue
+        # THE HASH, from the body this function has already unwrapped. The `or` fallback
+        # is `_classify`'s own, for the flat nesting where the hash sits beside the body
+        # rather than in it -- see _unwrap()'s docstring for the three measured shapes.
+        tx_hash = str(tx.get(FIELD_HASH) or entry.get(FIELD_HASH) or "")
+        try:
+            drops, _intended = delivered_drops_to(entry, address)
+        except XRPPaymentError as refusal:
+            # NOT A ROW, AND SAID OUT LOUD. By here the entry is a SUCCESSFUL, UNTAGGED
+            # Payment to this account, so only two of delivered_drops_to()'s refusals are
+            # reachable: a ledger that has not validated yet, and a delivered_amount that
+            # is not an XRP drop string (an issued currency, or absent). Both are
+            # "arrived, untagged, and this function cannot put a number on it", which is
+            # a different sentence from the row that gets written and must not print like
+            # one (rule 14).
+            unreadable.append(
+                f"{reason}  AND NO unattributable_deposits ROW WAS WRITTEN for it this "
+                f"cycle: {refusal}"
+            )
+            continue
+        # `_intended` IS READ AND DISCARDED ON PURPOSE. delivered_drops_to() returns
+        # `Amount` second so a caller can NOTICE the two disagree, which on an incoming
+        # payment means it carried tfPartialPayment. It is not compared here because
+        # nothing downstream would act on it: `drops` is the authority, it is the only
+        # figure that reaches the row, and a mismatch changes neither the amount recorded
+        # nor the fact that nobody can claim it. Naming it `_intended` rather than
+        # dropping it with `[0]` keeps the reader from assuming the second element is
+        # some other, better amount.
+        credits.append(UnattributableCredit(
+            # THE LEDGER'S WORD FOR IT IS `hash` AND THE FIELD IS CALLED `signature`,
+            # because the type is declared in chains/solana.py (see the import). Same
+            # thing: the transaction's unique identifier, which is what the row's `txid`
+            # column holds for both chains.
+            signature=tx_hash,
+            # ONE, ALWAYS, AND IT IS NOT A PLACEHOLDER. `credits` counts how many separate
+            # credits in one transaction made up the amount, and it exists because a
+            # Solana transaction CAN carry several to one account. An XRP Ledger Payment
+            # has exactly one Destination and delivers exactly once -- which is the same
+            # property chains/xrp_payments.py relies on to use the tag as `vout` -- so
+            # one is the measured count here and not a default.
+            credits=1,
+            why=_why_from(reason, tx_hash),
+            # THROUGH from_drops(), NEVER a literal 1_000_000 at this call site. Rule 11
+            # asks for the base-unit conversion to happen in one function, and
+            # chains/xrp_units.py is that function for this chain -- it also accepts the
+            # drop STRING the ledger sends, which is the protection a multiplication here
+            # would quietly drop.
+            amount=from_drops(drops),
+            # THE SHARED ACCOUNT, carried rather than looked up later, so the row still
+            # says where the coins are after XRP_DEPOSIT_ACCOUNT is changed.
+            address=address,
+        ))
+    return credits, unreadable
+
+
+def _why_from(reason: str, tx_hash: str) -> str:
+    """The classifier's refusal, minus the hash it starts with. PURE.
+
+    db.py says of `unattributable_deposits.why`: "the adapter's own reason, in its words,
+    so the row and the log line agree". So the sentence is DERIVED from the line
+    chains/xrp_payments.py already built rather than written a second time here -- two
+    sentences for one refusal would agree today and drift on the first edit to either
+    (rule 8), and the row and the console would then describe the same money differently.
+
+    THE HASH IS REMOVED BECAUSE THE ROW ALREADY HAS IT in the `txid` column, and
+    show_unattributable.py prints both on adjacent lines. `removeprefix` with the exact
+    hash this function was handed, NOT a parse: there is no pattern to match wrongly. If
+    that format ever changes so the line no longer starts with the hash, this is a no-op
+    and the `why` is the full line -- redundant and still correct, which is the right way
+    for a cosmetic step to fail.
+    """
+    return reason.removeprefix(tx_hash).strip()
 
 
 class XRPAdapter:
@@ -420,6 +734,26 @@ class XRPAdapter:
         # construction. This set holds transaction hashes and refusal reasons,
         # both of which are already printed, so nothing secret enters it.
         self._reported_deferrals: set[str] = set()
+        #: Payments the LAST find_deposits_to_address() call read that arrived with no
+        #: DestinationTag, in the shape services/deposit_service.record_what_nobody_can_claim()
+        #: reads BY NAME. See untagged_payments() for the 2026-10-11 measurement: before this
+        #: attribute existed, hasattr(XRPAdapter, "unattributable_drops") was False, that
+        #: function returned 0 without writing, and an untagged XRP payment reached neither
+        #: deposit_events, nor unattributable_deposits, nor late_deposits.
+        #:
+        #: INITIALIZED HERE AND NOT ONLY IN THE SCAN, so the attribute exists on an adapter
+        #: that has never scanned. The reader uses getattr(..., None) and falls back to 0, so
+        #: an adapter missing the name is indistinguishable from an account with nothing
+        #: stranded in it -- which is the exact ambiguity this whole mechanism exists to
+        #: remove, and it must not be reintroduced by construction order.
+        #:
+        #: NAME MATCHED TO chains/solana.py's, NOT CHOSEN. `drops` there means dropped
+        #: credits; on this ledger `drops` is also the base unit of XRP, which is an unlucky
+        #: collision and is NOT a reason to spell it differently here -- the reader asks for
+        #: this exact string, and a second spelling would be an attribute nothing reads
+        #: (which is what the defect was). The elements are whole XRP, not drops: the
+        #: conversion happens in untagged_payments() through chains/xrp_units.from_drops().
+        self.unattributable_drops: list[UnattributableCredit] = []
         # Validated at CONSTRUCTION, not at poll time. A threshold no XRP
         # payment can reach would leave every deposit below it forever, with
         # nothing in any log saying why (see chains/xrp_units.py).
@@ -802,17 +1136,49 @@ class XRPAdapter:
 
         They are parameters here rather than a branch in the caller so that
         services/deposit_service.py calls every adapter the same way (rule 8).
+
+        IT ALSO RECORDS WHAT IT COULD NOT CREDIT, on `self.unattributable_drops`,
+        and the RETURN VALUE IS UNCHANGED by that. The five-method contract
+        services/ and workers/ read is untouched -- a caller that wants the
+        untagged payments asks for them by name, exactly as it does of
+        chains/solana.py. untagged_payments() carries the 2026-10-11 measurement
+        of what happened before it did: an untagged payment reached no table in
+        swap_terminal.db at all, and the only trace was the print below.
         """
+        # CLEARED BEFORE THE CALL, not after it, and that is the direction that matters.
+        #
+        # The list has to describe THIS scan: a watcher holds one adapter for its whole
+        # life and calls this once per active swap per cycle, so an accumulating list
+        # would hand record_what_nobody_can_claim() a payment from an hour ago as though
+        # it had just been read. chains/solana.py clears at the same point and for the
+        # same reason; the two adapters answer the same contract and must not differ on
+        # the lifetime of the state that contract reads.
+        #
+        # CLEARED FIRST SO A RAISE LEAVES IT EMPTY RATHER THAN STALE. Everything below
+        # can raise -- the HTTP call, and the scan on an unrecognized response shape --
+        # and a caller that then reads this attribute must not be handed the PREVIOUS
+        # scan's findings under the impression they are this one's. Empty is the honest
+        # answer after a failed scan: nothing was established.
         result = self.call(
             _METHOD_ACCOUNT_TX,
             {"account": address, "ledger_index_min": -1, "ledger_index_max": -1, "binary": False},
         )
+        # READ ONCE INTO A NAME, because it is now used twice -- by the credit scan and
+        # by untagged_payments() -- and `result.get("transactions") or []` evaluated
+        # twice would be two expressions that have to stay identical by hand.
+        entries = result.get("transactions") or []
         try:
-            scan = deposit_events_from_transactions(
-                result.get("transactions") or [], address, self.min_confirmations
-            )
+            scan = deposit_events_from_transactions(entries, address, self.min_confirmations)
         except XRPPaymentError as error:
             raise XRPRPCError(f"deposit scan for {address} refused: {error}") from error
+        # THE WHOLE-LIST SCAN ABOVE RUNS FIRST AND THAT ORDER IS LOAD-BEARING, not
+        # stylistic. untagged_payments() re-asks the classifier one entry at a time, so
+        # it can only be safe once every entry has already been parsed without raising --
+        # see its docstring. Putting it before the scan would turn a malformed response
+        # into a refusal from the wrong function, with the wrong message.
+        self.unattributable_drops, unreadable = untagged_payments(
+            entries, address, self.min_confirmations
+        )
         # REPORTED ONCE PER RUN, not once per scan.
         #
         # Measured on the operator's host 2026-09-26: two unattributable payments
@@ -835,6 +1201,20 @@ class XRPAdapter:
         # would hide the backlog from whoever came next.
         for line in new_deferrals(scan.deferred, self._reported_deferrals):
             print(f"  XRP deferred  {line}", flush=True)
+        # THE UNTAGGED PAYMENTS THAT GOT NO ROW, THROUGH THE SAME DEDUPE AND FOR THE SAME
+        # REASON (rule 14, and the 2026-09-26 measurement above). These are the two cases
+        # untagged_payments() names: a ledger that has not validated yet, and a
+        # delivered_amount that is not an XRP drop string. Both are facts about the shared
+        # ACCOUNT, so N open swaps must not print N copies of them.
+        #
+        # A SEPARATE LINE PREFIX FROM `XRP deferred`, deliberately. A deferred payment and
+        # a payment that was deferred AND could not be recorded are different states with
+        # different operator actions -- wait, versus look at this transaction by hand --
+        # and rule 14 forbids them sharing a line. They share the `_reported_deferrals`
+        # SET, which is correct: the set is keyed on the whole line, and these lines
+        # differ from the deferral's by their suffix, so neither suppresses the other.
+        for line in new_deferrals(unreadable, self._reported_deferrals):
+            print(f"  XRP NOT RECORDED  {line}", flush=True)
         return scan.events
 
     def server_parameters(self) -> dict:

@@ -50,6 +50,14 @@ GOOD = {
     # which is the gate working.
     "payout_address": GRC_PAYOUT,
     "expected_input_amount": 2.42621078,
+    # ADDED 2026-10-11, AND ITS ABSENCE WAS A GAP IN THIS FIXTURE RATHER THAN A
+    # CHOICE. find_swap() does `SELECT *` and db.py declares
+    # `quoted_rate REAL NOT NULL`, so every row this tool can ever be handed has
+    # one -- seeded_db() below already inserts 1.0. A fixture missing a NOT NULL
+    # column is a fixture that cannot catch a reader of it, which is what the
+    # lapsed-quote refusal became when it started naming the rate it is asking
+    # the operator to honor. 1.0 to match seeded_db(), so the two agree.
+    "quoted_rate": 1.0,
     "status": "awaiting_deposit",
     "created_at": "2026-10-10T17:00:00+00:00",
     "expires_at": "2026-10-10T17:10:00+00:00",
@@ -57,6 +65,10 @@ GOOD = {
 
 #: Inside the quote window and inside the ledger's 24h dedup window.
 NOW = iso_to_epoch_nanos("2026-10-10T17:05:00+00:00")
+
+#: One minute PAST the quote window, and still well inside the ledger's 24h dedup
+#: window -- so a test using it isolates the lapse from the TxTooOld refusal.
+LAPSED = iso_to_epoch_nanos("2026-10-10T17:11:00+00:00")
 
 
 def swap(**overrides) -> dict:
@@ -102,11 +114,150 @@ def test_an_existing_deposit_event_is_refused_and_the_amount_is_named():
     assert any("already recorded" in r and "2.42621078" in r for r in reasons)
 
 
-def test_an_expired_swap_is_refused():
-    """A deposit against a stale quote credits into review, not into a payout."""
-    late = iso_to_epoch_nanos("2026-10-10T17:11:00+00:00")
-    reasons = subject.refuse(swap(), [], late)
-    assert any("expired" in r for r in reasons)
+def test_a_lapsed_quote_window_is_refused_by_default():
+    """The default posture is unchanged: nobody pays a lapsed swap by accident.
+
+    THE NAME AND THE DOCSTRING BOTH CHANGED ON 2026-10-11 AND THE OLD ONES WERE
+    THE DEFECT. It was called test_an_expired_swap_is_refused and said "A deposit
+    against a stale quote credits into review, not into a payout" -- which is what
+    the refusal under test SAID, and which is false. See
+    test_the_lapsed_quote_refusal_says_what_actually_happens below for the
+    measurement. A test whose docstring repeats the claim the code makes cannot
+    catch the claim being wrong, and this one did not for as long as it existed.
+
+    It also asserted on the word "expired", which is the other half of the same
+    problem: `expired` is a STATUS in this tree (expire_swap.py writes it, with
+    --apply, and nothing else does), and a swap whose quote window has passed is
+    not in it. The wording now says "lapsed", matching
+    services/swap_view.quote_window()'s own vocabulary, and this assertion moved
+    with it.
+    """
+    reasons = subject.refuse(swap(), [], LAPSED)
+    assert any("lapsed" in r for r in reasons)
+
+
+def test_the_lapsed_quote_refusal_says_what_actually_happens():
+    """MEASURED 2026-10-11, and the refusal used to describe the opposite.
+
+    Seeded an ICP -> GRC swap with expires_at three hours in the past plus one
+    confirmed deposit event of exactly expected_input_amount into the real db.py
+    SCHEMA, then ran the real services/deposit_service.process_active_swaps():
+
+        status                 payout_pending      <- NOT under_review
+        credited_at            2026-10-11T00:26:53.677702+00:00
+        actual_input_amount    2.44081155
+        failed_reason          (none)
+        quoted_rate            123.45               <- unchanged, and honored
+
+    So the sentence "sends the swap to review rather than to a payout" was false.
+    This asserts the TRUE consequence is the one printed, and asserts the false
+    one is NOT -- because the whole failure mode was an operator reading a
+    confident wrong sentence and creating a new swap, which costs this swap's ICP
+    subaccount index permanently (db.py's BEFORE DELETE trigger).
+
+    MUTATION: restore "which sends the swap to review rather than to a payout" and
+    this fails on both assertions at once.
+    """
+    reason = next(r for r in subject.refuse(swap(), [], LAPSED) if "lapsed" in r)
+
+    assert "payout_pending" in reason, (
+        f"the refusal has to say where a lapsed deposit actually goes: {reason!r}"
+    )
+    assert "review" not in reason, (
+        f"nothing in the tree sends a lapsed swap to review; advance_deposit_status() has "
+        f"no expiry arm at all: {reason!r}"
+    )
+    assert "--honor-lapsed-quote" in reason, (
+        f"a refusal an operator can lift has to name how: {reason!r}"
+    )
+    assert str(GOOD["quoted_rate"]) in reason, (
+        f"the rate is the thing being honored, so it is the number that belongs next to "
+        f"the decision (rule 14): {reason!r}"
+    )
+
+
+def test_honoring_a_lapsed_quote_lifts_that_refusal_and_only_that_one():
+    """The opt-in, and the measurement that it is narrow.
+
+    MUTATION: make the flag return [] from refuse() early -- the obvious way to
+    implement "proceed anyway" -- and the second half of this test fails, because a
+    swap that is BOTH lapsed and already has a deposit event would then be paid
+    twice. That is the duplicate this whole file exists to prevent, and it is why
+    the flag gates one `if` rather than the function.
+    """
+    assert subject.refuse(swap(), [], LAPSED, honor_lapsed_quote=True) == [], (
+        "with the flag, a swap whose ONLY problem is a lapsed window may proceed"
+    )
+
+    deposits = [
+        {"txid": "a" * 64, "vout": 0, "amount": 2.42621078, "confirmations": 1, "credited_at": None}
+    ]
+    still_refused = subject.refuse(swap(), deposits, LAPSED, honor_lapsed_quote=True)
+    assert any("already recorded" in r for r in still_refused), (
+        f"the flag is about the RATE, not about sending twice: {still_refused}"
+    )
+
+    past_window = subject.refuse(
+        swap(), [], NOW + subject.DEDUP_WINDOW_NANOS, honor_lapsed_quote=True
+    )
+    assert any("TxTooOld" in r for r in past_window), (
+        f"the flag cannot make an un-idempotent send idempotent: {past_window}"
+    )
+
+    wrong_leg = subject.refuse(swap(from_asset="BTC"), [], LAPSED, honor_lapsed_quote=True)
+    assert any("not ICP" in r for r in wrong_leg), f"nor change which chain this is: {wrong_leg}"
+
+
+def test_the_flag_changes_nothing_on_a_swap_inside_its_window():
+    """So the flag cannot become something an operator leaves on by habit.
+
+    A swap inside its window is not refused either way, and
+    lapsed_quote_lines() prints nothing for it -- asserted below. Without this,
+    `--honor-lapsed-quote` could acquire a second meaning nobody asked for.
+    """
+    assert subject.refuse(swap(), [], NOW) == []
+    assert subject.refuse(swap(), [], NOW, honor_lapsed_quote=True) == []
+
+
+def test_lapsed_seconds_is_signed_and_exact_at_the_boundary():
+    """The arithmetic the refusal and the announcement both read, so they cannot disagree.
+
+    The boundary matters because it replaced `expires_nanos <= now_nanos`: a swap
+    at EXACTLY its expiry nanosecond was lapsed before and must still be.
+    """
+    at_expiry = iso_to_epoch_nanos(GOOD["expires_at"])
+
+    assert subject.lapsed_seconds(swap(), at_expiry) == 0.0, "the boundary itself is lapsed"
+    assert subject.lapsed_seconds(swap(), at_expiry - 1) < 0, "one nanosecond before is not"
+    assert subject.lapsed_seconds(swap(), LAPSED) == pytest.approx(60.0), (
+        "17:11:00 is sixty seconds past a 17:10:00 window"
+    )
+
+
+def test_an_honored_lapse_is_announced_and_an_ordinary_run_is_not():
+    """Rule 14: an opt-in that moves money must not be invisible in the output.
+
+    MUTATION: delete the lapsed_quote_lines() spread from preflight()'s print
+    loop, or make the function return [] unconditionally, and the first assertion
+    fails -- while every refusal test above still passes, because suppressing the
+    refusal is the half that is easy to get right.
+    """
+    honored = subject.lapsed_quote_lines(swap(), LAPSED, honor_lapsed_quote=True)
+    joined = " ".join(honored)
+
+    assert honored, "an honored lapse has to say so"
+    assert "HONORED" in joined
+    assert str(GOOD["quoted_rate"]) in joined, "the rate being honored is the point"
+    assert GOOD["expires_at"] in joined, "and when it was quoted"
+
+    assert subject.lapsed_quote_lines(swap(), LAPSED, honor_lapsed_quote=False) == [], (
+        "without the flag the lapse is refuse()'s to report, not this function's -- both "
+        "speaking would print it twice"
+    )
+    assert subject.lapsed_quote_lines(swap(), NOW, honor_lapsed_quote=True) == [], (
+        "a swap inside its window has nothing to say; a line on every ordinary run is the "
+        "noise an operator learns to scroll past"
+    )
 
 
 def test_a_swap_older_than_the_ledgers_dedup_window_is_refused():
@@ -260,9 +411,31 @@ def test_badfee_is_named_and_not_retried():
 
 
 class Args:
-    def __init__(self, apply=False, identity=""):
+    """What parse_args() hands preflight() and banner_lines(), as a stub.
+
+    THE SELECTORS WERE MISSING UNTIL 2026-10-11 and nothing noticed, because the
+    only test that called preflight() with this stub refused on the ledger id
+    first and never reached the lookup. The two tests that now run preflight far
+    enough to print found it immediately -- an AttributeError on
+    `args.deposit_address`. A fixture that cannot reach the code it stands in for
+    is a fixture that looks complete and is not.
+
+    Both default EMPTY, matching parse_args()' own defaults. The real parser makes
+    the pair mutually exclusive AND required, so a real run always has exactly
+    one; a stub with neither is only ever used where load_swap is replaced.
+    """
+
+    def __init__(self, apply=False, identity="", honor_lapsed_quote=False,
+                 deposit_address="", swap=""):
         self.apply = apply
         self.identity = identity
+        self.deposit_address = deposit_address
+        self.swap = swap
+        #: Defaulted False here for the same reason parse_args() defaults it False:
+        #: a stub that defaulted it True would make every banner test assert the
+        #: honoring form, and the one state that must never be reached by accident
+        #: would be the one the fixtures exercise.
+        self.honor_lapsed_quote = honor_lapsed_quote
 
 
 ICP_SETTINGS = {
@@ -276,6 +449,34 @@ def test_the_banner_says_whether_funds_will_move():
     """Rule 14: the parameter that decides the answer, before anything happens."""
     assert "DRY RUN" in subject.banner_lines(Args(apply=False), ICP_SETTINGS)[0]
     assert "funds WILL move" in subject.banner_lines(Args(apply=True), ICP_SETTINGS)[0]
+
+
+def test_the_banner_says_when_a_lapsed_quote_is_being_honored():
+    """Rule 14: echo the parameters that decide the answer, in the line read first.
+
+    Pasted output has to be self-describing a day later, and "did the desk agree
+    to honor a stale rate" is the question a reader of that paste will have.
+
+    MUTATION: drop the `lapsed` suffix from banner_lines() and this fails while
+    every other banner test passes.
+    """
+    assert "LAPSED" not in subject.banner_lines(Args(), ICP_SETTINGS)[0]
+    honoring = subject.banner_lines(Args(honor_lapsed_quote=True), ICP_SETTINGS)[0]
+    assert "HONORING A LAPSED QUOTE" in honoring
+    assert "DRY RUN" in honoring, "the mode must survive beside it"
+
+
+def test_the_flag_is_off_unless_it_is_typed():
+    """The default is the refusal, and it is asserted through the real parser.
+
+    Through parse_args() rather than the Args stub, because the stub's default is
+    a test fixture's opinion and this is the production one. A flag that moves
+    money must not be reachable by forgetting something.
+    """
+    required = ["--deposit-address", GOOD["deposit_address"]]
+
+    assert subject.parse_args(required).honor_lapsed_quote is False
+    assert subject.parse_args([*required, "--honor-lapsed-quote"]).honor_lapsed_quote is True
 
 
 def test_the_banner_names_the_ledger_and_distinguishes_it_from_mainnet():
@@ -295,6 +496,68 @@ def test_configuration_faults_exit_2_and_state_faults_exit_1():
     """So a missing ledger id does not read like an expired swap."""
     assert subject.Refused(2, ["config"]).code == 2
     assert subject.Refused(1, ["state"]).code == 1
+
+
+def test_preflight_actually_prints_the_honored_lapse(monkeypatch, capsys):
+    """The wiring, not the function -- asserted on what preflight() put on the screen.
+
+    THE GAP THIS CLOSES WAS REAL AND I LEFT IT OPEN FOR A WHILE.
+    test_an_honored_lapse_is_announced_and_an_ordinary_run_is_not() calls
+    lapsed_quote_lines() directly, so deleting the spread that puts those lines in
+    preflight()'s print loop passed every test in this file. A function that
+    returns the right sentences and a tool that prints them are two different
+    claims, and "the code contains a check for X" is never evidence X happened
+    (CLAUDE.md's "Verify by behavior" section).
+
+    load_swap and build_adapters are replaced so this reaches the print without a
+    database or a replica: the swap is handed in, and the adapter build then
+    refuses with code 2, which is the real refusal for a tree that cannot build an
+    ICP adapter. Everything between -- swap_lines(), lapsed_quote_lines(), refuse()
+    -- is the real code running in the real order.
+
+    MUTATION: delete `*lapsed_quote_lines(...)` from preflight()'s list and this
+    fails; every other test in this file still passes.
+    """
+    monkeypatch.setattr(subject, "load_swap", lambda *_a, **_k: (swap(), []))
+    monkeypatch.setattr(subject, "build_adapters", lambda *_a, **_k: {})
+    # The clock, so the swap is PAST its window rather than depending on today's date.
+    monkeypatch.setattr(subject, "utc_now_iso", lambda: "2026-10-10T17:11:00+00:00")
+
+    with pytest.raises(subject.Refused) as caught:
+        subject.preflight(Args(honor_lapsed_quote=True), ICP_SETTINGS)
+
+    printed = capsys.readouterr().out
+    assert caught.value.code == 2, (
+        "it got PAST refuse() -- the lapse was honored -- and stopped on the adapter build"
+    )
+    assert "LAPSED QUOTE" in printed, f"the honored lapse has to reach the screen:\n{printed}"
+    assert "HONORED" in printed
+    assert str(GOOD["quoted_rate"]) in printed
+
+
+def test_preflight_says_nothing_about_a_lapse_it_is_not_honoring(monkeypatch, capsys):
+    """The other direction: the refusal reports it, so the swap block must not.
+
+    Both speaking would print the lapse twice in one run, which is the noise half
+    of rule 14 -- an operator counting problems reads two.
+    """
+    monkeypatch.setattr(subject, "load_swap", lambda *_a, **_k: (swap(), []))
+    monkeypatch.setattr(subject, "build_adapters", lambda *_a, **_k: {})
+    monkeypatch.setattr(subject, "utc_now_iso", lambda: "2026-10-10T17:11:00+00:00")
+
+    with pytest.raises(subject.Refused) as caught:
+        subject.preflight(Args(), ICP_SETTINGS)
+
+    printed = capsys.readouterr().out
+    assert caught.value.code == 1, "a lapsed swap with no flag is a STATE refusal, not config"
+    assert "LAPSED QUOTE  HONORED" not in printed
+    assert printed.count("lapsed") == 0, (
+        f"refuse() reports it, into Refused.lines, which main() prints to stderr -- not here:"
+        f"\n{printed}"
+    )
+    assert any("lapsed" in line for line in caught.value.lines), (
+        "and it IS reported, as a refusal"
+    )
 
 
 def test_an_unset_ledger_id_refuses_with_code_2_and_says_how_to_read_it():
