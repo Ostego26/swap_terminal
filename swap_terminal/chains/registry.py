@@ -107,6 +107,7 @@ from network_target import configuring_variable
 from .bitcoin import BitcoinAdapter
 from .gridcoin import GridcoinAdapter
 from .icp import ICPAdapter, dfx_transport
+from .icp_payout_identity import payout_identity
 from .litecoin import LitecoinAdapter
 from .solana import SolanaAdapter
 from .xrp import XRPAdapter
@@ -277,7 +278,15 @@ def build_adapters(rpc: Mapping[str, object]) -> dict:
         adapters["ICP"] = ICPAdapter(
             icp["ledger_canister_id"],
             icp["owner_principal"],
-            dfx_transport(icp.get("service", "icp-replica"), icp.get("timeout", 60.0), icp.get("network_url", "")),
+            # identity= WAS NEVER PASSED AND THAT WAS THE WHOLE ICP PAYOUT BUG.
+            # dfx_transport() grew this parameter on 2026-10-07 for the minting-account
+            # top-up, one day after ICP landed here, and this call site went on passing
+            # three arguments -- so the transport defaulted to unsigned, ICPAdapter's
+            # fully-implemented send_to_address() could never be used, and can_spend was
+            # hardcoded False to say so. Empty still means unsigned, so a deployment that
+            # sets nothing behaves exactly as it did.
+            dfx_transport(icp.get("service", "icp-replica"), icp.get("timeout", 60.0),
+                          icp.get("network_url", ""), payout_identity()),
         )
     return adapters
 

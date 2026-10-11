@@ -83,6 +83,7 @@ from .icp_account import (
     principal_to_bytes,
     subaccount_from_index,
 )
+from .icp_payout_identity import missing_identity_refusal, payout_identity_is_present
 
 logger = logging.getLogger(__name__)
 
@@ -617,15 +618,30 @@ class ICPAdapter:
     # so a payout has to be signed by the desk's own dfx identity -- and reads need
     # no identity at all, which is why ICP -> * works while * -> ICP does not.
     # Placing that identity is key material and the operator's (rule 16).
+    # THESE TWO CLASS-LEVEL VALUES ARE THE FAIL-CLOSED FALLBACK AND ARE DELIBERATELY
+    # THE REFUSING PAIR, exactly as chains/solana.py's and chains/xrp.py's are.
+    # __init__ overrides both per instance from
+    # chains/icp_payout_identity.payout_identity_is_present(), so anything that reads
+    # them off the CLASS -- a stub, a reflective check, a reader who never constructed
+    # an adapter -- gets "cannot pay out". That is the safe direction, and the same
+    # direction registry.why_cannot_pay_out() already fails in when the attribute is
+    # missing entirely.
+    #
+    # THEY WERE HARDCODED UNTIL 2026-10-11 AND THAT WAS THE BUG, not the wording. The
+    # comment above still holds on the LEDGER's semantics -- `transfer` debits the
+    # caller, reads need no identity, which is why ICP -> * works and * -> ICP does
+    # not -- and what was wrong was the conclusion that no identity could be supplied.
+    # dfx_transport() grew an `identity` parameter on 2026-10-07, ONE DAY after ICP
+    # landed, for the minting-account top-up; registry.py went on passing none. So the
+    # transport could sign, send_to_address() was fully implemented, and the single
+    # argument joining them was never passed.
+    #
+    # Hardcoding is what kept that invisible. XRP has derived can_spend from its seed
+    # since 2026-10-02 and SOL from its keypair since 2026-10-03 -- each after an
+    # operator had to say so -- and ICP was the third. Derived here, and
+    # tests/test_every_payable_adapter_derives_can_spend.py is what stops a fourth.
     can_spend = False
-    payout_refusal = (
-        "ICP cannot pay out from this process: the ledger's `transfer` debits the CALLER, so a "
-        "payout must be signed by the desk's own dfx identity, and this process has none -- it "
-        "makes every ledger call with `--identity anonymous`, which is sufficient for balances "
-        "and fees and cannot move funds. This is why ICP -> * works and * -> ICP does not. "
-        "Placing the desk identity where this process can reach it is a custody decision with no "
-        "default: it is key material, and nothing in this repository moves, copies or reads it."
-    )
+    payout_refusal = f"ICP {missing_identity_refusal()}"
 
     def __init__(self, ledger_canister_id: str, owner_principal: str, call):
         # `call` IS REQUIRED AND THE TRANSPORT SETTINGS ARE GONE FROM HERE.
@@ -678,6 +694,19 @@ class ICPAdapter:
         # swap_terminal/ or tests/ ever read either one. They were state this object
         # carried about a transport it no longer builds.
         self._call = call
+        # PER INSTANCE, OVERRIDING THE REFUSING CLASS-LEVEL PAIR ABOVE, which is the
+        # shape chains/solana.py and chains/xrp.py already use. Read here rather than
+        # at class definition time because the environment of a long-lived worker is
+        # not the environment of whoever imported the module, and because a test has
+        # to be able to set it.
+        #
+        # THE REFUSAL SENTENCE IS NOT RECOMPUTED WHEN ARMED. An armed adapter has no
+        # refusal to print, and leaving the class-level sentence in place on an armed
+        # instance would hand any surface that reads payout_refusal unconditionally a
+        # reason for a chain that can pay -- which is the wrong-comment bug (rule 16)
+        # with a page render behind it.
+        self.can_spend = payout_identity_is_present()
+        self.payout_refusal = "" if self.can_spend else f"ICP {missing_identity_refusal()}"
 
     # -- derivation, no I/O -------------------------------------------------
 

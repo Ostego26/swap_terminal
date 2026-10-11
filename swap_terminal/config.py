@@ -1523,6 +1523,26 @@ class Config:
             # transport that has actually been exercised against this operator's
             # replica rather than silently switching to one that has not.
             "network_url": _env("ICP_DFX_NETWORK_URL"),
+            # ICP_PAYOUT_IDENTITY IS DELIBERATELY NOT READ HERE, and the absence is
+            # the same decision this file's SOL and XRP entries already make: signing
+            # material does not come through Config. SOL's keypair path is read by
+            # chains/solana_signing.keypair_path_from_environment() and XRP's seed by
+            # chains/xrp_payout_seed.signing_seed(), both straight from os.environ at
+            # the moment they are needed, and neither appears in Config.RPC.
+            #
+            # IT IS NOT A STYLE CHOICE -- it is what keeps the signing variables out of
+            # the base compose file. tests/test_compose_chain_variables.py asserts that
+            # every variable Config reads is passed to the container, so a `_env()` here
+            # would require docker-compose.web.yml to pass ICP_PAYOUT_IDENTITY, and that
+            # file's own line 404 states the rule it would break: "SIGNING MATERIAL IS
+            # ABSENT, ALL OF IT." Arming must come from the overlay, by an act, and not
+            # from a pass-through that any exported variable could satisfy.
+            #
+            # I ADDED IT HERE FIRST and that gate is what caught it, which is the gate
+            # working in the direction nobody writes a test for.
+            #
+            # chains/registry.py reads it from chains/icp_payout_identity.payout_identity()
+            # when it builds the transport.
         },
     }
 
