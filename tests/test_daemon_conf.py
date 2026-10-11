@@ -569,6 +569,13 @@ def test_EVERY_entry_point_THAT_RESOLVES_A_CHAIN_is_on_one_side_or_the_other():
 def code_without_prose(path: pathlib.Path) -> str:
     """One root script's CODE, with every docstring and comment removed.
 
+    A SECOND COPY OF THIS FUNCTION EXISTS, and rule 8 requires both sites to name the
+    other: tests/test_rpc_connect_timeout.py has an identical one. It is duplicated
+    rather than imported because importing from here would pull chains/daemon_conf and
+    its environment handling into a file about RPC timeouts, which has no business with
+    either. If a THIRD copy is ever wanted, that is the signal to move this into a
+    shared test helper module instead -- two is the most that stays honest.
+
     BOTH GATES BELOW READ THIS INSTEAD OF THE RAW TEXT, and that is a fix rather than
     a refinement. They matched the literal string `conf_fallback_settings` anywhere in
     the file, so:

@@ -123,6 +123,16 @@ def _seconds_from_env(name: str, default: float) -> float:
 #: follow it (rule 3 -- the denominator is the chains, not the spelling).
 LONGEST_RPC_TIMEOUT_SECONDS = 60.0
 
+# WHY THIS DID NOT DROP WHEN THE CONNECT TIMEOUT WAS SPLIT OFF, 2026-10-11. A payout
+# cycle measured 65.0s on the operator's host doing nothing, and 30s of it was spent
+# establishing that host.docker.internal had no Gridcoin daemon behind it. rpc_timeout.py
+# fixed that by bounding the HANDSHAKE at 5s separately from the wait for an answer --
+# so the COMMON case got 6x faster while this number, which sizes the grace, stayed at
+# 60. That is correct and not an oversight: the grace has to cover the WORST case, and a
+# daemon that accepted the connection and is still thinking can legitimately spend every
+# second of ICP_CALL_TIMEOUT. Shortening the grace on the strength of the faster common
+# case would put us back where eec8808 started, SIGKILLing a worker mid-unit.
+
 #: How much longer than one hung call a worker gets. Covers the poll granularity in
 #: workers/common.sleep_until_next_cycle (0.25s), the database write that follows a send,
 #: and process scheduling on a loaded host.

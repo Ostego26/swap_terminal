@@ -200,6 +200,7 @@ import requests
 # in one more place. This import needs no path help, because anything that can
 # import `chains.xrp` at all already has swap_terminal/ on the path.
 from microfortnights import format_duration
+from rpc_timeout import connect_and_read
 
 # THE SHAPE A STRANDED DEPOSIT IS RECORDED IN, IMPORTED AND NOT RE-DECLARED HERE.
 #
@@ -1053,7 +1054,13 @@ class XRPAdapter:
             self.url,
             headers={"Content-Type": "application/json"},
             data=json.dumps({"method": method, "params": [params or {}]}),
-            timeout=self.timeout,
+            # (connect, read) RATHER THAN A SCALAR, and the split is the fix for a 65.0s
+            # payout cycle measured on the operator's host 2026-10-11. `requests` applies a
+            # scalar to BOTH legs, so <ASSET>_RPC_TIMEOUT=30 spent 30s establishing that
+            # host.docker.internal had nothing behind it -- see rpc_timeout.py for the
+            # measurement, and for why shortening THIS leg cannot cause a double send
+            # (no handshake means no bytes delivered) where shortening the read leg could.
+            timeout=connect_and_read(self.timeout),
         )
         response.raise_for_status()
         payload = response.json()

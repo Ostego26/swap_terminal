@@ -199,6 +199,21 @@ services:
       # unchanged: export it, or uncomment it in .env.
       ST_WORKER_GRACE_SECONDS: "${ST_WORKER_GRACE_SECONDS:-}"
 
+      # SECONDS allowed for the TCP handshake to a chain RPC endpoint, alone. Empty for
+      # the same reason as the line above -- swap_terminal/rpc_timeout.py owns the
+      # default (5.0) and treats unset and empty alike.
+      #
+      # WHY IT EXISTS AT ALL, measured on the operator's host 2026-10-11. A payout cycle
+      # took 65.0s to do nothing, and `requests` applies a SCALAR `timeout=` to both its
+      # legs, so GRC_RPC_TIMEOUT=30 spent 30s establishing that host.docker.internal had
+      # no Gridcoin daemon behind it. Reproduced locally against a dropping endpoint:
+      # 30.033s scalar, 5.008s once the handshake got its own bound.
+      #
+      # DO NOT SET THIS TO ZERO. rpc_timeout.py refuses it rather than accepting it,
+      # because a zero handshake budget reports every chain unreachable -- which on the
+      # deposit path means a real deposit declared absent.
+      ST_CHAIN_CONNECT_TIMEOUT_SECONDS: "${ST_CHAIN_CONNECT_TIMEOUT_SECONDS:-}"
+
       # EVERY NAME HERE IS MEASURED AGAINST config.py, NOT REMEMBERED, and the
       # first draft of this block got three of them wrong in a way that killed
       # three chains silently.

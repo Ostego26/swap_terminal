@@ -81,6 +81,7 @@ from chains.coin_amounts import fit_to_chain_precision
 # and pure functions, so there is no import-time side effect of the kind rule 12
 # names.
 from deposit_vout_artifact import SUSPECT_VOUT
+from rpc_timeout import connect_and_read
 from script_pub_key import pays_address
 
 logger = logging.getLogger(__name__)
@@ -529,7 +530,13 @@ class RPCAdapter:
             auth=(self.user, self.password),
             headers={"Content-Type": "application/json"},
             data=json.dumps(payload),
-            timeout=self.timeout,
+            # (connect, read) RATHER THAN A SCALAR, and the split is the fix for a 65.0s
+            # payout cycle measured on the operator's host 2026-10-11. `requests` applies a
+            # scalar to BOTH legs, so <ASSET>_RPC_TIMEOUT=30 spent 30s establishing that
+            # host.docker.internal had nothing behind it -- see rpc_timeout.py for the
+            # measurement, and for why shortening THIS leg cannot cause a double send
+            # (no handshake means no bytes delivered) where shortening the read leg could.
+            timeout=connect_and_read(self.timeout),
         )
         # THE BODY IS READ BEFORE THE STATUS, and the order is the whole fix.
         #
