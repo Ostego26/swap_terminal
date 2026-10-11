@@ -114,12 +114,38 @@
 # gap than it was, and it closes the first time a transfer is attempted, which is the
 # second item below.
 #
-# SECOND, NO ICP PAYOUT HAS EVER BEEN SIGNED OR BROADCAST BY THIS CODE, on any
-# network. The arming path is new, the derivation is unit-tested, and what has NOT
-# happened is a transfer leaving the desk's account on the local replica and a block
-# index coming back. That is the proof this repository asks for and it is
-# outstanding. The first run belongs on the local replica, where ICP is play money,
-# and it is the operator's to make.
+# SECOND, AND THIS BLOCK SAID SOMETHING FALSE UNTIL 2026-10-11. It read "NO ICP PAYOUT
+# HAS EVER BEEN SIGNED OR BROADCAST BY THIS CODE, on any network", and I wrote that, and
+# chains/icp.py's own header records the opposite four lines from its top:
+#
+#     send 0.25 ICP     block index 1
+#     after             desk 999.7499    subaccount 1 0.25
+#     after             desk 999.7499    subaccount 1 0.25      unchanged
+#
+# A 0.25 ICP transfer through ICPAdapter.send_to_address() on the local replica,
+# 2026-10-06, with the block index returned and a same-key retry answering TxDuplicate
+# against an unchanged balance. config.py:812 and config.py:1015 cite the same run. I
+# read the `can_spend = False` comment lower in that file and took it for the whole
+# story without reading the header above it -- the wrong-comment bug committed by a
+# reader rather than a writer, and rule 17's failure exactly: a hypothesis written in
+# the register of a measurement.
+#
+# THE NARROWER CLAIM IS THE TRUE ONE AND IT IS STILL OUTSTANDING. That run reached the
+# ledger through the COMPOSE transport, where an empty identity means the replica
+# container's own default. What has never run is the URL transport with an explicit
+# --identity, which is what this overlay arms -- and separately, no payout has ever
+# completed through services/payout_service.py for ICP at all, because
+# broadcast_payout() calls send_to_address(address, amount) with two positional
+# arguments, so created_at_time arrives as None and the adapter refuses before any
+# ledger call. Measured 2026-10-11 through the real process_pending_payouts():
+# zero ledger calls, swaps.status failed, the deposit already credited.
+#
+# SO ARMING THIS OVERLAY TODAY MAKES FIVE `* -> ICP` DIRECTIONS OFFERABLE AGAINST A
+# PAYOUT PATH THAT REFUSES EVERY TIME. It is a refusal rather than a double-pay --
+# nothing is sent, so nothing is sent twice -- but a customer's deposit is taken and
+# credited first. Until payout_service passes the swap's recorded created_at, the
+# honest posture is not to arm this, and `configure_env.py --arm icp` is reversible by
+# removing this file from COMPOSE_FILE and recreating the container.
 services:
   web:
     volumes:

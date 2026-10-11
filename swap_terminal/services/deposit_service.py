@@ -1237,14 +1237,53 @@ def reconcile_shared_accounts(db, config, adapters: dict, scans: SharedScans | N
             # refuses to create a swap on this asset while it is empty, so there is nothing
             # that could have arrived for it.
             continue
-        # EVERY SWAP ON THE ASSET, active or not -- see unclaimed_events() on why a completed
-        # swap still claims its tag.
+        # EVERY SWAP ON THE ASSET *AT THIS ACCOUNT*, active or not -- see unclaimed_events()
+        # on why a completed swap still claims its tag.
+        #
+        # =====================================================================
+        # `AND deposit_address = ?` WAS MISSING AND A REPOINTED ACCOUNT SWALLOWED
+        # A DEPOSIT INTO NO TABLE AT ALL
+        # =====================================================================
+        #
+        # TAGS RESTART AT 1 PER ACCOUNT. _ALLOCATE_SQL is MAX(destination_tag)+1 WHERE
+        # account = :account, and the table's PRIMARY KEY is (account, destination_tag). So
+        # the moment a shared deposit account is repointed, one tag belongs to two swaps on
+        # two accounts -- and keying this map on the tag alone makes the OLD account's swap
+        # claim the NEW account's deposit.
+        #
+        # THIS IS NOT HYPOTHETICAL FOR THIS OPERATOR. Measured on their host 2026-10-11,
+        # out of their own database: their XRP swaps carry TWO distinct deposit accounts,
+        # so the account has been repointed and both tag spaces are live.
+        #
+        # Measured end to end -- an ACTIVE swap on the OLD account holding tag 5, two swaps
+        # on the NEW configured account at tags 1 and 2, and 2.5 XRP arriving at the NEW
+        # account with tag 5:
+        #
+        #     claimed[5]                  the OLD account's swap, awaiting_deposit
+        #     unclaimed_events() verdict  "matches an active swap" -> NOT reported
+        #     the old swap's own refresh   scans the OLD account -> never sees it
+        #     deposit_events               0
+        #     unattributable_deposits      0
+        #     late_deposits                0
+        #
+        # Money in the desk's configured account, in no table, and no log line. The control
+        # -- same cycle, old swap removed -- writes one row. The address filter writes one
+        # row too, and the row is a REPORT rather than a credit: it lands in
+        # unattributable_deposits for a person to resolve, which is the halt this whole
+        # reconciler exists to produce.
+        #
+        # db.py ALREADY CARRIES THIS EXACT KEY as idx_swaps_deposit_address_tag ON
+        # swaps(deposit_address, deposit_tag), with its own comment saying "the pair
+        # (address, tag) is what identifies a swap" -- so the index was built for the query
+        # this was not. And services/late_deposit_service.py's header asserts the tag chains
+        # "do not have this hole" BECAUSE claimed is every swap on the asset. That sentence
+        # was the defect: asset-wide is too wide once there are two accounts.
         claimed = {
             int(row["deposit_tag"]): (row["id"], row["status"])
             for row in db.execute(
                 "SELECT id, status, deposit_tag FROM swaps WHERE from_asset = ?"
-                " AND deposit_tag IS NOT NULL",
-                (asset,),
+                " AND deposit_address = ? AND deposit_tag IS NOT NULL",
+                (asset, address),
             ).fetchall()
         }
         # EVERY txid THAT ALREADY HAS A deposit_events ROW FOR THIS ASSET.

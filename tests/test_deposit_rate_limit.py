@@ -155,9 +155,9 @@ def seed_swap(db, swap_id, tag, *, status="awaiting_deposit", min_conf=3):
         "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, deposit_tag,"
         " payout_address, expected_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
         " output_amount_estimate, status, min_confirmations, expires_at, created_at, updated_at)"
-        " VALUES (?,'q','SOL','GRC',?,?,'mgFsSymndJpBm5FGpLVTabndYBQdcH4x3b',0.01,8700.0,150,0.01,"
+        " VALUES (?,'q','SOL','GRC',?,?,?,0.01,8700.0,150,0.01,"
         "86.0,?,?,'2999-01-01T00:00:00+00:00','2026-10-01T00:00:00+00:00','2026-10-01T00:00:00+00:00')",
-        (swap_id, ACCOUNT, tag, status, min_conf),
+        (swap_id, ACCOUNT, tag, GRC_PAYOUT, status, min_conf),
     )
     db.commit()
 
@@ -1234,3 +1234,101 @@ def test_the_cycle_says_it_scanned_once_and_for_how_many_swaps(db, caplog):
     assert ACCOUNT in lines[0], "the account it read, echoed (rule 14)"
     assert "3 active swap(s)" in lines[0], "how many swaps the one result served"
     assert "4 scans" in lines[0], "and what the per-swap shape would have cost"
+
+
+# --- the repoint hole, and PREVIOUS_ACCOUNT's first caller ---------------------
+#
+# PREVIOUS_ACCOUNT was added to this file with a comment saying what it is for and NO
+# TEST EVER USED IT (grepped by name, 2026-10-11: one definition, zero callers). A
+# fixture with no caller is rule 9's dead code, and here it was dead in the one place
+# that would have caught the defect below. This is its first caller.
+
+
+def seed_swap_at(db, swap_id, tag, account, *, status="awaiting_deposit"):
+    """seed_swap(), but at an account the caller names.
+
+    A SEPARATE HELPER RATHER THAN A SIXTH PARAMETER on seed_swap(). That function has
+    five and ruff's PLR0913 ceiling is five, and twenty-odd callers pass the configured
+    account -- so widening it to serve two tests would mean either a suppression or
+    editing every call site, where this costs four lines and says what it is for.
+    """
+    db.execute(
+        "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, deposit_tag,"
+        " payout_address, expected_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
+        " output_amount_estimate, status, min_confirmations, expires_at, created_at, updated_at)"
+        " VALUES (?,'q','SOL','GRC',?,?,?,0.01,8700.0,150,0.01,"
+        "86.0,?,3,'2999-01-01T00:00:00+00:00','2026-10-01T00:00:00+00:00','2026-10-01T00:00:00+00:00')",
+        (swap_id, account, tag, GRC_PAYOUT, status),
+    )
+    db.commit()
+
+
+def test_a_tag_held_by_an_active_swap_at_the_PREVIOUS_account_does_not_swallow_the_deposit(db):
+    """THE ONE THAT PUT MONEY IN NO TABLE AT ALL. MUTATION: drop `AND deposit_address = ?`.
+
+    =========================================================================
+    TAGS RESTART AT 1 PER ACCOUNT, SO A REPOINT MAKES ONE TAG MEAN TWO SWAPS
+    =========================================================================
+
+    services/xrp_tag_service's _ALLOCATE_SQL is MAX(destination_tag)+1 WHERE
+    account = :account, and that table's PRIMARY KEY is (account, destination_tag). So the
+    moment a shared deposit account is repointed, tag 5 belongs to one swap on the old
+    account and, eventually, a different swap on the new one.
+
+    reconcile_shared_accounts() built its `claimed` map keyed on the TAG ALONE, selecting
+    every swap on the asset. So a deposit arriving at the CONFIGURED account carrying a tag
+    that an ACTIVE swap on the PREVIOUS account holds was reported as "matches an active
+    swap" and not recorded -- while that old swap's own refresh scans the PREVIOUS account
+    and never sees it. Measured before the fix: deposit_events 0, unattributable_deposits
+    0, late_deposits 0, and one print line filtered through `_reported_deferrals` so it is
+    emitted once per adapter instance and never again until a worker restart.
+
+    THIS IS LIVE FOR THIS OPERATOR, which is why it is a test and not a note. Measured out
+    of their own database on 2026-10-11: their XRP swaps carry TWO distinct deposit
+    accounts, so the account has been repointed and both tag spaces are populated.
+
+    THE ROW IS A REPORT, NOT A CREDIT. It lands in unattributable_deposits for a person to
+    resolve, which is the halt this reconciler exists to produce -- so the fix makes money
+    VISIBLE rather than moving any.
+
+    db.py ALREADY CARRIES THIS KEY as idx_swaps_deposit_address_tag ON
+    swaps(deposit_address, deposit_tag), whose own comment says "the pair (address, tag) is
+    what identifies a swap". The index was built for the query this was not.
+    """
+    # An ACTIVE swap on the account the desk used BEFORE the repoint, holding tag 5.
+    seed_swap_at(db, "s_old_account", 5, PREVIOUS_ACCOUNT, status="awaiting_deposit")
+    # Two swaps at the CONFIGURED account, whose tag space restarted at 1.
+    seed_swap(db, "s_new_1", 1)
+    seed_swap(db, "s_new_2", 2)
+
+    # And a payment arrives at the CONFIGURED account carrying tag 5.
+    adapter = CountingAdapter([event("tx_tag5_at_new_account", 5)])
+    written = deposit_service.reconcile_shared_accounts(db, CONFIG, {"SOL": adapter})
+
+    rows = db.execute("SELECT txid, discriminator FROM unattributable_deposits").fetchall()
+    assert written == 1, (
+        "the deposit was claimed by a swap at a DIFFERENT account and recorded nowhere: "
+        "deposit_events, unattributable_deposits and late_deposits all empty, with money "
+        "in the desk's configured account"
+    )
+    assert [row["txid"] for row in rows] == ["tx_tag5_at_new_account"]
+    assert str(rows[0]["discriminator"]) == "5", "the row does not name the tag that arrived"
+
+
+def test_a_tag_held_at_the_CONFIGURED_account_is_still_claimed(db):
+    """The control, and without it the fix above could be "report everything".
+
+    MUTATION: make the claimed map empty. A swap at the configured account holding the tag
+    that arrived MUST still claim it -- otherwise every ordinary tagged deposit becomes an
+    unattributable row and the reconciler reports the whole account as stranded every
+    cycle, which is noisier than the hole it replaced and would strand real swaps behind a
+    human review queue.
+    """
+    seed_swap_at(db, "s_old_account", 5, PREVIOUS_ACCOUNT, status="awaiting_deposit")
+    seed_swap(db, "s_new_5", 5)
+
+    adapter = CountingAdapter([event("tx_tag5_at_new_account", 5)])
+    written = deposit_service.reconcile_shared_accounts(db, CONFIG, {"SOL": adapter})
+
+    assert written == 0, "a deposit matching a swap at the configured account was reported stranded"
+    assert db.execute("SELECT COUNT(*) AS n FROM unattributable_deposits").fetchone()["n"] == 0
