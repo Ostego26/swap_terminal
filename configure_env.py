@@ -817,6 +817,56 @@ def every_variable_this_tool_can_set() -> list[str]:
     ]
 
 
+def still_unset(values: dict, already: dict) -> list[str]:
+    """Every variable this tool can set that is NOT set once `values` is written.
+
+    =========================================================================
+    THE BLOCK THIS REPLACES COULD NOT PRINT A NAME, AND PRINTED "(none)" TO AN
+    OPERATOR WHO HAD THREE UNANSWERABLE VARIABLES ON SCREEN
+    =========================================================================
+
+    say_dry_run() used to compute
+
+        will_be_set = set(values) | {name for name, _what in needed} | set(already)
+        still_unset = sorted(set(every_variable_this_tool_can_set()) - will_be_set)
+
+    and print the result under "AFTERWARDS, STILL UNSET", followed by the sentence "the
+    chains these belong to stay unconfigured, and the ATM page will show them as NONE."
+    That difference is EMPTY FOR EVERY INPUT. asked_for() builds its list as the
+    complement of every_variable_this_tool_can_set() -- which is the whole point of
+    commit defa3b4, so that no variable can fall between discovery and the questions --
+    so a name is always discovered, already in .env, or asked for. Union those three and
+    you have the set you subtracted them from.
+
+    MEASURED RATHER THAN ARGUED, 2026-10-11: over 4000 randomized (already, discovered)
+    pairs drawn from the 17 variables this tool can set, 0 produced a non-empty result.
+    A field that cannot vary is rule 14's defect in its strongest form -- it is not a
+    number whose meaning is unstated, it is a number with no meaning at all.
+
+    AND IT WAS READ AS GOOD NEWS. The operator's run on 2026-10-11 listed six variables
+    under WOULD ASK FOR -- three of them BTC's, on a host with no bitcoin.conf, no
+    cookie file and nothing listening on 18332 or 18443, so they were unanswerable -- and
+    then said "(none) <- every variable this tool can set is accounted for". "Accounted
+    for" was true in the sense that each had been MENTIONED. It reads as "nothing will be
+    left unconfigured", which was false for three of them before the run started.
+
+    THE HONEST QUESTION IS ASKED AT TWO DIFFERENT MOMENTS and this answers both, which is
+    why it takes `values` rather than `needed`. On the dry run nothing has been answered
+    yet, so the answer is "what depends on your answering". After an apply it is "what
+    you skipped, or refused, or could not supply". Same derivation, two labels, one place
+    (rule 8) -- and on the apply path the result VARIES, which is what makes its `(none)`
+    worth printing.
+
+    `already.get(name)` RATHER THAN `name in already`, because existing_assignments() can
+    carry a name with an empty value: docker-compose.web.yml passes every chain variable
+    as `${VAR:-}`, so an empty string in .env reaches the container as an empty string and
+    build_adapters() skips the chain. A name set to nothing is unset for every purpose
+    this report has.
+    """
+    return sorted(name for name in every_variable_this_tool_can_set()
+                  if not values.get(name) and not already.get(name))
+
+
 def say_dry_run(needed: list, values: dict, secrets: set, already: dict) -> None:
     """What an --apply run would ask for and write. Rule 14: `(none)` is a result.
 
@@ -834,15 +884,21 @@ def say_dry_run(needed: list, values: dict, secrets: set, already: dict) -> None
     say(f"  WOULD WRITE      {len(values)} discovered value(s) and {len(needed)} asked value(s)")
     say("  Nothing was written. Re-run with --apply to be prompted and have .env updated.")
     say("")
-    say("  AFTERWARDS, STILL UNSET  <- the chains these belong to stay unconfigured, and the")
-    say("                           ATM page will show them as NONE. That is a result, not a")
-    say("                           failure of this run (rule 14).")
-    will_be_set = set(values) | {name for name, _what in needed} | set(already)
-    still_unset = sorted(set(every_variable_this_tool_can_set()) - will_be_set)
-    for name in still_unset:
+    # THE TWO GROUPS AN OPERATOR HAS TO TELL APART, which the block this replaces did not
+    # distinguish: a value this tool has already found, and a value that exists only if
+    # they can answer a question. For the run that produced this fix, three of the second
+    # group were BTC's on a host with no bitcoind, so they were never going to be set --
+    # and the old block's "(none)" said the opposite.
+    total = len(every_variable_this_tool_can_set())
+    pending = still_unset(values, already)
+    say(f"  AFTERWARDS       {len(values)} of {total} written with no prompt  <- discovered above;")
+    say("                   nothing left to decide about these")
+    say(f"                   {len(pending)} of {total} ONLY IF YOU ANSWER  <- press enter past one and it")
+    say("                   stays unset; the chain that needs it then reads NONE on the ATM page")
+    for name in pending:
         say(f"    {name}")
-    if not still_unset:
-        say("    (none)  <- every variable this tool can set is accounted for")
+    if not pending:
+        say("    (none)  <- nothing is waiting on an answer; --apply writes and asks nothing")
 
 
 def collect_answers(needed: list, secrets: set) -> dict[str, str]:
@@ -877,19 +933,58 @@ def collect_answers(needed: list, secrets: set) -> dict[str, str]:
     return answers
 
 
-def say_what_was_written(values: dict) -> None:
-    """The result, and the step that is REQUIRED rather than optional after it.
+def say_still_unset(values: dict, already: dict) -> None:
+    """What this tool can set and did not, after a run that wrote. `(none)` is a result.
+
+    ONE FORMATTER FOR BOTH CALLERS -- the write path and main()'s nothing-to-write exit.
+    Two spellings of this block is rule 8's shape, and the second one would be the one
+    that forgot the denominator.
+
+    THE DENOMINATOR IS STATED beside the count (rule 3). "3 unset" invites the reading
+    "3 out of a handful"; "3 of 17" says how much of the surface is dark. The count that
+    produced this fix was six of seventeen, and the block it replaces printed none.
+    """
+    pending = still_unset(values, already)
+    total = len(every_variable_this_tool_can_set())
+    if not pending:
+        say(f"  STILL UNSET      (none)  <- all {total} variables this tool can set are set")
+        return
+    say(f"  STILL UNSET      {len(pending)} of {total} this tool can set, because they were not")
+    say("                   discovered and were not answered")
+    for name in pending:
+        say(f"    {name}")
+    say("                   the chains these belong to stay unconfigured and read NONE on")
+    say("                   the ATM page. That is a result, not a failure of this run.")
+
+
+def say_what_was_written(values: dict, already: dict) -> None:
+    """The result, what is STILL unset after it, and the step that is REQUIRED after that.
 
     AN ALREADY-RUNNING CONTAINER KEEPS THE ENVIRONMENT IT STARTED WITH, so writing .env
     changes nothing a serving process can see until the container is recreated. Omitting
     that line would leave an operator looking at six NONE lamps on a correctly
     configured machine -- which is the exact state this tool was written for.
+
+    THE "STILL UNSET" BLOCK BELONGS HERE AND WAS ONLY EVER IN THE DRY RUN, which is the
+    second half of the defect still_unset() documents. The dry run had a block that could
+    not print a name; the apply run -- the one that actually produces skips -- had no
+    block at all. collect_answers() prints a line per skip as it happens, so the
+    information scrolled past one variable at a time and nothing added it up. An operator
+    who pressed enter past three BTC prompts saw three "skipped" lines, then a WROTE
+    block, and nothing saying BTC was still unconfigured.
+
+    Rule 13 is the sharper version of why: "treat 'skipped' plus 'success' in the same
+    output as a defect in the output." A WROTE line that counts only what succeeded, in
+    a run that also skipped, is that defect -- and here the `(none)` VARIES, so it is a
+    result rather than a constant dressed as one.
     """
     say("")
     say(f"  WROTE            {len(values)} variable(s) into {ENV_FILE}, mode 600")
     say(f"                   {', '.join(sorted(values))}")
     say("                   every other line carried through unchanged; no .bak was made")
     say("  persists         across new shells and reboots, which is the whole point")
+    say("")
+    say_still_unset(values, already)
     say("")
     say("  NOT YET PROVEN   writing .env says nothing about what the CONTAINER received. An")
     say("                   already-running container keeps the environment it started with,")
@@ -974,10 +1069,15 @@ def main() -> int:
     if not values:
         say("")
         say("  NOTHING TO WRITE. .env is unchanged.")
+        # AND WHAT THAT LEAVES DARK, on the one exit most likely to be read as harmless.
+        # "Nothing to write" on a run where every prompt was skipped is the same output
+        # as "nothing to write" on a run where everything was already correct, and those
+        # are opposite states (rule 14).
+        say_still_unset(values, already)
         return 0
 
     write_env(values)
-    say_what_was_written(values)
+    say_what_was_written(values, already)
     return 0
 
 

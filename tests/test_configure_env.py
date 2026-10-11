@@ -439,33 +439,178 @@ def test_an_undiscoverable_icp_value_also_becomes_a_question(env_file, monkeypat
     assert "swap_stack.py status" in would_ask
 
 
-def test_nothing_this_tool_can_set_falls_between_discovery_and_the_prompt(env_file, monkeypatch, capsys):
-    """THE GENERAL GATE. MUTATION: add a name to every_variable_this_tool_can_set() only.
+def dry_run_sets(monkeypatch, capsys):
+    """A dry run's two derivations, as sets: what it will ASK for, and what it says is unset.
 
-    This is the assertion the two above are instances of, and it is the one that survives
-    somebody adding a fourteenth variable: after a run, every name this tool can set is
-    either already in .env, discovered, or queued to be asked. A name in none of those is
-    the hole, whatever its chain.
+    THEY ARE COMPUTED INDEPENDENTLY AND MUST AGREE, which is what makes the comparison
+    below a gate rather than a tautology. asked_for() walks ASKED plus the complement of
+    every_variable_this_tool_can_set(); still_unset() walks that same table against what
+    was discovered and what .env already holds, and never consults asked_for() at all. A
+    variable that falls out of one and not the other is the hole BTC_RPC_PORT fell
+    through on the operator's first good run.
     """
     monkeypatch.setattr(configure_env, "listening_ports", set)
-    monkeypatch.setattr(configure_env, "discover_icp", lambda: {})
     monkeypatch.setattr("sys.argv", ["configure_env.py"])
+    already = configure_env.existing_assignments()
+    discovered = configure_env.discover_all(already)
+    capsys.readouterr()
+    values = {name: value for name, (value, _why) in discovered.items() if not already.get(name)}
+    will_ask = {name for name, _what in configure_env.asked_for(discovered, already)
+                if not already.get(name) and name not in values}
+    reported_unset = set(configure_env.still_unset(values, already))
+    return will_ask, reported_unset, set(values), already
 
-    configure_env.main()
-    printed = capsys.readouterr().out
 
-    assert "(none)  <- every variable this tool can set is accounted for" in printed, (
-        "the run reported at least one variable it will neither set nor ask about, which is how "
-        "BTC_RPC_PORT reached the operator"
+def test_nothing_this_tool_can_set_falls_between_discovery_and_the_prompt(env_file, monkeypatch, capsys):
+    """THE GENERAL GATE, REWRITTEN 2026-10-11 BECAUSE ITS OLD FORM COULD NOT FAIL.
+
+    The property is unchanged and is the one that survives somebody adding an eighteenth
+    variable: after a run, every name this tool can set is already in .env, discovered, or
+    queued to be asked. A name in none of those is the hole, whatever its chain.
+
+    WHAT IT USED TO ASSERT, and why that was worthless:
+
+        assert "(none)  <- every variable this tool can set is accounted for" in printed
+
+    say_dry_run() computed that `(none)` as
+
+        every_variable_this_tool_can_set() - (values | asked | already)
+
+    and asked_for() builds its list AS the complement of every_variable_this_tool_can_set(),
+    so the subtrahend always covers the minuend. The difference is empty for every input --
+    measured over 4000 randomized (already, discovered) pairs, 0 non-empty. The gate was
+    asserting that a constant was itself.
+
+    IT NOW COMPARES TWO INDEPENDENT DERIVATIONS of the same set, so dropping a name from
+    either one makes them disagree. The test below this is the control and it fails when
+    asked_for() drops a name -- which the old control could not establish, because it
+    patched asked_for() and thereby patched away the construction that made the old block
+    vacuous. It proved the FORMATTER could print a name while the thing it was guarding
+    against was true all along.
+    """
+    will_ask, reported_unset, discovered_names, already = dry_run_sets(monkeypatch, capsys)
+
+    assert reported_unset == will_ask, (
+        f"the dry run says these are unset without asking for them: "
+        f"{sorted(reported_unset - will_ask)}; and asks for these without reporting them "
+        f"unset: {sorted(will_ask - reported_unset)}. Either way a variable has fallen "
+        f"between the two halves of the report, which is how BTC_RPC_PORT reached the operator"
+    )
+    # And together the three groups cover the whole surface, with the denominator stated
+    # (rule 3) so a count here cannot be read without what it was counted out of.
+    everything = set(configure_env.every_variable_this_tool_can_set())
+    covered = discovered_names | will_ask | {name for name in already if already.get(name)}
+    assert everything - covered == set(), f"{sorted(everything - covered)} is in no group at all"
+
+
+def test_the_gate_above_fails_when_a_name_is_dropped_from_the_ask_list(env_file, monkeypatch, capsys):
+    """THE CONTROL, and the mutation it applies is the real defect rather than a stand-in.
+
+    asked_for() drops SOL_HOT_WALLET. still_unset() does not consult asked_for(), so it
+    still reports the variable as unset while nothing will ask for it -- the two sets
+    disagree and the gate above fails. That is precisely the shape of the first defect:
+    a variable discovery did not answer and the question list did not carry.
+
+    THE OLD CONTROL APPLIED THE SAME PATCH AND ASSERTED THE OPPOSITE THING -- that the
+    "STILL UNSET" section named SOL_HOT_WALLET. It passed, and it had to: patching
+    asked_for() is the one way to make a set that is otherwise empty by construction
+    non-empty. So the control demonstrated the formatter, not the system, and the
+    constant it was written to catch stayed a constant for its whole life.
+    """
+    monkeypatch.setattr(
+        configure_env, "asked_for",
+        lambda _discovered, _already: [(name, what) for name, what in configure_env.ASKED
+                                       if name != "SOL_HOT_WALLET"],
+    )
+    will_ask, reported_unset, _discovered, _already = dry_run_sets(monkeypatch, capsys)
+
+    assert "SOL_HOT_WALLET" in reported_unset
+    assert "SOL_HOT_WALLET" not in will_ask
+    assert reported_unset != will_ask, (
+        "the gate above cannot fail: a variable nothing asks for was not reported unset"
     )
 
 
-def test_the_still_unset_section_is_honest_when_something_IS_left_out(env_file, monkeypatch, capsys):
-    """The control: the section must be capable of reporting something.
+def test_a_skipped_prompt_is_counted_after_the_write_not_only_as_it_scrolls_past(
+        env_file, monkeypatch, capsys):
+    """MUTATION: drop say_still_unset() from say_what_was_written().
 
-    Without this, `(none)` above could be a constant and the gate would pass forever.
-    Removing a variable from the ask list is the mutation, done here by patching
-    asked_for() to drop one -- so the section has to name it.
+    THE APPLY PATH HAD NO SUCH BLOCK AT ALL, which is the second half of the defect.
+    collect_answers() prints one line per skip as it happens, so an operator who pressed
+    enter past three BTC prompts saw three "skipped" lines, then a WROTE block counting
+    only what succeeded, and nothing that added them up. Rule 13: "treat 'skipped' plus
+    'success' in the same output as a defect in the output."
+
+    ST_ANSWERS supplies two values and omits every other, so the rest are skipped -- the
+    real collect_answers(), the real write, the real report.
+    """
+    monkeypatch.setattr(configure_env, "listening_ports", set)
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--apply"])
+    monkeypatch.setenv("ST_ANSWERS", "BTC_RPC_USER=btcuser;SOL_HOT_WALLET=SoLHotWallet")
+
+    assert configure_env.main() == 0
+    printed = capsys.readouterr().out
+    after = printed.split("STILL UNSET", 1)
+    assert len(after) == 2, f"the write reported nothing about what it left unset:\n{printed}"
+
+    total = len(configure_env.every_variable_this_tool_can_set())
+    assert f"of {total} this tool can set" in after[1], (
+        "the count was printed without its denominator (rule 3)"
+    )
+    # BTC_RPC_PASS was asked for and skipped, so it is unset and must be named.
+    assert "BTC_RPC_PASS" in after[1]
+    # BTC_RPC_USER was answered, so it must NOT be -- otherwise the block is a copy of
+    # the ask list rather than a report of the outcome.
+    assert "BTC_RPC_USER" not in after[1].split("the chains these belong to", 1)[0]
+
+
+def test_the_dry_run_names_what_depends_on_an_answer(env_file, monkeypatch, capsys):
+    """MUTATION: drop the listing loop under AFTERWARDS, leaving only the counts.
+
+    A COUNT IS NOT AN ANSWER TO "which ones". The operator's run on 2026-10-11 had six
+    variables waiting on an answer and three of them were unanswerable -- no bitcoin.conf,
+    no cookie file, nothing listening on 18332 or 18443. Which three is the whole content
+    of that block; "6 of 17" alone sends them back up the screen to work it out.
+
+    The block the names replaced said "(none)", so this is also the regression test for
+    that: the section must name what it is counting.
+    """
+    # The expected set, derived the way the tool derives it -- with `values` holding what
+    # discovery answered. still_unset({}, already) would be the wrong comparison and said
+    # so when I wrote it that way first: it named ICP_DFX_SERVICE, which discovery HAD
+    # answered, so the test was asserting that a found value was still a question.
+    _will_ask, expected_pending, _discovered, _already = dry_run_sets(monkeypatch, capsys)
+
+    assert configure_env.main() == 0
+    printed = capsys.readouterr().out
+
+    parts = printed.split("AFTERWARDS", 1)
+    assert len(parts) == 2, f"the dry run printed no AFTERWARDS section:\n{printed}"
+    section = parts[1]
+    total = len(configure_env.every_variable_this_tool_can_set())
+    assert f"of {total}" in section, "the counts were printed without their denominator (rule 3)"
+    assert "ONLY IF YOU ANSWER" in section
+    # Every name that is waiting on an answer is listed, not just counted. Derived here
+    # the same way the tool derives it, so an eighteenth variable is covered without this
+    # test being edited.
+    assert expected_pending, "nothing is pending, so this test is not measuring the listing"
+    for name in sorted(expected_pending):
+        assert name in section, f"{name} is waiting on an answer and the section does not name it"
+
+
+def test_the_dry_run_still_names_a_variable_the_ask_list_dropped(env_file, monkeypatch, capsys):
+    """WHY the AFTERWARDS section is derived from still_unset() and not from `needed`.
+
+    MUTATION: `pending = [name for name, _what in needed]`. It passes every other test in
+    this file, and it has to -- the gate above asserts those two sets are EQUAL, so while
+    the gate holds, either source prints the same screen. This is the case the gate exists
+    to catch, measured on the OUTPUT rather than on the sets: with a hole punched in the
+    ask list, the operator still sees the variable named.
+
+    That is the difference between a report derived from the question list and one derived
+    from the table of everything this tool can set. The first can only ever tell you about
+    questions it remembered to ask. BTC_RPC_PORT was exactly the variable it would have
+    forgotten.
     """
     monkeypatch.setattr(configure_env, "listening_ports", set)
     monkeypatch.setattr(
@@ -475,11 +620,79 @@ def test_the_still_unset_section_is_honest_when_something_IS_left_out(env_file, 
     )
     monkeypatch.setattr("sys.argv", ["configure_env.py"])
 
-    configure_env.main()
-    still_unset = capsys.readouterr().out.split("AFTERWARDS, STILL UNSET", 1)[1]
+    assert configure_env.main() == 0
+    section = capsys.readouterr().out.split("AFTERWARDS", 1)[1]
 
-    assert "SOL_HOT_WALLET" in still_unset, "a genuinely unset variable was not reported"
-    assert "(none)" not in still_unset
+    assert "SOL_HOT_WALLET" in section, (
+        "a variable nothing will ask for was not reported as unset, so a hole in the ask "
+        "list is invisible on the screen an operator reads"
+    )
+
+
+def test_the_nothing_to_write_exit_says_what_it_left_dark(env_file, monkeypatch, capsys):
+    """MUTATION: drop say_still_unset() from main()'s `if not values` exit.
+
+    "NOTHING TO WRITE. .env is unchanged." IS THE SAME SENTENCE FOR OPPOSITE STATES. On a
+    host that is already fully configured it means there was nothing to do. On a host
+    where every prompt was skipped it means nothing got configured. Rule 14: "make 'did
+    nothing' look different from 'did work'" -- and this is the harder case, where "did
+    nothing" is correct and the question is whether it was the good kind.
+
+    CONSTRUCTED SO NOTHING IS DISCOVERED AND NOTHING IS ANSWERED: the three
+    always-discoverable values are already in .env, no port is listening, the replica is
+    stubbed out, there is no database to read an account from, and ST_ANSWERS is empty so
+    every prompt is skipped. That is the state the operator would be in if they pressed
+    enter past all six of their questions.
+    """
+    env_file.write_text(
+        "SOL_RPC_URL='https://api.devnet.solana.com'\n"
+        "XRP_RPC_URL='https://s.altnet.rippletest.net:51234'\n"
+        "ICP_DFX_SERVICE='icp-replica'\n"
+    )
+    monkeypatch.setattr(configure_env, "listening_ports", set)
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--apply"])
+    monkeypatch.setenv("ST_ANSWERS", "")
+
+    assert configure_env.main() == 0
+    printed = capsys.readouterr().out
+
+    assert "NOTHING TO WRITE" in printed
+    after = printed.split("STILL UNSET", 1)
+    assert len(after) == 2, (
+        f"a run that skipped every prompt said only 'nothing to write', which is the same "
+        f"output a fully configured host produces:\n{printed}"
+    )
+    assert "(none)" not in after[1], "a run that configured nothing reported nothing unset"
+    for name in ("BTC_RPC_USER", "BTC_RPC_PASS", "SOL_HOT_WALLET", "XRP_DEPOSIT_ACCOUNT"):
+        assert name in after[1], f"{name} was skipped and the report does not name it"
+
+
+def test_the_still_unset_report_varies_with_what_was_actually_set(capsys):
+    """Called with seeded dicts, both branches, because `(none)` has to be able to vary.
+
+    THIS IS THE ASSERTION THE OLD CONTROL WAS REACHING FOR and could not make through
+    main(): that the block's empty case is a RESULT and not a constant. say_still_unset()
+    is an extracted function for exactly this reason (rule 10) -- the decision is callable
+    with seeded inputs, so neither branch needs a terminal, a database or a patch to the
+    mechanism under test.
+    """
+    everything = configure_env.every_variable_this_tool_can_set()
+
+    configure_env.say_still_unset(dict.fromkeys(everything, "set"), {})
+    assert "(none)" in capsys.readouterr().out, "a fully configured run did not report (none)"
+
+    configure_env.say_still_unset(dict.fromkeys(everything[1:], "set"), {})
+    printed = capsys.readouterr().out
+    assert "(none)" not in printed
+    assert everything[0] in printed, "the one unset variable was not named"
+
+    # AND AN EMPTY VALUE IN .env COUNTS AS UNSET, which is not a nicety:
+    # docker-compose.web.yml passes every chain variable as `${VAR:-}`, so an empty
+    # string reaches the container as an empty string and build_adapters() skips the
+    # chain. Forty-four variables present and empty is the state this tool was written
+    # for, and a report that counted them as set would describe it as fully configured.
+    configure_env.say_still_unset({}, dict.fromkeys(everything, ""))
+    assert everything[0] in capsys.readouterr().out, "an empty .env value was counted as set"
 
 
 def test_every_help_string_tells_the_operator_what_to_do(env_file):
