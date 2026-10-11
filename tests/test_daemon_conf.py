@@ -437,6 +437,27 @@ SERVICE_SIDE = frozenset({
     # resolver to be loose, and this register is about which daemon is reached rather
     # than about what the tool does once it gets there.
     "pay_deposit.py",
+    # operator_panel.py, added 2026-10-11. SERVICE SIDE, and it is the first entry the
+    # register asked about rather than the author -- the corrected marker above found it
+    # with no row, which is the completeness check doing the one thing it is for.
+    #
+    # IT SHOWS THE OPERATOR WHAT THE TERMINAL WILL DO, which decides the side on its own.
+    # Its whole reason for existing is the funding state knowable BEFORE a run: which
+    # payments to the funding address are unspent, what the daemon can be asked, what the
+    # desk holds. A panel that resolved a different daemon than the service does would be
+    # worse than no panel, because the number on the screen would be true of a wallet
+    # nothing in this system spends from -- six runs failing for reasons invisible from
+    # the terminal is the exact failure it was written against, and a conf fallback would
+    # reintroduce it in the one place meant to be the answer.
+    #
+    # IT ALSO SPAWNS ENTRY POINTS FROM AN ALLOWLIST, some of which broadcast. Those
+    # children resolve their own chains under their own rows here; the panel builds,
+    # signs and sends nothing itself. So this row is about the OVERVIEW it reads, which
+    # is the only chain-resolving thing it does.
+    #
+    # Its own mainnet guard is unaffected and is stricter than this register: the daemon
+    # must SAY it is on a test network before the server binds a port.
+    "operator_panel.py",
 })
 # show_swap.py was in this set for one commit and the register's own completeness
 # check removed it: it reads swap_terminal.db and resolves no chain at all, so a
@@ -499,9 +520,38 @@ def test_EVERY_entry_point_THAT_RESOLVES_A_CHAIN_is_on_one_side_or_the_other():
     root = pathlib.Path(__file__).resolve().parent.parent
     # What "resolves a chain" looks like in source: it asks the registry for
     # adapters, or indexes a client table. Both are how a daemon handle is made.
-    markers = ("build_adapters(", "CLIENTS[", "SCRIPT_CLIENTS[")
+    #
+    # `build_adapters` WITHOUT THE PAREN, 2026-10-11, because the paren was hiding the
+    # most common way a root script resolves a chain. workers/common.py wraps the
+    # registry as build_adapters_from_config(), and `build_adapters(` does not occur in
+    # that name -- so open_swap.py, which calls the wrapper at line 1191, matched this
+    # scan only through the COMMENT at its line 192 that names the registry function in
+    # prose. Its register row was therefore correct by coincidence, and stripping the
+    # prose is what revealed that: the row went stale the instant the scan got honest.
+    #
+    # Measured over the 19 root scripts the corrected marker finds: no register row is
+    # stale, and one file was unclassified -- operator_panel.py, which calls the wrapper
+    # three times and had never been asked which side it was on. Its row is below.
+    markers = ("build_adapters", "CLIENTS[", "SCRIPT_CLIENTS[")
+    # code_without_prose() RATHER THAN read_text(), 2026-10-11, AND IT IS THE THIRD TIME
+    # THIS FILE HAS PAID FOR THE SAME MISTAKE. The scan matched the marker anywhere in
+    # the file, so configure_env.py -- which resolves no chain, builds no adapter and
+    # opens no socket -- was classified as an unclassified chain resolver because its
+    # module docstring explains that `chains/registry.build_adapters()` skips a chain
+    # with no port. A sentence about why six lamps read NONE read as a call.
+    #
+    # The two gates below already learned this on 2026-10-10, from testnet_wallets.py
+    # naming conf_fallback_settings in a comment saying it deliberately does NOT call
+    # it, and code_without_prose() is the fix they got. This gate kept the raw read,
+    # which is rule 8's shape in a single file: one idea, two implementations, and the
+    # one that was not fixed is the one that broke.
+    #
+    # THE ONLY WAYS TO SATISFY THE OLD VERSION WERE BOTH WRONG -- add a register row for
+    # a file that resolves nothing (which the second assertion below would then fail, by
+    # design), or stop naming build_adapters() in the prose, making the explanation worse
+    # to satisfy a grep. That is rule 19's test for a patch: neither stops the cause.
     found = sorted(path.name for path in root.glob("*.py")
-                   if any(marker in path.read_text() for marker in markers))
+                   if any(marker in code_without_prose(path) for marker in markers))
     assert found, "no root script resolves a chain any more; this test has stopped measuring"
     unclassified = set(found) - DIRECT_DRIVERS - SERVICE_SIDE
     assert not unclassified, (

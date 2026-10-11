@@ -96,6 +96,7 @@ import getpass
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -106,6 +107,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
 from chains.daemon_conf import parse_daemon_conf  # noqa: E402 -- after the sys.path line above
+from config import database_path  # noqa: E402
 from network_target import CHAIN_PORTS  # noqa: E402 -- as every root tool does
 
 ENV_FILE = REPO_ROOT / ".env"
@@ -212,6 +214,26 @@ GRIDCOIN_CONF_HAZARD = (
     "the port decides which daemon they reach -- but it is still your decision, not this "
     "tool's. Pass --read-gridcoin-conf to accept it."
 )
+
+#: THE SHARED DEPOSIT ACCOUNT VARIABLE FOR EACH CHAIN THAT HAS ONE, and this table is
+#: narrow for a reason that would cost a customer their money if it were widened.
+#:
+#: SOL AND XRP ONLY, because they are the only two chains where ONE account receives every
+#: swap's deposit and a discriminator -- a memo, a destination tag -- says whose it is.
+#: services/swap_service.TAG_ATTRIBUTED_ASSETS is frozenset({"XRP", "SOL"}) and this is the
+#: same fact: for those two, any swap's `deposit_address` IS the configured account.
+#:
+#: NEVER BTC, LTC OR GRC. Each of their swaps gets its OWN freshly derived address, so a
+#: `deposit_address` read off one of their rows is ONE CUSTOMER'S address. Writing it into
+#: .env as a deposit account would point every future swap on that chain at a stranger's
+#: address, and the deposits would be real, confirmed and unrecoverable. That is the single
+#: most expensive mistake available in this file, which is why the table is an allowlist
+#: rather than a loop over every asset.
+#:
+#: AND NOT ICP, which looks tag-attributed and is not: its subaccounts are derived per swap
+#: from ICP_OWNER_PRINCIPAL plus an index, so there is no shared-account variable to set --
+#: the principal, already discovered above, is what plays that role.
+SHARED_DEPOSIT_ACCOUNTS = {"SOL": "SOL_DEPOSIT_ACCOUNT", "XRP": "XRP_DEPOSIT_ACCOUNT"}
 
 #: Help text for a variable that CAN be discovered but was not, so the question is
 #: answerable. Each names the command that would have discovered it, because an operator
@@ -466,6 +488,91 @@ def write_env(values: dict[str, str]) -> None:
         os.umask(previous)
 
 
+def accounts_from_the_database(already: dict) -> dict[str, tuple[str, str]]:
+    """The shared SOL and XRP deposit accounts, read off swaps that already ran.
+
+    =========================================================================
+    "i don't know any of that fucking information off hand" -- 2026-10-11
+    =========================================================================
+
+    They did not need to. Their database holds 52 swaps, and on a tag-attributed chain
+    every swap's `deposit_address` IS the configured shared account -- that is what makes
+    the chain tag-attributed. So the value they were being asked to remember is recorded,
+    by this system, on rows it wrote itself.
+
+    THE DATABASE IS OPENED READ-ONLY, through the mode=ro URI, and that is a guard rather
+    than a convention: sqlite refuses a write on that handle, so no bug in this
+    configuration tool can alter the authority it is reading. absorb_db.open_both() uses
+    the same URI for the same stated reason.
+
+    IT GOES THROUGH config.database_path(), so it honors the precedence every other process
+    does -- SWAP_DB_PATH exported, then .env's SWAP_DB_PATH, then .env's SWAP_DB_DIR. A
+    second derivation here is what left the host tools pointed at a moved database for an
+    hour this morning (rule 11).
+
+    ONLY SOL AND XRP. See SHARED_DEPOSIT_ACCOUNTS: on BTC, LTC and GRC each swap gets its
+    OWN derived address, so a `deposit_address` from one of those rows is one customer's
+    address, and writing it into .env would point every future swap on that chain at a
+    stranger. The deposits would be real, confirmed and unrecoverable.
+
+    MOST RECENT FIRST, because an account can be repointed and the newest row is the one
+    the operator most recently used. If older rows disagree the newest still wins, and the
+    reason line says how many distinct accounts were seen so a repoint is visible rather
+    than silently resolved.
+
+    NEVER RAISES. A missing database, an unreadable one, or one with no swaps on a chain
+    are all ordinary states -- the value is simply asked for instead, and the line says
+    which of those it was (rule 14).
+    """
+    found: dict[str, tuple[str, str]] = {}
+    try:
+        path = Path(database_path())
+    except Exception as error:  # noqa: BLE001 -- config derivation; reported and then asked for instead
+        say(f"    the database path could not be derived ({type(error).__name__}), so no account was read")
+        return found
+    if not path.is_file():
+        say(f"    no database at {path}, so no deposit account could be read from one")
+        return found
+
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error as error:
+        say(f"    {path} could not be opened read-only ({error}), so no account was read")
+        return found
+    try:
+        for asset, variable in sorted(SHARED_DEPOSIT_ACCOUNTS.items()):
+            if already.get(variable):
+                continue
+            try:
+                rows = connection.execute(
+                    "SELECT deposit_address, COUNT(*) AS swaps FROM swaps WHERE from_asset = ?"
+                    " AND deposit_address IS NOT NULL AND deposit_address != ''"
+                    " GROUP BY deposit_address ORDER BY MAX(created_at) DESC",
+                    (asset,),
+                ).fetchall()
+            except sqlite3.Error as error:
+                # A database created before the `swaps` table existed, or one never
+                # initialized. Named rather than broad, and reported rather than raised.
+                say(f"    {asset}: {path} could not be queried ({error})")
+                continue
+            if not rows:
+                say(f"    {asset}: no swap in {path.name} carries a deposit address, so there is "
+                    f"nothing to read -- the account has to be given")
+                continue
+            address, swaps = rows[0][0], rows[0][1]
+            seen = (f"; {len(rows)} DISTINCT accounts appear on {asset} swaps, so this one has been "
+                    f"repointed -- the newest is taken and the others are history"
+                    if len(rows) > 1 else "")
+            found[variable] = (
+                str(address),
+                f"the deposit address on {asset}'s {swaps} most recent swap(s) in {path.name}, which "
+                f"IS the shared account for a tag-attributed chain{seen}",
+            )
+    finally:
+        connection.close()
+    return found
+
+
 def credentials_from_confs(discovered: dict, already: dict, *, gridcoin: bool) -> dict[str, tuple[str, str]]:
     """rpcuser and rpcpassword out of each daemon's own conf. NO VALUE IS EVER PRINTED.
 
@@ -657,17 +764,31 @@ def say_banner(apply: bool, already: dict) -> None:
     say("")
 
 
-def discover_all() -> dict[str, tuple[str, str]]:
+def discover_all(already: dict) -> dict[str, tuple[str, str]]:
     """Everything the running system can be asked for, with WHY each value was chosen.
 
     THE REASON TRAVELS WITH THE VALUE because a discovered port is a claim about the
     operator's machine, and `BTC_RPC_PORT 18443` alone gives them no way to check it.
     `18443 because something is listening there` is checkable in one command.
+
+    THE DATABASE IS ONE OF THE SOURCES, which is the point of it being in here rather
+    than beside it. `already` is a parameter for exactly one reason: a chain's shared
+    deposit account can be repointed, so when .env already carries one, reading a
+    DIFFERENT address off an older swap and reporting it as discovered would offer to
+    overwrite the live account with a historical one. Every other source here is
+    position-independent and is filtered by main()'s `not already.get(name)`; this one
+    has to not look. The parameter is what makes that testable with a seeded dict.
+
+    NOT FLAG-GATED, unlike credentials_from_confs(). The hazard that made reading a conf
+    opt-in is that a conf holds a password and Gridcoin's is shared with a live staking
+    wallet. A deposit address is PUBLIC -- it is printed on the ATM page for a customer
+    to send to -- and the handle is opened mode=ro, so there is nothing here to gate.
     """
     say("  DISCOVERING")
     found: dict[str, tuple[str, str]] = {}
     found.update(discover_ports())
     found.update(discover_icp())
+    found.update(accounts_from_the_database(already))
     for variable, (value, why) in ENDPOINT_DEFAULTS.items():
         found[variable] = (value, f"the documented {why} endpoint")
     found["ICP_DFX_SERVICE"] = (ICP_SERVICE, "the compose SERVICE name (not the container name)")
@@ -809,7 +930,7 @@ def main() -> int:
     already = existing_assignments()
     say_banner(args.apply, already)
 
-    discovered = discover_all()
+    discovered = discover_all(already)
 
     # FROM THE CONFS, AND ONLY WHEN ASKED. Merged into `discovered` so credentials flow
     # through the same dry-run report, the same "still unset" computation and the same

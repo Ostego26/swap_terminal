@@ -49,16 +49,29 @@ import configure_env
 
 @pytest.fixture
 def env_file(tmp_path, monkeypatch):
-    """Point configure_env at a throwaway .env and keep docker out of it.
+    """Point configure_env at a throwaway .env, a throwaway database, and keep docker out.
 
-    BOTH HALVES MATTER. Without the redirect these tests would rewrite the repository's
-    own .env; without stubbing discover_icp they would shell out to docker, which is
-    neither available nor appropriate in a suite that promises to open no socket.
+    THREE HALVES NOW, AND THE THIRD WAS ADDED BECAUSE THE SECOND WAS NOT ENOUGH. Without
+    the .env redirect these tests would rewrite the repository's own .env; without
+    stubbing discover_icp they would shell out to docker, which is neither available nor
+    appropriate in a suite that promises to open no socket.
+
+    AND WITHOUT THE SWAP_DB_PATH REDIRECT they would read the operator's real database,
+    because discover_all() now reads the shared deposit accounts out of it. That is a
+    read-only read, so it would have broken nothing -- it would have done something
+    worse: made every assertion about what gets written depend on whether the host
+    running the suite happens to have SOL swaps in its database. A test whose answer
+    changes with the machine cannot distinguish a regression from a different laptop.
+    SWAP_DB_PATH in the process environment is the first branch of
+    config.database_path(), so setting it is a complete redirect rather than a partial
+    one, and the file it names does not exist -- which is the state
+    accounts_from_the_database() reports and does not raise on.
     """
     path = tmp_path / ".env"
     monkeypatch.setattr(configure_env, "ENV_FILE", path)
     monkeypatch.setattr(configure_env, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(configure_env, "discover_icp", lambda: {})
+    monkeypatch.setenv("SWAP_DB_PATH", str(tmp_path / "swap_terminal.db"))
     return path
 
 
@@ -186,7 +199,7 @@ def test_discovery_reports_a_reason_beside_every_value(env_file, capsys):
     listening there" is checkable in one command, which is rule 14's "state what the
     number means, next to the number".
     """
-    found = configure_env.discover_all()
+    found = configure_env.discover_all({})
     printed = capsys.readouterr().out
 
     for variable in found:
