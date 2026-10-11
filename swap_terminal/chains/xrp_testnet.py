@@ -2,8 +2,12 @@
 """The XRP TESTNET endpoint, its one RPC call, and the faucet accounts on disk.
 
 Role: submodule (it talks to a rippled server and reads the key directory; the
-      decisions it holds are "is this network a test network" and "which key in
-      a faucet file is the secret")
+      ONE decision it still holds is "which key in a faucet file is the secret".
+      "IS THIS NETWORK A TEST NETWORK" WAS THE SECOND ONE AND IS NO LONGER MADE
+      HERE, as of 2026-10-11: refuse_mainnet() derives it from
+      chains/xrp_signing.require_non_mainnet(), because the copy that lived here
+      had drifted from that one and passed a MISSING network_id. The drift and
+      the measurement are at that function.)
 Reads: the rippled JSON-RPC endpoint below, and
        ~/.config/swap_terminal/keys/xrp-testnet-*.json
 Writes: nothing
@@ -38,7 +42,7 @@ import json
 from pathlib import Path
 
 import requests
-from chains.xrp_signing import MAINNET_NETWORK_IDS
+from chains.xrp_signing import require_non_mainnet
 
 TESTNET_URL = "https://s.altnet.rippletest.net:51234/"
 KEY_DIRECTORY = Path.home() / ".config" / "swap_terminal" / "keys"
@@ -132,15 +136,73 @@ def saved_faucet_accounts() -> list[tuple[Path, str, str]]:
 
 
 def refuse_mainnet() -> str:
-    """Ask the server which network it is on, and refuse anything but a test one."""
+    """Ask the server which network it is on, and refuse anything but a test one.
+
+    ===========================================================================
+    IT USED TO PASS A MISSING network_id, AND A STRINGIFIED ZERO, 2026-10-11
+    ===========================================================================
+
+    The test was `if network_id in MAINNET_NETWORK_IDS`, a membership check on a
+    frozenset of ONE INTEGER, against whatever JSON put in that key. Measured
+    against the two shapes that are not an integer 0:
+
+        network_id ABSENT   None in frozenset({0}) is False  -> PASSED, and
+                            returned the sentence "network_id None, build ..."
+        network_id "0"      "0" in frozenset({0}) is False   -> PASSED as a
+                            non-mainnet network
+
+    chains/xrp_signing.require_non_mainnet() refuses all three -- a mainnet id, a
+    MISSING id and an unreadable one -- and its docstring carries the argument for
+    the second and third at length: "'I could not read the network' is not 'this
+    is not mainnet'", which it calls rule 17's general form applied to the one
+    question on this path where guessing wrong is unrecoverable.
+
+    SO THERE WERE TWO COPIES OF ONE RULE AND THEY HAD DRIFTED, which is rule 8's
+    shape on the guard this file's own header calls the thing that MAKES its
+    callers mainnet-safe. Both copies read MAINNET_NETWORK_IDS, so they agreed
+    about which id is mainnet and disagreed about every answer that is not an id.
+    This one now DERIVES from the survivor rather than re-deciding: rule 8's "let
+    the survivor own the concept", and chains/xrp_signing.py is the survivor
+    because it is the copy on the swap payout path, the copy with the reasoning
+    written down, and the copy with tests that disable each refusal in turn.
+
+    WHAT THIS CHANGES FOR A CALLER, and it is strictly narrower rather than
+    different. Every caller already treats this as "raises, or returns a sentence
+    to print": xrp_send_tagged.py prints it, xrp_balances.py and
+    atomic_swap_xrp.py wrap it in a console check that catches Exception. The
+    refusal type is XRPMainnetRefused, which subclasses XRPSigningRefused and
+    therefore RuntimeError -- the type this function already raised -- so a
+    caller catching RuntimeError is unaffected.
+
+    THE ABSENT CASE IS NOT HYPOTHETICAL IN SHAPE, AND WHETHER ANY rippled BUILD
+    OMITS THE FIELD IS NOT MEASURED HERE (rule 17: say which you have). What IS
+    measured: chains/xrp.py's own `network()` handles a missing network_id by
+    falling back to build_version, which is a branch somebody wrote because the
+    field can be absent, and tests/xrp_seeded_transport.server_info() takes
+    network_id as a parameter for the same reason. What is NOT measured from this
+    environment is which builds omit it -- no rippled was reachable.
+
+    IT DOES NOT NEED TO BE MEASURED TO BE WORTH REFUSING, which is the whole of
+    require_non_mainnet()'s argument and why deriving from it is the fix rather
+    than adding a second condition here. This repository has already been bitten
+    once by reading a field an upgrade removed: chains/base.RPCAdapter.
+    _extract_matching_vouts() read scriptPubKey.addresses, gone from Bitcoin Core
+    22.0, and every deposit_events row for weeks was written by the fabricated
+    fallback beside it. A guard that answers "safe" for a field it could not read
+    is that defect pointed at the irreversible direction.
+    """
     info = rpc("server_info", {}).get("info") or {}
-    network_id = info.get("network_id")
-    if network_id in MAINNET_NETWORK_IDS:
-        raise RuntimeError(
-            f"the endpoint reports network_id {network_id}, which is MAINNET. Nothing was sent. This "
-            f"file is pinned to {TESTNET_URL} so this should be impossible -- if you see it, the "
-            f"hostname now resolves somewhere else."
-        )
-    return f"network_id {network_id}, build {info.get('build_version')}"
+    # require_non_mainnet() RAISES on mainnet, on an absent id and on an
+    # unreadable one, and returns its own description of what it established.
+    #
+    # THE MAINNET_NETWORK_IDS IMPORT IS GONE WITH THE COMPARISON (rule 9: every
+    # time you are in a file, leave less of it behind). Proven dead before
+    # deleting rather than assumed (rule 2): grepped the whole tree for the NAME,
+    # and nothing imports it FROM this module -- tests/test_xrp_send_tagged.py
+    # takes it from chains.xrp_signing, which is where it is defined and where the
+    # decision now lives. The prose above still names it, which is the point of
+    # naming it there.
+    verdict = require_non_mainnet(info.get("network_id"), TESTNET_URL)
+    return f"{verdict}, build {info.get('build_version')}"
 
 

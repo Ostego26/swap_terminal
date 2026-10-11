@@ -394,7 +394,107 @@ def derive_and_check(secret: str, announced: str):
     # move.
     from xrpl.wallet import Wallet  # noqa: PLC0415 -- checked: optional dependency; see above
 
-    wallet = Wallet.from_seed(secret)
+    # =========================================================================
+    # A SEED THAT DOES NOT DECODE IS A NAMED REFUSAL, NOT xrpl-py's ValueError
+    # =========================================================================
+    #
+    # MEASURED END TO END 2026-10-11, through the real services against the real
+    # schema, with a GRC -> XRP swap whose deposit was already CREDITED. The
+    # adapter was built while XRP_PAYOUT_SECRET_SEED decoded -- so can_spend was
+    # True and the swap was created and payable -- and the variable was then
+    # re-exported with a nine-character placeholder WITHOUT restarting the
+    # process, which is the exact state chains/xrp.endpoint_line()'s own ARMED
+    # branch already warns about ("the seed decoded at construction, which is what
+    # armed it, and the value in XRP_PAYOUT_SECRET_SEED NO LONGER DECODES ... This
+    # process will keep offering XRP until it is restarted"). What the customer's
+    # swap was left holding:
+    #
+    #     submits reaching the ledger   0
+    #     swaps.status                  failed
+    #     swaps.failed_reason           "Invalid character 'O'"
+    #     payouts row                   status failed, txid NULL
+    #     services/payout_rescue.refused_before_signing(reason)   ''
+    #
+    # FOUR THINGS WRONG WITH THAT SENTENCE, and the fourth is the one that costs
+    # money rather than patience:
+    #
+    #   it names nothing     not the chain, not the variable, not the account, not
+    #                        the operation. services/payout_service.py writes
+    #                        str(exc) into swaps.failed_reason and logs it, so
+    #                        "Payout failed: Invalid character 'O'" is the whole of
+    #                        what an operator gets for a swap that has stopped with
+    #                        a credited deposit in it (rule 14: echo the parameter
+    #                        that decides the answer).
+    #   it does not say      NOTHING was signed here: Wallet.from_seed() raises
+    #   nothing was signed   before any Payment object exists, before any fee, and
+    #                        before anything reaches a server. The message gives a
+    #                        reader no way to know that.
+    #   it carries a         measured on xrpl-py 5.2.0: the message is one
+    #   character of the     character of the rejected value ("Invalid character
+    #   key                  'O'"), not the whole seed. Small, and still a
+    #                        character of a key written into a database column and
+    #                        a log file, which is a thing this tree spends a whole
+    #                        test file forbidding (tests/test_secrets_are_not_
+    #                        logged.py). derived_payout_account() already excludes
+    #                        str(error) for this reason and says so.
+    #   rescue_payout.py     services/payout_rescue.PRE_SIGNING_MARKERS matched ''
+    #   REFUSES to re-drive  against it, measured above, so the one XRP failure
+    #   the swap             that is PROVABLY pre-signing cannot be handed back to
+    #                        the payout worker. The deposit is credited, the payout
+    #                        is refused, and no tool in the tree can move the swap.
+    #                        That gate is correct to refuse what it cannot
+    #                        recognize (rule 2: "I could not find a broadcast" is
+    #                        not "there was no broadcast"); the defect is that this
+    #                        refusal was unrecognizable.
+    #
+    # SO THE DECODE FAILURE BECOMES XRPSigningRefused, which is what this class's
+    # own docstring promises of every guard in this module: "an operator reading a
+    # failure needs to tell 'this is mainnet' from 'you did not arm it' from 'the
+    # seed is for another account' from 'this would breach the reserve'". A seed
+    # that will not decode is a fifth state and it was the only one arriving as a
+    # foreign exception type.
+    #
+    # str(error) IS DELIBERATELY EXCLUDED AND THE TYPE NAME IS NOT. The type says
+    # which layer refused and carries no content;
+    # chains/xrp_payout_seed.derived_payout_account() makes the identical trade one
+    # module over, with the identical reasoning, and this is the second site rather
+    # than a different rule (rule 8).
+    #
+    # IT CHANGES NO POSTURE. The payout already failed, nothing was signed before
+    # and nothing is signed now, and no swap that could have completed completes
+    # differently -- only the exception's TYPE and its sentence change. What does
+    # change is that the sentence names the variable and states, in the words
+    # services/payout_rescue.py can recognize, that nothing was submitted and no
+    # fee was claimed.
+    try:
+        wallet = Wallet.from_seed(secret)
+    # BROAD, AND BLE001 DOES NOT FIRE ON IT, so there is no suppression here to
+    # claim anything (rule 19: a noqa is a claim you checked -- ruff reported this
+    # one UNUSED, which means the rule already recognizes that a handler which
+    # RE-RAISES is not a blind catch). The reason it is broad anyway: xrpl-py's
+    # decoder raises a bare ValueError for a bad character and for a bad checksum,
+    # and its base58 layer can surface others, while every one of them means the
+    # same single thing -- this value is not a usable seed -- and every one has to
+    # arrive as the named refusal rather than as a foreign type that
+    # services/payout_service.py writes into swaps.failed_reason verbatim. Rule
+    # 12's test is satisfied because the caller CANNOT read this as a real answer:
+    # nothing is returned, the refusal names which layer refused, and the original
+    # is chained with `from error`.
+    except Exception as error:
+        raise XRPSigningRefused(
+            f"the value supplied as a signing seed does NOT decode as one ({type(error).__name__}), so "
+            f"NOTHING was signed, nothing was submitted and no fee was claimed -- this refusal happens "
+            f"before any Payment exists. The account this run announced is {announced}. If this is a "
+            f"payout worker, XRP_PAYOUT_SECRET_SEED holds something that is not a seed, and there are "
+            f"TWO ways to be here rather than one -- NOT established from here, which is why both are "
+            f"named (rule 17): either the value DECODED when this process built its adapter and has "
+            f"been changed since without a restart, which is the state chains/xrp.endpoint_line() "
+            f"warns about, or this worker was started with a bad value and picked up a swap that an "
+            f"earlier armed process had already moved to payout_pending. `supervisor.py status` says "
+            f"which: it prints the armed banner for the process it is reporting on. Either way fix the "
+            f"VALUE and restart the worker; run xrp_payout_account.py, which reports the shape of what "
+            f"you have WITHOUT printing it. The value is not in this message and is never logged."
+        ) from error
     if wallet.classic_address != announced:
         raise XRPSigningRefused(
             f"the seed supplied derives {wallet.classic_address}, not the "

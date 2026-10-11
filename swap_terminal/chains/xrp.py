@@ -356,6 +356,11 @@ from .xrp_signing import (
     reserve_drops,
 )
 from .xrp_units import (
+    # The rank a VALIDATED ledger has, imported rather than spelled as 1. That module
+    # owns what a confirmation count means on this chain -- LEDGER_UNVALIDATED 0,
+    # LEDGER_VALIDATED 1, MAX_LEDGER_RANK 1 -- and a literal here would be a second
+    # place that decided it (rule 11: one vocabulary, derived in one place).
+    LEDGER_VALIDATED,
     REFERENCE_BASE_RESERVE_XRP,
     describe_min_confirmations,
     from_drops,
@@ -839,6 +844,64 @@ class XRPAdapter:
         #: (which is what the defect was). The elements are whole XRP, not drops: the
         #: conversion happens in untagged_payments() through chains/xrp_units.from_drops().
         self.unattributable_drops: list[UnattributableCredit] = []
+        #: The confirmation rank every element of `unattributable_drops` was read AT, for
+        #: services/deposit_service.record_what_nobody_can_claim() to hand to
+        #: services/unattributable_deposit_service.stranded_rows(confirmations=).
+        #:
+        #: ===================================================================
+        #: WHY A CONSTANT IS THE HONEST ANSWER HERE, MEASURED 2026-10-11
+        #: ===================================================================
+        #:
+        #: `unattributable_deposits.confirmations` is 0 on every XRP row, measured end to
+        #: end through the real services against the real schema: one untagged validated
+        #: Payment of 2.5 XRP, scanned by the real adapter, written by the real
+        #: record_what_nobody_can_claim(), came back as
+        #:
+        #:     amount 2.5   confirmations 0   discriminator NULL
+        #:
+        #: while the row ONE CASE OVER -- a payment carrying a tag no swap owns, written by
+        #: unclaimed_rows() instead -- came back with confirmations 1 off the same ledger.
+        #: Two rows about the same account on the same cycle, disagreeing about whether
+        #: anything is confirmed, and only one of them was right.
+        #:
+        #: ZERO IS NOT A MEASUREMENT OF THIS CHAIN, IT IS stranded_rows()' DEFAULT, and that
+        #: default is correct for the chain it was written for: its docstring says "the
+        #: Solana drop is recorded inside `_attributable`, which runs per transaction and
+        #: does not carry the commitment rank, so the adapter genuinely does not hand this
+        #: over. Zero means 'not known from this source'." On XRP it IS known, and known
+        #: without a second read, because untagged_payments() appends a credit ONLY after
+        #: chains/xrp_payments.delivered_drops_to() has returned -- and that function
+        #: REFUSES unless `validated is True`. So every element of the list above describes
+        #: a payment in a validated ledger, by construction rather than by inspection, and
+        #: chains/xrp_units.LEDGER_VALIDATED is the rank for that. An unvalidated untagged
+        #: payment gets no element and a console line instead (untagged_payments() carries
+        #: that decision at length).
+        #:
+        #: A CONSTANT AND NOT A PER-ELEMENT FIELD, deliberately. UnattributableCredit is the
+        #: shape chains/solana.py owns and two adapters now produce (see the import at the
+        #: top of this module for why that coupling is deliberate and where it should
+        #: eventually live); growing a sixth field on it would be an edit to that adapter,
+        #: its diagnostic script and three test files, to carry a value that is the same for
+        #: every element this chain can ever produce. One attribute read by name, matching
+        #: the hasattr convention record_what_nobody_can_claim() already uses on purpose
+        #: ("A new tag-attributed adapter is picked up by growing the attribute, not by
+        #: editing a list here"), is the smaller change and the one that cannot drift.
+        #:
+        #: IT IS INERT UNTIL THE CALL SITE READS IT, and that is stated rather than implied
+        #: (rule 17). services/deposit_service.py is OUT OF SCOPE for the change that added
+        #: this attribute; until its one argument is added, this value is published and
+        #: nothing consumes it, and XRP rows keep reporting 0. The exact patch is in the
+        #: report that came with this commit. Publishing the half that belongs to this file
+        #: is what makes that patch one argument instead of a per-chain branch in a shared
+        #: service.
+        #:
+        #: NOT A GATE, AND IT MUST NEVER BECOME ONE. Nothing credits a swap from this
+        #: number: an unattributable deposit belongs to no swap by definition, and
+        #: record_what_nobody_can_claim()'s own docstring says its return value is not a
+        #: gate either. This is a column a HUMAN reads in show_unattributable.py when
+        #: somebody's money did not reach a swap, and the question it answers there is "is
+        #: this payment final yet" -- which, with 0 in it, it answered wrongly.
+        self.unattributable_confirmations = LEDGER_VALIDATED
         # Validated at CONSTRUCTION, not at poll time. A threshold no XRP
         # payment can reach would leave every deposit below it forever, with
         # nothing in any log saying why (see chains/xrp_units.py).
@@ -1270,6 +1333,70 @@ class XRPAdapter:
         # by untagged_payments() -- and `result.get("transactions") or []` evaluated
         # twice would be two expressions that have to stay identical by hand.
         entries = result.get("transactions") or []
+
+        # =====================================================================
+        # A TRUNCATED HISTORY USED TO LOOK EXACTLY LIKE A COMPLETE ONE
+        # =====================================================================
+        #
+        # SAID AT THE ONE PLACE THAT CAN SEE IT, 2026-10-11. The request above sends no
+        # `limit`, so the window is whatever this server chooses, and it sends no
+        # `marker`, so this is always the FIRST page. rippled answers a truncated result
+        # by including a `marker` to pass back for the next page -- and nothing here read
+        # it, so a scan that saw part of the account's history was indistinguishable from
+        # one that saw all of it. Rule 14, on the path where the ambiguity is somebody's
+        # deposit: "never let an empty result print nothing" has a sibling, which is never
+        # let a PARTIAL result print the same thing a complete one does.
+        #
+        # WHY THIS MATTERS MORE ON THIS CHAIN THAN ON ANY OTHER HERE. XRP_DEPOSIT_ACCOUNT
+        # is ONE account that both receives every deposit and pays out every payout
+        # (services/swap_service.payout_source_account() says so at length), so its
+        # history grows with total desk activity rather than with one customer's. And
+        # `skip_txids` is accepted and IGNORED by this method, by design -- there is no
+        # per-transaction cost to avoid -- so the server's window is the ONLY bound on
+        # what a cycle can see.
+        #
+        # WHAT IS NOT ESTABLISHED, AND IT IS WHY THIS WARNS RATHER THAN PAGINATES
+        # (rule 17: say which you have). The container this was written in has no route
+        # to port 51234, so the server's default window was NOT measured, and neither was
+        # whether `marker` appears for an account of the size the desk actually has.
+        # Three things follow, and the third decided the shape of this code:
+        #
+        #   the ordering is       `forward` is unset, so this asks for the default. If
+        #   the saving grace      that default is newest-first, a NEW deposit is on page
+        #                         one and truncation costs nothing for the common case.
+        #                         That is a reading of rippled's documented default and
+        #                         NOT a measurement from this environment.
+        #   the case it does      a payment this cycle did not credit -- an unvalidated
+        #   cost                  ledger, a tag no swap owns yet, a halted swap -- and
+        #                         that later falls off the window as the desk transacts.
+        #                         It stops being scanned, and resolve_credited()'s promise
+        #                         that a later swap can still claim it stops being
+        #                         reachable for it.
+        #   why not paginate      following `marker` changes WHICH transactions a deposit
+        #   here and now          scan considers, which is the input to whether a swap is
+        #                         credited and therefore to whether a payout happens. That
+        #                         is fund movement and the operator's call (rule 16), it
+        #                         cannot be proven from here against a real server, and a
+        #                         loop written blind could turn one request per cycle into
+        #                         an unbounded number -- which is the exact shape that
+        #                         rate-limited a real Solana deposit out of being credited
+        #                         on 2026-10-01. So this reports the condition and changes
+        #                         no decision.
+        #
+        # IT PRINTS ONLY WHEN TRUNCATED, so a healthy cycle gains no line. The entry
+        # count and the account are both echoed, because a pasted cycle has to be
+        # self-describing a day later and "there is more" without "more than what" is
+        # not a measurement (rule 3: state the denominator).
+        if result.get("marker") is not None:
+            print(
+                f"  XRP TRUNCATED SCAN  account_tx for {address} returned {len(entries)} entries AND a "
+                f"`marker`, which means the server held MORE BACK -- this scan did not see the whole "
+                f"history of this account. Deposits in the unseen part are not credited and not "
+                f"recorded. Nothing here follows the marker: paginating changes which transactions a "
+                f"credit decision is made from, which is the operator's call. If this line appears, the "
+                f"desk account's history has outgrown one page.",
+                flush=True,
+            )
         try:
             scan = deposit_events_from_transactions(entries, address, self.min_confirmations)
         except XRPPaymentError as error:
