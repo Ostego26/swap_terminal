@@ -394,12 +394,40 @@ A timeout means a filter; a refusal means a bind. They send you to different fil
 and look identical in a log, which is how finding 1's remedy came to be applied to a
 chain whose problem was the firewall.
 
-**Costs while open**: GRC and LTC are both unreachable, so every pair sourcing or
-paying out in either is refused -- now in 0.0004s with the reason, rather than after
-four 30s connect timeouts and a killed gunicorn worker (c067820, d4302fb). ICP and
-SOL answer, so ICP<->SOL pairs are unaffected.
+**CONFIRMED 2026-10-11, AND THE PREDICTION HELD EXACTLY.** The operator deleted the
+inert docker0 rule and added the source-matching one. The same container-side probe,
+re-run before any conf edit:
 
-**Owner**: operator. Both remedies are on the host.
+```
+LTC 172.17.0.1:19332  0.000s  REFUSED    -- packets arrive; nothing listens there
+GRC 172.17.0.1:25715  0.000s  CONNECTED  -- the handshake completed
+```
+
+Both 0.000s, from 3.003s. That single reading settles both halves, which is the
+whole reason the discriminating prediction was written down before it was run:
+
+  GRC  the firewall was its ONLY problem. Its `*:25715` bind was always fine.
+  LTC  the firewall is FIXED and the bind is all that remains. A refusal is what a
+       loopback-only daemon does when reached via the gateway address; had the
+       filter still been in place it would have timed out again, as it did twice.
+
+So the ufw half of this entry is closed by a host change, and the remedy that was
+believed to be finding 1's all along -- `rpcbind` in litecoin.conf's `[test]`
+section -- is the only thing left, now with evidence that it is the right remedy
+rather than a plausible one.
+
+**STILL OPEN AFTER THAT**: a TCP connect is not an RPC call. Finding 2 is GRC
+answering `403 Forbidden` once the socket opens, which is `rpcallowip` and not
+`rpcbind`, and it was measured on the old port. Whether it recurs on 25715 is
+visible in `chain_reachability` within one worker cycle -- GRC flipping to ANSWERED
+means its conf already admits 172.18.0.0/16.
+
+**Costs while open**: LTC is unreachable, so every pair sourcing or paying out in it
+is refused -- now in 0.0004s with the reason, rather than after four 30s connect
+timeouts and a killed gunicorn worker (c067820, d4302fb). ICP and SOL answer, and
+GRC's transport is now open.
+
+**Owner**: operator. The one remaining remedy is on the host.
 
 ### 19. Does the replica's tECDSA key survive `docker compose down`? — NOT MEASURED
 **This is now the question gating a verb that is one short command away.** As of
