@@ -480,10 +480,58 @@ def test_a_transfer_to_a_DIFFERENT_subaccount_is_not_this_swaps_deposit():
 
 
 def test_the_block_index_accounts_for_first_block_index():
-    """A window into the chain does not start at 0, and an off-by-N here mislabels every txid."""
+    """A window into the chain does not start at 0, and an off-by-N here mislabels every txid.
+
+    IT NOW SCANS FROM 97 RATHER THAN FROM 0, AND THE CHANGE IS NOT COSMETIC. This test
+    used to seed a page beginning at 97 while asking from block 0, and on 2026-10-11 the
+    adapter grew a refusal for exactly that shape:
+
+        query_blocks was asked for blocks 0..97 and answered with a page beginning at 97
+        instead, reporting no archived ranges. REFUSING rather than advancing: blocks
+        0..96 would never be examined and the scan would return an empty list, which is
+        indistinguishable from a customer who did not pay
+
+    THE REFUSAL IS RIGHT AND THIS TEST'S SCENARIO WAS THE THING AT FAULT. A ledger that
+    answers a request starting at 0 with a window starting at 97, and names no archived
+    range to explain the gap, has left 97 blocks unexamined -- and an incomplete scan that
+    returns successfully is the failure test_archived_blocks_RAISE_rather_than_being_scanned_past
+    is written against, one cause further along.
+
+    SO THE PROPERTY THIS TEST IS NAMED FOR IS KEPT RATHER THAN TRADED AWAY. Inverting it
+    to expect the raise would have lost the off-by-N coverage its docstring exists for --
+    "mislabels every txid" is a different and still-live hazard. Asking from 97 and
+    receiving 97 has no gap to refuse, so the numbering assertion stands unchanged. The
+    refusal gets its own test below rather than taking this one over.
+    """
     sub = account_identifier(OWNER, subaccount_from_index(1))
     a = scanning_adapter(blocks_page([("Transfer", sub, 1)], first=97, chain_length=98))
-    assert [e["txid"] for e in a.find_deposits_to_address(sub)] == ["97"]
+    assert [e["txid"] for e in a.find_deposits_to_address(sub, from_block=97)] == ["97"]
+
+
+def test_a_window_that_skips_past_the_request_RAISES_rather_than_scanning_a_hole():
+    """The refusal the test above used to trip over. MUTATION: drop the gap check.
+
+    A SUCCESSFUL EMPTY SCAN IS THE WORST ANSWER AVAILABLE HERE, which is the same
+    reasoning archived_blocks already gets: the customer paid, the watcher polls forever,
+    nothing errors, and it is indistinguishable from a customer who did not pay. A page
+    that begins past the requested start with no archived range naming the gap is that
+    state -- the blocks are neither in the answer nor accounted for.
+
+    ASKED FROM 0 AND ANSWERED FROM 97, which is the shape, and the message has to name
+    both numbers or an operator cannot tell which end moved.
+    """
+    sub = account_identifier(OWNER, subaccount_from_index(1))
+    a = scanning_adapter(blocks_page([("Transfer", sub, 1)], first=97, chain_length=98))
+
+    with pytest.raises(ICPCallFailed, match="never be examined") as raised:
+        a.find_deposits_to_address(sub)
+
+    message = str(raised.value)
+    assert "0..97" in message, f"the requested range is not named: {message}"
+    assert "97" in message
+    # And it says what a ledger that legitimately cannot serve a range does instead,
+    # so the reader is not left thinking this is a bug in the ledger.
+    assert "archived" in message
 
 
 def test_already_recorded_txids_are_skipped():

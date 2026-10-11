@@ -879,9 +879,15 @@ class ICPAdapter:
     def _blocks_page(self, start: int, length: int, chain_length: int):
         """One page of blocks as (first_block_index, blocks). RAISES rather than return a gap.
 
-        BOTH REFUSALS HERE EXIST FOR ONE REASON and it is this adapter's recurring one: a
-        range this scan needed and did not read is indistinguishable, to the caller, from
-        a customer who did not pay. So neither is allowed to become a short list.
+        ALL THREE REFUSALS HERE EXIST FOR ONE REASON and it is this adapter's recurring
+        one: a range this scan needed and did not read is indistinguishable, to the
+        caller, from a customer who did not pay. So none of them is allowed to become a
+        short list.
+
+        IT SAID "BOTH" AND THERE WERE TWO UNTIL 2026-10-11. The third is the
+        first_block_index check at the end of this method, and the drift is left visible
+        rather than overwritten (rule 1) because the count is the thing a reader checks
+        this list against.
 
           archived_blocks  old blocks migrate off the ledger into separate archive
                            canisters, and `blocks` then covers only what the ledger still
@@ -894,6 +900,12 @@ class ICPAdapter:
                            Breaking out of the caller's loop would turn the unread
                            remainder into an empty list, which is the 500-block trailing
                            window's defect arriving by a second route.
+          a page that does the reply's `first_block_index` is not the `start` that was
+          not begin where   asked for. Above it, the blocks in between are skipped and
+          the scan asked    the scan returns []; below it, the caller's `scanned_to`
+                           never advances and the loop does not terminate. Added
+                           2026-10-11 with both failures measured through the real
+                           method; the long note at the raise site has the numbers.
 
         A SHORTER-THAN-REQUESTED PAGE IS NOT AN ERROR and is deliberately not refused
         here: the ledger caps a reply, and the caller advances by `first + len(blocks)`
@@ -901,6 +913,12 @@ class ICPAdapter:
         instead of being skipped. Refusing a short page would make a legitimate cap fatal;
         refusing an EMPTY one is different, because there is no progress to make from it
         and the loop would not terminate.
+
+        AND THAT LAST SENTENCE IS WHY THE THIRD REFUSAL EXISTS. Non-termination was
+        identified here and closed for the empty case only. A non-empty page that begins
+        at or below `start` makes exactly as little progress as an empty one -- the
+        caller recomputes the same `scanned_to` and asks again, forever -- so the hazard
+        this paragraph names had a second door standing open beside the one it shut.
 
         EXTRACTED 2026-10-11 for ruff's C901 (rule 12: extract the decision, do not raise
         the ceiling), behavior unchanged.
@@ -926,7 +944,100 @@ class ICPAdapter:
                 f"went unread for a reason the ledger did not give. Refusing rather than returning a "
                 f"partial answer."
             )
-        return int(page.get("first_block_index", start)), blocks
+        first = int(page.get("first_block_index", start))
+        if first != start:
+            # =============================================================
+            # A PAGE THAT DOES NOT BEGIN WHERE THE SCAN ASKED, 2026-10-11
+            # =============================================================
+            #
+            # THE THIRD ROUTE TO ONE DEFECT, and the two already closed above are
+            # why this one is written as a refusal rather than as a correction.
+            # `archived_blocks` is route one; the trailing 500-block window was
+            # route two. Both were "a range this scan needed and did not read,
+            # returned to the caller as an empty list" -- which is
+            # indistinguishable from a customer who did not pay. This is the same
+            # thing arriving through `first_block_index`, and until today it was
+            # not checked at all.
+            #
+            # MEASURED HERE, 2026-10-11, through the real find_deposits_to_address()
+            # with a seeded transport (tests/test_icp_e2e_both_directions.py holds
+            # both cases):
+            #
+            #   first > start   a reply with chain_length 10, first_block_index 7,
+            #                   3 blocks and archived_blocks EMPTY. The caller
+            #                   advanced `scanned_to = first + len(blocks)` to 10,
+            #                   the loop ended, and the scan returned []. Blocks
+            #                   0..6 -- which held the customer's 0.25 ICP transfer
+            #                   in the seeded case -- were never examined. Worse,
+            #                   the rule 14 log line that exists precisely to make
+            #                   truncation visible printed "read blocks 0..9 of
+            #                   chain_length=10 (10 block(s)) and found (none)",
+            #                   which is a FALSE statement about what was read.
+            #
+            #   first < start   a reply that always answers from block 0 with one
+            #                   block, against chain_length 5000. `scanned_to`
+            #                   recomputes to the same value on every iteration, so
+            #                   the `while` loop never terminates: the probe was
+            #                   still issuing requests at 50 and was cut off there.
+            #                   That is a deposit watcher that hangs rather than
+            #                   fails -- rule 14's "an operator cannot tell working
+            #                   from hung", with a dfx subprocess per spin.
+            #
+            # THE METHOD'S OWN DOCSTRING NAMED NON-TERMINATION AND CLOSED ONE DOOR:
+            # "refusing an EMPTY one is different, because there is no progress to
+            # make from it and the loop would not terminate." A page that comes back
+            # non-empty but does not advance is the identical hazard, and the guard
+            # written for it was looking at the other case.
+            #
+            # REFUSED RATHER THAN ACCOMMODATED, which is the stance the
+            # archived-blocks branch above already takes. A ledger that legitimately
+            # cannot serve the requested range says so in `archived_blocks`, and the
+            # remedy there is an archive reader rather than scanning past the hole.
+            # If some ledger ever answers this way without declaring an archive, the
+            # answer is still not to skip the blocks: it is to find out why, which a
+            # raise makes possible and a silent advance does not.
+            #
+            # ONE EXISTING TEST'S FIXTURE IS THIS DEFECT, AND IT NEEDS ONE WORD.
+            # tests/test_icp_adapter.test_the_block_index_accounts_for_first_block_index
+            # seeds `first=97, chain_length=98` and scans from the default from_block=0,
+            # so it asks for 0..97 and is answered from 97 -- a reply no ledger gives for
+            # that request, since a ledger that cannot serve 0..96 names them in
+            # archived_blocks. The BEHAVIOR it pins is real and must keep being pinned
+            # (txid = first + offset, and an off-by-N there mislabels every txid). Its
+            # fixture just never asserted that 97 blocks went unread. The companion
+            # change is `from_block=97` on that call, which makes the request and the
+            # reply agree; it is named here rather than made, because that file is
+            # shared and this change was written under an edit scope that excludes it.
+            #
+            # NOT OBSERVED FROM A REPLICA (rule 17). The ICP ledger's query_blocks
+            # is documented and believed to answer `first_block_index == start` for
+            # any range it holds, and `dfx` is not installed where this was written,
+            # so the two failures above are seeded replies rather than replies a
+            # ledger produced. What is measured is what THIS code did when handed
+            # them: a silent [] and a non-terminating loop.
+            # ONE CONDITION, TWO CONSEQUENCES, AND THE MESSAGE NAMES THE ONE THAT
+            # APPLIES. Rule 14 asks for the meaning next to the number, and a single
+            # sentence covering both directions had to interpolate a range that is
+            # nonsense in one of them ("the blocks between 1 and 0"). An operator
+            # pasting this back gets the consequence their reply actually has.
+            consequence = (
+                f"blocks {start}..{first - 1} would never be examined and the scan would return an "
+                f"empty list, which is indistinguishable from a customer who did not pay -- the same "
+                f"defect the archived-block refusal above exists for"
+                if first > start
+                else
+                f"the scan would make no progress -- the caller's cursor recomputes to the same "
+                f"{first + len(blocks)} on every iteration -- so the loop would not terminate and "
+                f"the deposit watcher would hang rather than fail"
+            )
+            raise ICPCallFailed(
+                f"query_blocks was asked for blocks {start}..{start + length - 1} and answered with a "
+                f"page beginning at {first} instead, reporting no archived ranges. REFUSING rather "
+                f"than advancing: {consequence}. A partial answer is not something this adapter will "
+                f"hand back. A ledger that cannot serve a range names it in archived_blocks, and "
+                f"reading an archive canister is not implemented."
+            )
+        return first, blocks
 
     def _deposit_event_from_block(self, block, index: str, target: bytes, address: str):
         """One block as a deposit event for `address`, or None. THE DECISION, so it is testable.
@@ -1122,6 +1233,15 @@ class ICPAdapter:
             # FROM WHAT CAME BACK, not from what was asked for. A ledger that returns a
             # shorter page than requested must not have the gap counted as scanned --
             # advancing by `length` would skip exactly the blocks it declined to send.
+            #
+            # `first` IS NOW GUARANTEED EQUAL TO `scanned_to`, since 2026-10-11:
+            # _blocks_page() refuses a page that does not begin where it asked. So this
+            # line is the same arithmetic as `scanned_to + len(blocks)` and is left
+            # spelled with `first` deliberately -- it is the ledger's own report of
+            # where the page starts, and reading it here is what makes the guard's
+            # absence visible if it is ever removed. Before that guard this expression
+            # was the mechanism of BOTH failures: `first` above `scanned_to` jumped the
+            # unread blocks, and `first` below it made the loop immortal.
             scanned_to = first + len(blocks)
 
         # RULE 14: THE RANGE IS ON EVERY SCAN, COMPLETE OR NOT. A bounded scan and a
@@ -1222,7 +1342,7 @@ class ICPAdapter:
 
         IT MUST BE A REAL TIMESTAMP WITHIN 24 HOURS OF LEDGER TIME, and this
         paragraph used to get that wrong. It said to pass "a value derived from the
-        swap rather than from a clock", which read as licence to use any
+        swap rather than from a clock", which read as license to use any
         swap-deterministic number. The first attempt used a fixed constant and the
         ledger refused it outright, measured on the local replica 2026-10-06:
 

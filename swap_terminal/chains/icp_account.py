@@ -118,8 +118,37 @@ account that stays at zero forever -- no error anywhere.
 
 Two other values came back from the same ledger and both matter here:
 
-    icrc1_decimals -> 8      so chains/coin_amounts.CHAIN_DECIMALS is the table
-                             that answers for ICP, not a second one.
+    icrc1_decimals -> 8      which is what ICP_DECIMALS below carries, and this
+                             file is the one place that holds it.
+
+                             THESE TWO LINES SAID "so
+                             chains/coin_amounts.CHAIN_DECIMALS is the table that
+                             answers for ICP, not a second one" UNTIL 2026-10-11,
+                             AND THAT WAS FALSE. Measured that day:
+                             CHAIN_DECIMALS is {"BTC": 8, "LTC": 8, "GRC": 8} and
+                             tests/test_coin_amounts.test_the_table_covers_exactly_
+                             the_chains_whose_rpc_takes_a_decimal asserts that
+                             membership exactly, so ICP is not in it and cannot be
+                             added. The reason is in
+                             chains/payout_quantization._quantize_icp()'s docstring,
+                             which records the attempt: "I added ICP to
+                             CHAIN_DECIMALS first, to get the quantizer derived for
+                             free, and that test refused it: the table would then
+                             have claimed something false about the interface."
+                             That table covers the chains whose RPC takes a DECIMAL
+                             amount; ICP's legacy `transfer` takes
+                             `amount = record { e8s = N : nat64 }`, an integer,
+                             exactly as Solana takes lamports -- which is why XRP
+                             and SOL are absent from it too.
+
+                             SO THE ANSWER FOR ICP IS ICP_DECIMALS HERE, read by
+                             chains/icp.py (both the e8s division and
+                             send_to_address's amount_to_base_units call) and by
+                             chains/payout_quantization._quantize_icp(). One
+                             definition, three readers, no table entry. Fixed as a
+                             wrong comment rather than deleted, because a reader
+                             who believed it would have gone looking for ICP in a
+                             table that pins ICP's absence (rule 16).
     icrc1_fee      -> 10_000 e8s. Which is what DFINITY's documented example
                              seeds and what mainnet charges -- and it is STILL
                              not a constant anywhere in this codebase, for the
@@ -152,9 +181,13 @@ the first file in the repository to encounter it:
                      payer to label the payment. ICP needs nothing from the
                      payer.
 
-  8 decimals         e8s, the same precision as BTC, LTC and GRC, so
-                     chains/coin_amounts.CHAIN_DECIMALS is the table that already
-                     answers for it rather than a second one.
+  8 decimals         e8s, the same precision as BTC, LTC and GRC -- but NOT an
+                     entry in chains/coin_amounts.CHAIN_DECIMALS, which this line
+                     claimed until 2026-10-11. That table covers the chains whose
+                     RPC takes a decimal amount and the ICP ledger's takes integer
+                     e8s, so ICP_DECIMALS below is the single definition and
+                     chains/payout_quantization._quantize_icp() is the quantizer.
+                     The long correction is in the measured-values section above.
 
 NO FEE CONSTANT IN THIS FILE, and that is deliberate. The ICP ledger's transfer
 fee is a value the ledger canister reports through `icrc1_fee()`, and a number
