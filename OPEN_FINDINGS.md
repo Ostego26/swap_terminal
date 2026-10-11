@@ -315,6 +315,92 @@ a second gunicorn on its own loopback port; a loopback-only `before_request` on
 - `payout_service.payout_unlock_context()` locks before it proves.
 - `s_d503f64d6c5e601f` (9,049.69 GRC against a 2,000 GRC desk) still unrevived.
 
+### 22. The ufw rule names the REGTEST ports and the deployment moved to TESTNET
+**Measured 2026-10-11**, and every premise for it was already in finding 3 on
+2026-10-10, which is why this entry opens by saying so: I spent a session
+re-deriving it from scratch instead of reading this file. Rule 2 says grep the
+tree for the name; this is the file whose entire purpose is the list of findings.
+
+The host:
+
+```
+LISTEN 127.0.0.1:19332  [::1]:19332     litecoind   LOOPBACK ONLY
+LISTEN          *:25715                 gridcoinresearchd   bind is fine
+```
+
+From inside the container, a bare TCP connect to the gateway:
+
+```
+LTC 172.17.0.1:19332   3.003s  TIMED OUT
+GRC 172.17.0.1:25715   3.003s  TIMED OUT
+```
+
+And ufw rule 20, unchanged since 2026-10-09:
+
+```
+18443,19443,25779/tcp   ALLOW   172.18.0.0/16   # swap_terminal container -> chain RPC
+```
+
+**18443, 19443 and 25779 ARE THE REGTEST PORTS.** The deployment is on testnet --
+19332 is litecoind testnet RPC, 25715 is gridcoinresearchd testnet RPC
+(chain_balances.py:21 and README.md:648 both name 25715; docker-compose.grc-desk.yml
+names 25779 as the desk's regtest-era port). The ports moved and the firewall rule
+did not follow, so every packet to either is dropped.
+
+**FINDING 3 ALREADY PROVED THIS EXACT MECHANISM** and the sentence is worth quoting
+because it is the measurement, not an argument: "Corroborated by a throwaway
+listener on :25999, which **timed out** from the same container on the same bridge,
+because 25999 is not in rule 20." A port absent from the rule times out. That is the
+whole of it.
+
+**WHY `ufw allow in on docker0` DOES NOT FIX IT**, added at my suggestion on
+2026-10-11 and inert: finding 3 settled that the web container is `172.18.0.3` on
+`swap_terminal_default`, **not** on the default bridge, so its packets arrive on the
+compose bridge interface rather than `docker0`. Rule 20 works because it matches the
+SOURCE subnet, not an interface. The added rule is also a loosening with no benefit
+-- finding 4 is about who else reaches wallet RPC from that bridge -- so it should be
+removed rather than left.
+
+**Remedy**, in the proven source-matching shape rather than a new one:
+
+```
+sudo ufw delete allow in on docker0
+sudo ufw allow from 172.18.0.0/16 to any port 19332,25715 proto tcp comment 'swap_terminal container -> testnet chain RPC'
+```
+
+**AND LTC NEEDS A SECOND FIX THAT THE FIRST ONE HID.** litecoind is bound to
+loopback, so even with packets flowing nothing listens on 172.17.0.1:19332. In
+`litecoin.conf`, **inside the `[test]` section** -- finding 1 records the trap and it
+applies identically here: Bitcoin Core since 0.17 only applies these to a non-mainnet
+chain from that chain's own section, and WARNS rather than failing, so a global
+placement looks applied and is not. It was `[regtest]` then; it is `[test]` now.
+
+```
+rpcbind=127.0.0.1
+rpcbind=172.17.0.1
+rpcallowip=127.0.0.1
+rpcallowip=172.18.0.0/16
+```
+
+**THE DISCRIMINATING READING, so the two fixes can be told apart rather than applied
+blind.** Re-run the container-side connect probe after the ufw change and BEFORE
+editing litecoin.conf:
+
+    GRC -> CONNECTED   its bind was always fine; ufw was the only problem
+    LTC -> REFUSED     not timed out. The packet now arrives and gets an honest RST,
+                       which is the loopback bind and nothing else
+
+A timeout means a filter; a refusal means a bind. They send you to different files
+and look identical in a log, which is how finding 1's remedy came to be applied to a
+chain whose problem was the firewall.
+
+**Costs while open**: GRC and LTC are both unreachable, so every pair sourcing or
+paying out in either is refused -- now in 0.0004s with the reason, rather than after
+four 30s connect timeouts and a killed gunicorn worker (c067820, d4302fb). ICP and
+SOL answer, so ICP<->SOL pairs are unaffected.
+
+**Owner**: operator. Both remedies are on the host.
+
 ### 19. Does the replica's tECDSA key survive `docker compose down`? — NOT MEASURED
 **This is now the question gating a verb that is one short command away.** As of
 2026-10-10 `docker-compose.yml` declares `include:` for the icp and web files, so
