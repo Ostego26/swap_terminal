@@ -111,7 +111,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 from chains.daemon_conf import conf_fallback_settings, rpc_url
 from chains.registry import missing_settings, why_unconfigured
 from chains.wallet_hint import which_wallets_are_on_disk
-from chains.wallet_lock import encryption_state, unlocked_for_payout
+from chains.wallet_lock import encryption_state, passphrase_env_var, unlocked_for_payout
 from config import Config
 from microfortnights import format_duration
 from modules.atomic_htlc_scripts import p2sh_script_for
@@ -755,7 +755,13 @@ def prove_every_wallet_will_open(step: Step, clients: dict) -> None:
         if not encrypted:
             step.check(f"{asset} wallet will open", "not encrypted", "no passphrase needed", True)
             continue
-        variable = f"{asset}_WALLET_PASSPHRASE"
+        # THROUGH chains/wallet_lock.passphrase_env_var() SINCE 2026-10-11, not
+        # `f"{asset}_WALLET_PASSPHRASE"` spelled here. That pattern produced
+        # GRC_WALLET_PASSPHRASE, which no compose file and no .env.example line sets,
+        # so this step refused at an operator who HAD armed GRC -- naming a variable
+        # they had never heard of. See that function for the collision and where the
+        # second name came from.
+        variable = passphrase_env_var(asset)
         passphrase = os.environ.get(variable, "")
         if not passphrase:
             # THE NAME, NEVER THE VALUE. argv and the environment of a running

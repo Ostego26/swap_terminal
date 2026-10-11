@@ -1348,7 +1348,11 @@ def test_a_wrong_passphrase_is_caught_at_step_1_and_NOTHING_IS_FUNDED(monkeypatc
     run reaches step 6 with a wallet that will not open, which is what stranded
     8d3ac063 and cd0b0e60. Verified 2026-09-30 by the two runs themselves.
     """
-    monkeypatch.setenv("GRC_WALLET_PASSPHRASE", "wrong")
+    # GRIDCOIN_WALLET_PASSPHRASE, not GRC_WALLET_PASSPHRASE: the driver resolves the
+    # name through chains/wallet_lock.passphrase_env_var() as of 2026-10-11, because the
+    # `f"{asset}_WALLET_PASSPHRASE"` it used to build produced a variable that no compose
+    # file and no .env.example line sets.
+    monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", "wrong")
     console = Console(total_steps=8)
     client = _WalletClient(encrypted=True, accepts="right")
     with pytest.raises(atomic_swap.SwapError, match="NOTHING WAS FUNDED"):
@@ -1359,13 +1363,13 @@ def test_a_wrong_passphrase_is_caught_at_step_1_and_NOTHING_IS_FUNDED(monkeypatc
     assert "wrong" not in printed.replace("was wrong", ""), (
         f"the passphrase reached the screen:\n{printed}"
     )
-    assert "GRC_WALLET_PASSPHRASE" in printed, printed
+    assert "GRIDCOIN_WALLET_PASSPHRASE" in printed, printed
 
 
 def test_an_UNSET_passphrase_names_the_variable_and_refuses():
     """An encrypted wallet with no passphrase configured cannot be opened at all."""
     console = Console(total_steps=8)
-    with pytest.raises(atomic_swap.SwapError, match="GRC_WALLET_PASSPHRASE is not set"):
+    with pytest.raises(atomic_swap.SwapError, match="GRIDCOIN_WALLET_PASSPHRASE is not set"):
         atomic_swap.prove_every_wallet_will_open(
             Step(console, 1), {"GRC": _WalletClient(encrypted=True, accepts="right")})
 
@@ -1395,7 +1399,7 @@ def test_a_CORRECT_passphrase_unlocks_and_puts_the_wallet_BACK(monkeypatch, caps
     passphrase by stopping the operator's staking would be a worse trade than the
     bug it prevents.
     """
-    monkeypatch.setenv("GRC_WALLET_PASSPHRASE", "right")
+    monkeypatch.setenv("GRIDCOIN_WALLET_PASSPHRASE", "right")
     console = Console(total_steps=8)
     client = _WalletClient(encrypted=True, accepts="right")
     atomic_swap.prove_every_wallet_will_open(Step(console, 1), {"GRC": client})

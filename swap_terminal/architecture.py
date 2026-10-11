@@ -124,8 +124,19 @@ class Service(NamedTuple):
     #: and the test derives it the same way: reachable from docker-compose.yml through
     #: `include:` AND carrying no profile.
     starts_by_default: bool
-    #: What pid 1 runs, and everything it spawns. The `web` entry is the one that
-    #: matters: four processes, not one.
+    #: What pid 1 runs, and everything it spawns, ONE ENTRY PER PROCESS GROUP. The
+    #: `web` entry is the one that matters, and the number of entries is NOT the number
+    #: of processes: its gunicorn entry covers a master plus GUNICORN_WORKERS children.
+    #:
+    #: THIS COMMENT SAID "four processes, not one" FOR ONE COMMIT, against a six-entry
+    #: tuple describing eight processes. In the file written because the architecture
+    #: had been got wrong four times, carrying a count in prose beside the data that
+    #: contradicts it -- which is rule 16's wrong-comment bug and is exactly the thing
+    #: this module exists to stop, committed by this module. It is recorded rather than
+    #: quietly corrected because the lesson is the mechanism, not the number: a count
+    #: belongs in a test, and WEB_PROCESS_COUNT below is now derived from the
+    #: Dockerfile, gunicorn.conf.py and supervisor.worker_commands() instead of typed
+    #: here.
     processes: tuple[str, ...]
     #: One line on what it is for.
     role: str
@@ -181,6 +192,22 @@ SERVICES = {
     ),
 }
 
+#: How many PROCESSES run inside the `web` container, as opposed to how many entries
+#: SERVICES["web"].processes has. Eight:
+#:
+#:     1   dumb-init                     docker/web.Dockerfile ENTRYPOINT
+#:     1   web_workers_entrypoint.py     docker/web.Dockerfile CMD
+#:     1   gunicorn master               it spawns its own workers
+#:     2   gunicorn sync workers         gunicorn.conf.py `workers`, default 2
+#:     3   the supervised swap workers   supervisor.worker_commands()
+#:
+#: NOT TYPED AS A LITERAL ANYWHERE THAT MATTERS: tests/test_architecture_is_what_the_
+#: tree_does.py derives each line of that from its own source and asserts the total,
+#: so raising GUNICORN_WORKERS or adding a fourth swap worker fails the test rather
+#: than leaving this block describing the old container. That is the whole difference
+#: between this module and the five stale descriptions its header lists.
+WEB_PROCESS_COUNT = 8
+
 #: Files that PATCH `web` rather than declaring a service, and what each adds. They are
 #: reached through the COMPOSE_FILE line in .env -- normally written by
 #: `configure_env.py --arm <chain>` -- and NOT through `include:`, which
@@ -235,7 +262,9 @@ CUSTODY = {
     "BTC": Custody("daemon", "", "class"),
     "LTC": Custody("daemon", "", "class"),
     # GRC's daemon signs too, but an ENCRYPTED wallet must be unlocked first, which is
-    # the one credential a daemon chain needs. See the note below on its second name.
+    # the one credential a daemon chain needs. See GRC_PASSPHRASE_GATES_BOTH_LEGS and
+    # GRC_PASSPHRASE_SECOND_NAME below -- this entry is the narrowest true statement
+    # about it and both notes are load-bearing.
     "GRC": Custody("daemon", "GRIDCOIN_WALLET_PASSPHRASE", "class"),
     "SOL": Custody("process", "SOL_PAYOUT_KEYPAIR_PATH", "derived"),
     "XRP": Custody("process", "XRP_PAYOUT_SECRET_SEED", "derived"),
@@ -244,21 +273,82 @@ CUSTODY = {
     "ICP": Custody("process", "ICP_PAYOUT_IDENTITY", "derived"),
 }
 
+#: THE GRC PASSPHRASE IS NOT A PAYOUT-ONLY CREDENTIAL, AND THIS TABLE IMPLIED IT WAS
+#: FOR ONE COMMIT. services/swap_service.derive_deposit_address() calls
+#: chains/gridcoin_wallet_lock.unlocked_for_payout() around `getnewaddress`, because an
+#: encrypted Gridcoin wallet will not issue an address while locked -- the log line
+#: there spells the sequence out: "lock -> unlock -> derive -> lock -> unlock for
+#: staking".
+#:
+#: SO `configure_env.py --arm grc` GATES GRC IN BOTH DIRECTIONS. On an encrypted wallet
+#: an unarmed deployment cannot take a GRC DEPOSIT either, not merely fail to pay one
+#: out -- which inverts what a reader would conclude from the CUSTODY row alone, and is
+#: why the row above now points here instead of explaining itself. The three callers of
+#: unlocked_for_payout() measured 2026-10-11: services/payout_service.py:1582 (the
+#: payout), services/swap_service.py:579 (the DEPOSIT address), and
+#: modules/atomic_grc_client.py:554 (the HTLC leg, which reads the other variable name
+#: below).
+#:
+#: NOT A DEFECT, AND NAMED ANYWAY. The arming overlay is the right mechanism and the
+#: unlock is genuinely required; what was wrong was the description, in the file written
+#: to stop descriptions being wrong.
+GRC_PASSPHRASE_GATES_BOTH_LEGS = True
+
 #: THE GRIDCOIN PASSPHRASE HAS TWO NAMES AND ONLY ONE OF THEM IS CONFIGURABLE.
 #: Measured 2026-10-11: GRIDCOIN_WALLET_PASSPHRASE appears in 28 .py files, 4
 #: .env.example lines and 4 compose files; GRC_WALLET_PASSPHRASE appears in ZERO of
 #: either and is read only at modules/atomic_grc_client.py:392, as an IMPORT-TIME
-#: default argument. That client is reachable from the web container --
-#: modules/htlc_assets.py imports GRCClient -- so `configure_env.py --arm grc` and the
-#: armed-grc overlay arm the brokered payout path and leave the HTLC leg reading a
-#: variable nothing in the configuration surface sets.
+#: default argument -- a hazard that module's own header documents and did not fix.
+#: That client is reachable from the web container (modules/htlc_assets.py imports
+#: GRCClient), so `configure_env.py --arm grc` and the armed-grc overlay arm the
+#: brokered payout path and leave the HTLC leg reading a variable nothing sets.
 #:
-#: NOT RECONCILED HERE. Renaming a credential variable on a signing path is CLAUDE.md
-#: rule 16's "fund movement" and belongs to the operator. It is recorded rather than
-#: fixed so the next reader does not have to re-derive it. The comment at
-#: atomic_grc_client.py:944 saying the variable's absence "is not an omission" is about
-#: a different thing -- the __main__ demo block's unset-variable check -- and is not a
-#: justification for the split.
+#: THE MECHANISM IS A DERIVED NAME, NOT A SECOND CONSTANT, and that is why grepping for
+#: a literal nearly missed it. atomic_swap.py:758 builds the variable as
+#: `f"{asset}_WALLET_PASSPHRASE"` -- one pattern serving all three HTLC chains, giving
+#: BTC_WALLET_PASSPHRASE, LTC_WALLET_PASSPHRASE and GRC_WALLET_PASSPHRASE. The Flask
+#: app names GRC's specifically as GRIDCOIN_WALLET_PASSPHRASE. So the collision is at
+#: GRC ONLY, where a generic convention and a specific one meet, and the HTLC driver
+#: refuses with "GRC_WALLET_PASSPHRASE is not set" -- a variable the operator has never
+#: set and .env.example has never mentioned.
+#:
+#: WHERE IT CAME FROM, in the operator's words (2026-10-11): "i know why there's
+#: multiple grc wallet pahrases. you got confused and were trying to integrate my gui
+#: wallet for grc testnet instead of doing what i said which you finally did and was
+#: build it's own daemon from the code." The daemon built from source is the `grc-desk`
+#: service. So the second name is not a design decision to be respected -- it is debris
+#: from an integration that was not what was asked for, and it is recorded here because
+#: the next reader would otherwise spend the same effort deciding whether to preserve
+#: it. The answer is no.
+#:
+#: RECONCILED 2026-10-11, once the operator supplied the fact that made it decidable.
+#: chains/wallet_lock.passphrase_env_var(chain) is now the one resolver: it returns
+#: GRIDCOIN_WALLET_PASSPHRASE for GRC and keeps `f"{chain}_WALLET_PASSPHRASE"` for every
+#: other chain -- BTC and LTC wallets can be encrypted and nothing configures a
+#: passphrase for either, so the obvious convention is still the most useful thing a
+#: refusal can name there. Both suites call it: atomic_swap.py no longer builds the
+#: name, and modules/atomic_grc_client.py resolves it at CONSTRUCTION rather than in an
+#: import-time default argument -- a second defect that module's own header documented
+#: and left in place for weeks, and one that could only ever read "" because it read a
+#: name nothing sets.
+#:
+#: tests/test_one_name_for_the_gridcoin_passphrase.py holds all of it, including the
+#: assertion the defect actually needed and neither half had: that the name the code
+#: asks for is one .env.example and a compose file can SUPPLY. Both old halves were
+#: internally consistent -- the driver asked for a name and its error printed that same
+#: name -- which is why nothing caught it.
+#:
+#: WHY IT WAS SURFACED RATHER THAN FIXED FIRST, since the reversal is the instructive
+#: part: changing which credential a signing path reads is rule 16's fund movement, and
+#: what could not be established from the tree was whether two names were a deliberate
+#: separation worth keeping. They were not. That is not a fact any measurement here
+#: could have produced -- it was history only the operator had.
+#:
+#: THE NAME BELOW IS NOW HISTORICAL and is kept so a reader meeting the old wording in
+#: a comment can find out what happened. The comment at atomic_grc_client.py:940 saying
+#: the variable's absence "is not an omission" is about a different thing entirely --
+#: the __main__ demo block's unset-variable check -- and was never a justification for
+#: the split.
 # S105 fires on the constant's own name plus a string literal, and it is right to.
 # CHECKED: the value is a variable NAME, not a value. The literal is exactly what
 # `grep -rn GRC_WALLET_PASSPHRASE` matches, which is the point of recording it, and no
@@ -311,6 +401,32 @@ DERIVATION_SCHEME = (b"swap_terminal", b"v1", b"<network>", b"<ASSET>", b"<index
 #: to compute, so a row would describe a derivation that does not exist.
 KEYRING_ASSETS = ("BTC", "LTC", "GRC", "SOL", "XRP")
 
+#: ONE KEY NAME SERVES ALL THREE CURVES, AND THAT IS CORRECT -- checked against primary
+#: sources on 2026-10-11 after a review agent claimed otherwise.
+#:
+#: The claim was that icp/threshold_custody_init.did's shipped
+#: `(record { key_name = "dfx_test_key" })` asks for an Ed25519 key under a name that
+#: cannot have one, which would make the SOL and XRP legs of the keyring unusable
+#: locally -- threshold_custody/src/lib.rs uses the one configured name for both
+#: EcdsaKeyId.name and SchnorrKeyId.name. It would have been a real defect in the
+#: canister layer. IT IS NOT TRUE. DFINITY's threshold-Schnorr page lists the supported
+#: key ids for the feature as `dfx_test_key` ("Only available on the local development
+#: environment started by dfx"), `test_key_1` and `key_1`, and separately gives an
+#: Ed25519 `dfx_test_key` public key. Fetched from
+#: raw.githubusercontent.com/dfinity/portal/master/docs/building-apps/network-features/
+#: signatures/t-schnorr.mdx, HTTP 200, 12691 bytes.
+#:
+#: RECORDED BECAUSE THE AGENT'S VERSION WAS NEARLY PASSED ON AS A FINDING. It arrived
+#: with a file-and-line citation and was wrong, which is rule 17's failure mode wearing
+#: someone else's evidence: a reason to believe is not a check.
+#:
+#: AND THE SAME PAGE RESOLVES WHAT LOOKED LIKE A CONTRADICTION WITH THE LINE BELOW. It
+#: publishes FIXED public keys for `dfx_test_key` on both curves, which would mean a
+#: deterministic key -- while this tree measured the local key CHANGING across one
+#: container restart. Both are true: the published values are labeled the POCKETIC test
+#: keys, and PocketIC is a different harness from `dfx start`. So a deterministic
+#: published value exists and does not apply to the replica this project runs.
+#:
 #: MEASURED 2026-10-07 AND IT SHAPES EVERYTHING ABOVE: the local replica's threshold key
 #: does NOT survive container recreation. The same canister id and the same
 #: `dfx_test_key` name produced two DIFFERENT public keys across one ordinary

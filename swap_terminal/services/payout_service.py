@@ -686,11 +686,16 @@ def broadcast_payout(adapter, config, address: str, amount: float,
     if asset == "ICP":
         if not created_at:
             raise PayoutSigningUnavailable(
-                "an ICP payout needs the swap's recorded creation time as the ledger's "
+                "an ICP send needs a STABLE caller-supplied timestamp as the ledger's "
                 "idempotency key and this call supplied none, so NOTHING was sent. The ICP "
                 "ledger deduplicates on created_at_time for 24 hours; without it every retry "
-                "is a new transaction and a timeout that the daemon actually accepted would "
-                "pay the customer twice. Pass created_at=swap[\"created_at\"]."
+                "is a new transaction and a timeout that the ledger actually accepted would "
+                "send twice. It must not come from a clock -- a fresh value defeats the "
+                "deduplication it exists for. The payout worker passes "
+                "created_at=swap[\"created_at\"], which is stable across retries by "
+                "construction. A caller with no swap row -- collect_fees.py sweeping fees is "
+                "the one in this tree -- has no such value yet, and choosing one is a "
+                "fund-path decision rather than a default this function may invent."
             )
         return adapter.send_to_address(address, amount, iso_to_epoch_nanos(created_at))
 

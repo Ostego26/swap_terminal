@@ -55,6 +55,52 @@ ENCRYPTION_FIELD = "unlocked_until"
 STAKING_CHAINS = frozenset({"GRC"})
 
 
+def passphrase_env_var(chain: str) -> str:
+    """The environment variable holding `chain`'s wallet passphrase. The ONE answer.
+
+    WHY THIS EXISTS, and it is a collision rather than a tidy idea. Measured
+    2026-10-11: there were TWO names for Gridcoin's passphrase and only one of them was
+    configurable.
+
+      GRIDCOIN_WALLET_PASSPHRASE   gridcoin_wallet_lock.WALLET_UNLOCK_ENV_VAR. 28 .py
+                                   files, 4 .env.example lines, 4 compose files, and
+                                   what `configure_env.py --arm grc` and
+                                   docker-compose.web.armed-grc.yml set.
+      GRC_WALLET_PASSPHRASE        produced by atomic_swap.py's
+                                   `f"{asset}_WALLET_PASSPHRASE"` -- one pattern
+                                   serving all three HTLC chains. In ZERO compose
+                                   files and ZERO .env.example lines.
+
+    So the HTLC driver refused with "GRC_WALLET_PASSPHRASE is not set" at an operator
+    who had armed GRIDCOIN_WALLET_PASSPHRASE, naming a variable no file in the
+    configuration surface has ever mentioned. The collision is at GRC ONLY, where a
+    GENERIC convention and a SPECIFIC one meet.
+
+    WHERE IT CAME FROM, in the operator's words: "you got confused and were trying to
+    integrate my gui wallet for grc testnet instead of doing what i said which you
+    finally did and was build it's own daemon from the code." The daemon built from
+    source is the `grc-desk` service. So the second name was never a design decision to
+    preserve.
+
+    THE GENERIC PATTERN IS KEPT FOR EVERY OTHER CHAIN, which is why this is a function
+    and not a rename. BTC and LTC wallets can be encrypted too and nothing in the tree
+    configures a passphrase for either, so `f"{chain}_WALLET_PASSPHRASE"` remains the
+    honest answer for them -- an operator who encrypts a bitcoind wallet gets a refusal
+    naming a variable that follows the obvious convention. Renaming GRC's half to match
+    the pattern would have traded a real defect for a subtler one: the configured name
+    is the one 36 sites already use.
+
+    HERE RATHER THAN IN gridcoin_wallet_lock.py despite that module owning the GRC
+    constant: this file is already the per-chain dispatch -- see this module's header
+    for the 2026-09-29 measurement that split it out -- and a cross-chain lookup living
+    inside the Gridcoin-shaped module is how the Gridcoin-shaped unlock came to be
+    called against bitcoind in the first place.
+    """
+    if chain == "GRC":
+        return gridcoin_wallet_lock.WALLET_UNLOCK_ENV_VAR
+    return f"{chain}_WALLET_PASSPHRASE"
+
+
 def wallet_is_encrypted(wallet_info: object) -> bool:
     """Does this getwalletinfo response describe a wallet with a passphrase?
 

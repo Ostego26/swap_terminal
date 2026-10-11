@@ -212,6 +212,74 @@ def test_no_overlay_introduces_a_service_that_bypasses_the_default_set():
         )
 
 
+def test_the_web_containers_process_count_is_derived_from_its_three_sources():
+    """WEB_PROCESS_COUNT must equal what the Dockerfile, gunicorn and the supervisor say.
+
+    WHY THIS TEST EXISTS, and it is the shortest-lived wrong comment in the repository.
+    architecture.py's `processes` field carried "four processes, not one" for exactly
+    one commit, beside a six-entry tuple describing eight processes -- in the module
+    written because the architecture had been reconstructed from memory four times.
+    Rule 16's wrong-comment bug, committed by the file whose job is to prevent it.
+
+    SO THE COUNT IS DERIVED FROM THREE DIFFERENT PLACES rather than typed anywhere:
+    raising GUNICORN_WORKERS, adding a fourth supervised worker, or changing the
+    Dockerfile's entrypoint chain each fail this with the arithmetic in the message.
+
+    ENTRIES AND PROCESSES ARE DIFFERENT NUMBERS and conflating them is what went wrong.
+    The tuple has one entry per process GROUP -- its gunicorn line covers a master plus
+    its children -- so the entry count is deliberately not asserted against the process
+    count. Both are checked, separately.
+
+    MUTATION: set WEB_PROCESS_COUNT to 6 (the entry count, which is the mistake this
+    replaces) and it fails; set gunicorn.conf.py's workers to 4 and it fails too.
+    """
+    import re  # noqa: PLC0415 -- used only here
+
+    dockerfile = (REPOSITORY_ROOT / "docker" / "web.Dockerfile").read_text()
+    assert 'ENTRYPOINT ["dumb-init"' in dockerfile, (
+        "web.Dockerfile's ENTRYPOINT is no longer dumb-init, so the process chain this "
+        "count describes has changed shape"
+    )
+    assert "web_workers_entrypoint.py" in dockerfile, "the CMD no longer runs the entrypoint script"
+    pid1_chain = 2  # dumb-init, then the entrypoint script it execs into
+
+    gunicorn_conf = (REPOSITORY_ROOT / "gunicorn.conf.py").read_text()
+    match = re.search(r'^workers\s*=\s*int\(os\.getenv\("GUNICORN_WORKERS",\s*"(\d+)"\)\)',
+                      gunicorn_conf, re.MULTILINE)
+    assert match, "could not read gunicorn's default worker count out of gunicorn.conf.py"
+    gunicorn_processes = 1 + int(match.group(1))  # the master, plus its sync workers
+
+    import supervisor  # noqa: PLC0415 -- after the sys.path insert at module scope
+
+    swap_workers = len(supervisor.worker_commands())
+
+    derived = pid1_chain + gunicorn_processes + swap_workers
+    assert derived == architecture.WEB_PROCESS_COUNT, (
+        f"architecture.WEB_PROCESS_COUNT is {architecture.WEB_PROCESS_COUNT} and the sources "
+        f"give {derived}: {pid1_chain} for the dumb-init/entrypoint chain, "
+        f"{gunicorn_processes} for gunicorn (1 master + {match.group(1)} workers), and "
+        f"{swap_workers} supervised workers"
+    )
+
+
+def test_the_process_tuple_names_every_supervised_worker():
+    """Separately from the count: each supervised worker must appear by name in the tuple.
+
+    The count above would still pass if the tuple named the wrong three workers, and the
+    tuple is what a reader actually consults. Derived from
+    supervisor.worker_commands(), which is the registry the container really starts
+    them from.
+    """
+    import supervisor  # noqa: PLC0415 -- after the sys.path insert at module scope
+
+    listed = " ".join(architecture.SERVICES["web"].processes)
+    missing = [name for name in supervisor.worker_commands() if name not in listed]
+    assert missing == [], (
+        f"{missing} are started in the web container and not named in "
+        f"architecture.SERVICES['web'].processes"
+    )
+
+
 def test_the_custody_table_covers_exactly_the_assets_the_registry_can_build():
     """CUSTODY must name every chain an adapter exists for, and no others.
 
@@ -339,50 +407,76 @@ def test_the_derivation_scheme_shape_matches_the_function_that_builds_it():
         )
 
 
-def test_the_grc_passphrase_second_name_is_still_read_by_exactly_one_module():
-    """The recorded split must still be real, and must still be only one site.
+def test_the_gridcoin_passphrase_split_is_gone_from_the_code():
+    """No CODE may read the historical second name any more. Prose may still discuss it.
 
-    THIS IS A FINDING RATHER THAN A GATE, and the distinction matters. The second
-    variable is read at modules/atomic_grc_client.py and set by nothing in the
-    configuration surface -- no compose file, no .env.example line. Renaming a
-    credential variable on a signing path is rule 16's fund movement and the operator's
-    to ask for, so this does not demand the split be fixed.
+    THIS TEST WAS THE INVERSE ONE COMMIT AGO and its own docstring predicted the flip:
+    "if the list is EMPTY the split was fixed and the note should go." The split WAS
+    fixed -- chains/wallet_lock.passphrase_env_var() is now the one resolver -- so the
+    assertion is now that nothing reads GRC_WALLET_PASSPHRASE rather than that exactly
+    one module does.
 
-    What it DOES refuse is the split getting wider while nobody is looking. A second
-    module reading the orphan name, or the name vanishing from the tree entirely, both
-    make architecture.py's note wrong -- in opposite directions, and the message says
-    which.
+    PROSE IS STRIPPED BEFORE SCANNING, AND THAT IS THE WHOLE DIFFICULTY. The first
+    version matched the literal anywhere in a file's text and therefore counted
+    modules/atomic_grc_client.py (six mentions, all comments recording the history) and
+    chains/wallet_lock.py (whose resolver docstring names the old variable to explain
+    the collision) as readers. Both SHOULD name it: deleting the explanation to satisfy
+    a grep makes the file worse for the reader in order to make a test green.
+
+    code_without_prose() IS IMPORTED RATHER THAN COPIED (rule 8). It already exists for
+    exactly this failure, and its docstring records the same bug on the same day against
+    a different gate -- a file that named `conf_fallback_settings` in a comment
+    explaining why it deliberately does NOT call it. That is five occurrences of
+    prose-as-code in this repository; the sixth should also import this function.
+
+    MUTATION: put `os.environ.get("GRC_WALLET_PASSPHRASE", "")` back into
+    modules/atomic_grc_client.py's default argument and this fails naming that file.
+    Add a comment mentioning the name anywhere and it still passes, which is the point.
     """
+    from test_daemon_conf import (  # noqa: PLC0415 -- one home for the prose stripper
+        code_without_prose,
+    )
+
     name = architecture.GRC_PASSPHRASE_SECOND_NAME
     pattern = re.compile(rf"\b{re.escape(name)}\b")
 
-    # architecture.py IS EXCLUDED BECAUSE NAMING THE VARIABLE IS ITS JOB. The first run
-    # of this test failed on it, which is the prose-as-code trap this project has now
-    # walked into four times: a scan over raw file text matches an identifier that is
-    # being DISCUSSED rather than used. Here stripping comments would not have helped --
-    # in architecture.py the name is a real assignment to a constant -- so the recorder
-    # is excluded by path and the reason is written down rather than the finding being
-    # quietly narrowed to make the test green.
-    RECORDER = REPOSITORY_ROOT / "swap_terminal" / "architecture.py"
+    # architecture.py IS EXCLUDED, AND PROSE-STRIPPING CANNOT DO IT. The name is held
+    # there as GRC_PASSPHRASE_SECOND_NAME = "GRC_WALLET_PASSPHRASE" -- a real assignment,
+    # which is code by any definition, and recording the historical name is that
+    # constant's entire job. So the recorder is excluded by PATH while every other file
+    # is filtered by prose, and the two mechanisms are different on purpose rather than
+    # one being a weaker version of the other.
+    recorder = REPOSITORY_ROOT / "swap_terminal" / "architecture.py"
     readers = sorted(
         path.relative_to(REPOSITORY_ROOT).as_posix()
         for path in (REPOSITORY_ROOT / "swap_terminal").rglob("*.py")
         if "__pycache__" not in path.parts
-        and path != RECORDER
-        and pattern.search(path.read_text())
+        and path != recorder
+        and pattern.search(code_without_prose(path))
     )
-    assert readers == ["swap_terminal/modules/atomic_grc_client.py"], (
-        f"{name} is now named by {readers}. architecture.py records it as read by exactly one "
-        f"module and set by nothing; if that changed, the note needs rewriting -- and if the "
-        f"list is EMPTY the split was fixed and the note should go."
+    assert readers == [], (
+        f"{name} is read by CODE in {readers}. It is the historical name; "
+        f"chains/wallet_lock.passphrase_env_var() is the one place that decides which "
+        f"variable a chain's passphrase lives in, and a second reader reintroduces the "
+        f"split where one suite asks for a name no deployment sets."
     )
 
-    configured = [
-        path.name
-        for path in [REPOSITORY_ROOT / ".env.example", *compose_files()]
-        if path.is_file() and pattern.search(path.read_text())
-    ]
-    assert configured == [], (
-        f"{name} is now set in {configured}, so the split architecture.py describes -- a "
-        f"credential variable nothing in the configuration surface names -- no longer holds"
-    )
+
+def test_the_resolver_the_split_was_fixed_with_is_the_one_both_suites_use():
+    """Both the HTLC driver and the HTLC client must go through passphrase_env_var().
+
+    Guards the other direction from the test above: that one proves the OLD name is
+    gone, this proves the NEW mechanism is actually what replaced it rather than each
+    suite having independently hardcoded the configured name -- which would pass the
+    absence check and leave two places to keep in step.
+    """
+    from test_daemon_conf import code_without_prose  # noqa: PLC0415 -- same single home
+
+    for relative in ("atomic_swap.py", "swap_terminal/modules/atomic_grc_client.py"):
+        code = code_without_prose(REPOSITORY_ROOT / relative)
+        assert "passphrase_env_var" in code, (
+            f"{relative} does not call chains/wallet_lock.passphrase_env_var(), so it is "
+            f"deciding the passphrase variable's name for itself"
+        )
+
+

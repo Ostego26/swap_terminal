@@ -6,7 +6,8 @@ Role: submodule (one chain's HTLC operations; every decision it makes is a call
 Reads: a Gridcoin wallet daemon -- decodescript, gettxout, gettransaction,
        getrawtransaction, createrawtransaction, listunspent,
        getreceivedbyaddress; and the environment variables
-       GRC_WALLET_PASSPHRASE and PLATFORM_FEE_GRC_ADDRESS
+       GRIDCOIN_WALLET_PASSPHRASE (through chains/wallet_lock.passphrase_env_var,
+       and it was GRC_WALLET_PASSPHRASE until 2026-10-11) and PLATFORM_FEE_GRC_ADDRESS
 Writes: nothing to disk. THE CHAIN AND THE WALLET: walletlock/walletpassphrase
        change the wallet's lock state; sendtoaddress and sendrawtransaction
        broadcast.
@@ -87,13 +88,30 @@ target and is why the harness could not wait it out. CLTV performs the same
 comparison with either number -- the opcode cannot see how far away the height is
 -- so this is a gap in the WAIT, not in the opcode.
 
-THE WALLET PASSPHRASE IS READ AT IMPORT TIME, NOT AT CALL TIME. The default
-argument `wallet_passphrase: str = os.environ.get("GRC_WALLET_PASSPHRASE", "")`
-is evaluated once, when the class body is executed -- so a process that loads
-its .env after importing this module gets an empty passphrase and silently
-skips the unlock, and a process that changes the variable later never sees the
-change. That is an import-time side effect (rule 12) hiding in a default
-argument.
+THE WALLET PASSPHRASE WAS READ AT IMPORT TIME, NOT AT CALL TIME, AND FROM THE
+WRONG VARIABLE. Both are fixed as of 2026-10-11 and both are recorded because
+they compounded into one silent failure.
+
+The default argument was `wallet_passphrase: str = os.environ.get(
+"GRC_WALLET_PASSPHRASE", "")`, evaluated once when the class body executes --
+so a process that loaded its .env after importing this module got an empty
+passphrase and silently skipped the unlock, and a process that changed the
+variable later never saw the change. An import-time side effect (rule 12)
+hiding in a default argument, documented in this very paragraph and left in
+place for weeks.
+
+AND THE VARIABLE WAS ONE NOTHING SETS. GRC_WALLET_PASSPHRASE appears in zero
+compose files and zero .env.example lines; the configured name is
+GRIDCOIN_WALLET_PASSPHRASE, which is what `configure_env.py --arm grc` and
+docker-compose.web.armed-grc.yml write. So the import-time read was reading an
+always-unset variable, which is why the first defect never surfaced as a
+mismatch -- an empty value from the wrong name is indistinguishable from an
+empty value from the right one.
+
+It is now `wallet_passphrase: str | None = None`, resolved in the body through
+chains/wallet_lock.passphrase_env_var("GRC") at CONSTRUCTION time. None means
+"read the environment now"; an explicit "" still means "no passphrase", so a
+caller can still say that deliberately and a test can seed either.
 
 FOUR DEFECTS WERE FIXED ON 2026-09-25. ALL FOUR WERE IN ALL THREE CLIENTS.
 
@@ -332,6 +350,7 @@ from decimal import Decimal
 
 import requests
 from chains.gridcoin_wallet_lock import unlocked_for_payout
+from chains.wallet_lock import passphrase_env_var
 from modules.atomic_htlc_scripts import build_htlc_redeem_script, p2sh_script_for
 from modules.htlc_fee import platform_fee_coin, usable_platform_fee_address
 from modules.htlc_rpc import (
@@ -389,7 +408,7 @@ class _WalletRpc:
 
 
 class GRCClient:
-    def __init__(self, rpc_url: str, rpc_user: str, rpc_pass: str, wallet_passphrase: str = os.environ.get("GRC_WALLET_PASSPHRASE", "")):
+    def __init__(self, rpc_url: str, rpc_user: str, rpc_pass: str, wallet_passphrase: str | None = None):
         """
         Initializes the Gridcoin client.
         
@@ -404,7 +423,23 @@ class GRCClient:
         self.rpc_url = rpc_url.strip()
         self.rpc_user = rpc_user
         self.rpc_pass = rpc_pass
-        self.wallet_passphrase = wallet_passphrase
+        # RESOLVED HERE, AT CONSTRUCTION, NOT IN THE DEFAULT ARGUMENT. See this
+        # module's header for the two defects this replaced: the default was evaluated
+        # at IMPORT, and it named GRC_WALLET_PASSPHRASE, which nothing in the
+        # configuration surface sets. The variable comes from
+        # chains/wallet_lock.passphrase_env_var() so that this file and atomic_swap.py
+        # cannot disagree about which one it is (rule 8).
+        #
+        # None AND "" MEAN DIFFERENT THINGS and the distinction is the point: None is
+        # "read the environment", "" is a caller stating there is no passphrase. A
+        # single empty-string default could not express the second, so a test seeding
+        # "no passphrase" and a process that simply had not loaded its .env were the
+        # same input -- which is how the import-time read stayed invisible.
+        self.wallet_passphrase = (
+            os.environ.get(passphrase_env_var("GRC"), "")
+            if wallet_passphrase is None
+            else wallet_passphrase
+        )
         logger.debug(f"GRCClient initialized at {self.rpc_url}")
 
     def rpc_call(self, method: str, params=None):

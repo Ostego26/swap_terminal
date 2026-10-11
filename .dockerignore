@@ -1,5 +1,15 @@
 # The build context for every service whose `context:` is the repository root --
-# today `harness` and `web`.
+# today FOUR of the five services: `web`, `harness`, `icp-replica` and `grc-desk`.
+# Only `abstergo` has its own context
+# (./swap_terminal/grc-sol-swap/abstergo_exchange) and its own .dockerignore.
+#
+# THIS SAID "today `harness` and `web`" UNTIL 2026-10-11 AND WAS SHORT BY TWO.
+# icp-replica and grc-desk were added later with `context: .` and nobody re-counted.
+# The PROTECTION never depended on this comment -- docker applies this file to any
+# build whose context is the root, whatever the comment says -- but the comment is
+# what a reader audits "which contexts are covered" from, and it answered wrong about
+# exactly the two newest ones. Re-derived by parsing `build.context` out of every
+# docker-compose*.yml rather than by reading, which is how it was got wrong.
 #
 # THE FIRST ENTRY IS A PRIVATE KEY AND IT IS THE REASON THIS FILE EXISTS.
 # swap_terminal/grc-sol-swap/abstergo_exchange/wgrc.json is an ed25519 Solana

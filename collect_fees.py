@@ -425,6 +425,28 @@ def apply_sweep(db, config, adapters, plan) -> list[str]:
                       each chain's send requires. Also reused: a sweep is a send
                       like any other, and a second spelling of XRP's arming token
                       or SOL's confirm_send would hide from `grep -rn`.
+
+                      ICP IS THE ONE CHAIN THIS CANNOT SWEEP, and until 2026-10-11
+                      this file did not mention ICP at all. broadcast_payout() grew
+                      an ICP branch that day, and it needs a STABLE caller-supplied
+                      timestamp as the ledger's idempotency key: the ICP ledger
+                      deduplicates on created_at_time for 24 hours, so a value from
+                      a clock defeats the deduplication it exists for and a sweep
+                      that timed out after the ledger accepted it would send twice.
+                      The payout worker passes the swap's recorded created_at, which
+                      is stable across retries by construction. A SWEEP HAS NO SWAP
+                      ROW, so it has no such value, and `--asset ICP --apply` gets
+                      PayoutSigningUnavailable with nothing sent.
+
+                      THE REFUSAL IS THE SAFE DIRECTION AND THE GAP IS NAMED RATHER
+                      THAN PATCHED (rule 19: no suppression, and rule 16: this is
+                      fund movement). What a retry-stable key for a sweep should be
+                      derived from -- the sweep_id, the row's created_at, the
+                      accrual window -- decides whether a retried sweep is one
+                      transfer or two, and that is the operator's to choose rather
+                      than a default this file may invent. Fee accrual in ICP is not
+                      lost meanwhile: it stays unswept and the plan keeps reporting
+                      it.
       record txid     INSIDE the context, before the re-lock can raise, with
                       `recorded` set only after the commit returns.
 

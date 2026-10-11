@@ -73,6 +73,37 @@ and four of the five legs would be RPC-provider-trust legs. The custody story is
 a genuine win over Python holding a seed. The trustlessness story is Bitcoin and
 nothing else today. Do not ship it described otherwise.
 
+## Key names, checked against primary sources 2026-10-11
+
+`threshold_custody_init.did` ships `(record { key_name = "dfx_test_key" })`, and
+`src/lib.rs` uses that one configured name for `EcdsaKeyId.name` AND
+`SchnorrKeyId.name`. A review agent reported this as a defect -- that no Ed25519
+`dfx_test_key` exists, so the SOL and XRP legs of the keyring could not be exercised
+locally. **That is wrong, and the key name is correct for all three curves.**
+
+DFINITY's threshold-Schnorr page lists the supported key ids for the feature as:
+
+    dfx_test_key   only available on the local development environment started by dfx
+    test_key_1     test key available on the ICP mainnet
+    key_1          production key available on the ICP mainnet
+
+and separately gives an Ed25519 `dfx_test_key` public key. Fetched from
+`raw.githubusercontent.com/dfinity/portal/master/docs/building-apps/network-features/signatures/t-schnorr.mdx`,
+HTTP 200, 12691 bytes.
+
+**The same page settles the apparent contradiction with the ephemeral-key measurement
+below.** It publishes FIXED public keys for `dfx_test_key` on both curves, which reads
+as a deterministic key -- while this project measured the local key CHANGING across one
+ordinary container restart. Both hold: the published values are labeled the **PocketIC**
+test keys, and PocketIC is a different harness from `dfx start`. A deterministic
+published value exists and does not describe the replica this project runs, so a custody
+address derived against `icp-replica` is still valid only for that container's lifetime.
+
+**Method note, because it cost a round.** Plain `curl` through this environment's proxy
+reaches `raw.githubusercontent.com` with HTTP 200 and returns whole files; a summarizing
+fetch tool returns a paraphrase and will not quote a table. For a question that turns on
+the exact contents of a list, fetch the file.
+
 ## The local ICP ledger, and what running it settled (2026-10-06)
 
 `dfx deploy icp_ledger_canister` puts the REAL released ICP ledger
