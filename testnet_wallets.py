@@ -2,7 +2,31 @@
 """Make sure the desk's wallet exists on each TESTNET daemon, and say how to fund it.
 
 Role: file (operator entry point, at the project root per CLAUDE.md rule 10)
-Reads: Config.RPC, each chain's own conf as a fallback, and the BTC/LTC daemons
+Reads: Config.RPC ALONE, and the BTC/LTC daemons it names. NOT each chain's own
+        conf -- this line said "each chain's own conf as a fallback" until
+        2026-10-11 and adapter_for_chain() below has said the opposite, under the
+        heading "NO CONF FALLBACK, AND THAT IS A DECISION THE REGISTER FORCED",
+        since the day it landed: a conf fallback here "would do the quietest wrong
+        thing available: create `desk_hot` on a node the service never talks to,
+        print 'created wallet desk_hot', and leave the brokered terminal with no
+        wallet at all." The header described the version of this file that was
+        written first, which is the wrong-comment bug (rule 16) in the field a
+        reader checks before deciding whether a tool can reach their daemon.
+
+        THE CONSEQUENCE IS AN EXPORT, and it is why this matters rather than being
+        tidy: BTC_RPC_PORT, BTC_RPC_USER, BTC_RPC_PASS and BTC_RPC_WALLET must be
+        in THIS PROCESS's environment. configure_env.py writes them to .env, which
+        reaches the CONTAINER because compose passes them, and does not reach a
+        host tool -- config.read_env_file() reads only SWAP_DB_PATH and
+        SWAP_DB_DIR out of that file, deliberately, so that importing Config never
+        arms a process with a credential. A reader who believed the old line would
+        run this against an unexported environment and read the refusal as a down
+        daemon.
+
+        The BEHAVIOR is already pinned by name:
+        tests/test_daemon_conf.py::test_EVERY_entry_point_THAT_RESOLVES_A_CHAIN_is_on_one_side_or_the_other
+        walks this file's AST for a real call to conf_fallback_settings() and
+        fails if one appears, so only the sentence was ever free to drift.
 Writes: a wallet on each daemon, via createwallet. Nothing in this repository and
         nothing in swap_terminal.db.
 Can move funds: NO. It cannot SPEND: `sendtoaddress`, `sendrawtransaction`,
