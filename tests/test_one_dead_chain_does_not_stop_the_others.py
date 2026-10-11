@@ -43,12 +43,32 @@ from __future__ import annotations
 
 import db as db_module
 import pytest
+import valid_addresses
 from config import Config
 from db import SCHEMA, apply_migrations, connect_db
 from services import deposit_service
 from workers.common import unreachable_note
 
 CONFIG = {name: getattr(Config, name) for name in dir(Config) if name.isupper()}
+
+#: DERIVED ADDRESSES, NOT TYPED ONES. These were `bcrt1qolder` and `tltc1qnewer`, which
+#: are address-SHAPED and decode as nothing -- tests/test_address_literals_are_valid.py
+#: refuses that, and it is right to: no adapter in these tests validates a deposit
+#: address, so a mistyped one would never have failed a test of its own.
+#:
+#: EACH SWAP NEEDS ITS OWN, because the whole experiment is per-swap isolation and two
+#: swaps sharing a deposit address would also share a shared-scan target -- which is a
+#: different code path (scan_shared_accounts) and would quietly change what is measured.
+#: The suffix keeps them distinct without inventing a string.
+ADDRESS_FOR = {
+    "BTC": valid_addresses.BTC_REGTEST_DEPOSIT,
+    "LTC": valid_addresses.LTC_REGTEST_DEPOSIT,
+    "GRC": valid_addresses.GRC_DESK_DEPOSIT,
+}
+
+#: Where a payout would go. Never sent in these tests -- the adapters raise or record --
+#: but create-time validation reads it, so it has to decode.
+GRC_PAYOUT = valid_addresses.GRC_PAYOUT
 
 
 @pytest.fixture
@@ -84,9 +104,9 @@ def seed_awaiting(conn, swap_id: str, asset: str, address: str, created: str):
         "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, payout_address,"
         " expected_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
         " output_amount_estimate, status, min_confirmations, expires_at, created_at, updated_at)"
-        " VALUES (?,?,?,'GRC',?,'Spayout',1.0,1.0,150,0.01,1.0,'awaiting_deposit',?,"
+        " VALUES (?,?,?,'GRC',?,?,1.0,1.0,150,0.01,1.0,'awaiting_deposit',?,"
         "'2999-01-01T00:00:00+00:00',?,?)",
-        (swap_id, f"q_{swap_id}", asset, address, 6, created, created),
+        (swap_id, f"q_{swap_id}", asset, address, GRC_PAYOUT, 6, created, created),
     )
     conn.commit()
 
@@ -142,8 +162,8 @@ def test_a_newer_swap_is_credited_although_an_older_swaps_chain_refused(conn):
     looked at. The LTC deposit is at its full confirmation threshold -- there is
     nothing left for it to wait for except being looked at.
     """
-    seed_awaiting(conn, "s_btc_older", "BTC", "bcrt1qolder", "2026-10-01T00:00:00+00:00")
-    seed_awaiting(conn, "s_ltc_newer", "LTC", "tltc1qnewer", "2026-10-02T00:00:00+00:00")
+    seed_awaiting(conn, "s_btc_older", "BTC", ADDRESS_FOR["BTC"], "2026-10-01T00:00:00+00:00")
+    seed_awaiting(conn, "s_ltc_newer", "LTC", ADDRESS_FOR["LTC"], "2026-10-02T00:00:00+00:00")
 
     dead, live = RefusingAdapter("BTC"), PayingAdapter("LTC")
     processed = deposit_service.process_active_swaps(conn, CONFIG, {"BTC": dead, "LTC": live})
@@ -165,7 +185,7 @@ def test_the_unreachable_swap_is_left_untouched_rather_than_declared_absent(conn
     distinction is the whole game (rule 12's `except Exception: return 0` note). So the
     swap must stay exactly as it was, with nothing written.
     """
-    seed_awaiting(conn, "s_btc", "BTC", "bcrt1qonly", "2026-10-01T00:00:00+00:00")
+    seed_awaiting(conn, "s_btc", "BTC", ADDRESS_FOR["BTC"], "2026-10-01T00:00:00+00:00")
 
     deposit_service.process_active_swaps(conn, CONFIG, {"BTC": RefusingAdapter("BTC")})
 
@@ -183,8 +203,8 @@ def test_the_failure_is_reported_with_the_asset_named(conn):
     why. `2 asset(s)` would send an operator nowhere; `BTC` tells them which daemon to
     look at.
     """
-    seed_awaiting(conn, "s_btc", "BTC", "bcrt1qa", "2026-10-01T00:00:00+00:00")
-    seed_awaiting(conn, "s_ltc", "LTC", "tltc1qb", "2026-10-02T00:00:00+00:00")
+    seed_awaiting(conn, "s_btc", "BTC", ADDRESS_FOR["BTC"], "2026-10-01T00:00:00+00:00")
+    seed_awaiting(conn, "s_ltc", "LTC", ADDRESS_FOR["LTC"], "2026-10-02T00:00:00+00:00")
 
     processed = deposit_service.process_active_swaps(
         conn, CONFIG, {"BTC": RefusingAdapter("BTC"), "LTC": PayingAdapter("LTC")}
@@ -204,7 +224,7 @@ def test_a_clean_cycle_says_nothing_so_the_line_does_not_grow_a_permanent_clause
     A note printed on every cycle is a note nobody reads, which would spend exactly the
     attention the real case needs.
     """
-    seed_awaiting(conn, "s_ltc", "LTC", "tltc1qb", "2026-10-02T00:00:00+00:00")
+    seed_awaiting(conn, "s_ltc", "LTC", ADDRESS_FOR["LTC"], "2026-10-02T00:00:00+00:00")
 
     processed = deposit_service.process_active_swaps(conn, CONFIG, {"LTC": PayingAdapter("LTC")})
 
@@ -218,9 +238,9 @@ def test_every_failing_swap_is_reported_not_just_the_first(conn):
     The pre-fix behavior stopped at the first raise; a fix that recorded only the first
     would keep that shape while looking fixed.
     """
-    seed_awaiting(conn, "s_btc", "BTC", "bcrt1qa", "2026-10-01T00:00:00+00:00")
-    seed_awaiting(conn, "s_ltc", "LTC", "tltc1qb", "2026-10-02T00:00:00+00:00")
-    seed_awaiting(conn, "s_grc", "GRC", "Sgrcaddr", "2026-10-03T00:00:00+00:00")
+    seed_awaiting(conn, "s_btc", "BTC", ADDRESS_FOR["BTC"], "2026-10-01T00:00:00+00:00")
+    seed_awaiting(conn, "s_ltc", "LTC", ADDRESS_FOR["LTC"], "2026-10-02T00:00:00+00:00")
+    seed_awaiting(conn, "s_grc", "GRC", ADDRESS_FOR["GRC"], "2026-10-03T00:00:00+00:00")
 
     processed = deposit_service.process_active_swaps(
         conn, CONFIG,
@@ -240,8 +260,15 @@ def test_six_swaps_behind_one_dead_chain_are_one_fact_in_the_note(conn):
     how a line stops being read.
     """
     for index in range(6):
-        seed_awaiting(conn, f"s_btc_{index}", "BTC", f"bcrt1q{index}", f"2026-10-0{index + 1}T00:00:00+00:00")
-    seed_awaiting(conn, "s_ltc", "LTC", "tltc1qb", "2026-10-07T00:00:00+00:00")
+        # bech32_address() PER SWAP, not the shared one with a digit appended -- which is
+        # what the first version did, and appending to a bech32 string breaks its checksum.
+        # The literal gate would not have caught it (it scans source literals, not computed
+        # values), which makes it exactly the "check passed by looking at the wrong thing"
+        # shape this suite keeps paying for. Six derived addresses cost one line.
+        seed_awaiting(conn, f"s_btc_{index}", "BTC",
+                      valid_addresses.bech32_address("bcrt", f"one dead chain, swap {index}"),
+                      f"2026-10-0{index + 1}T00:00:00+00:00")
+    seed_awaiting(conn, "s_ltc", "LTC", ADDRESS_FOR["LTC"], "2026-10-07T00:00:00+00:00")
 
     processed = deposit_service.process_active_swaps(
         conn, CONFIG, {"BTC": RefusingAdapter("BTC"), "LTC": RefusingAdapter("LTC")}
@@ -259,7 +286,7 @@ def test_a_keyboard_interrupt_still_ends_the_cycle(conn):
     A watcher that logged a failed swap and carried on through Ctrl-C is a worker the
     operator cannot stop, which is worse than the crash the guard replaces.
     """
-    seed_awaiting(conn, "s_btc", "BTC", "bcrt1qa", "2026-10-01T00:00:00+00:00")
+    seed_awaiting(conn, "s_btc", "BTC", ADDRESS_FOR["BTC"], "2026-10-01T00:00:00+00:00")
 
     class Interrupting:
         asset = "BTC"
@@ -285,7 +312,7 @@ def test_the_result_is_still_a_list_so_no_existing_caller_changes(conn):
     getattr WITH A DEFAULT at both call sites is the other half: a caller holding a
     plain list from an older path reads () rather than raising.
     """
-    seed_awaiting(conn, "s_ltc", "LTC", "tltc1qb", "2026-10-02T00:00:00+00:00")
+    seed_awaiting(conn, "s_ltc", "LTC", ADDRESS_FOR["LTC"], "2026-10-02T00:00:00+00:00")
     processed = deposit_service.process_active_swaps(conn, CONFIG, {"LTC": PayingAdapter("LTC")})
 
     assert isinstance(processed, list)

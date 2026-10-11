@@ -80,12 +80,56 @@ def test_every_colour_outside_the_token_block_goes_through_a_token():
     without a separate channel token, which would be a token nobody reads.
     """
     after_root = CSS[CSS.index("* { box-sizing: border-box; }"):]
-    literals = re.findall(r"#[0-9a-fA-F]{3,8}\b", after_root)
+
+    # =====================================================================
+    # COMMENTS ARE STRIPPED FIRST, AND THIS GATE FAILED ON ITS OWN DOCUMENTATION
+    # =====================================================================
+    #
+    # IT WAS NOT WHAT FIXED THE RED, and that is recorded because the wrong diagnosis is
+    # the instructive part. The gate reported `['#fff']` and there is a `#fff` quoted
+    # inside the comment at --qr-quiet-zone -- "IT WAS A BARE `#fff` IN THE RULE UNTIL
+    # 2026-10-07" -- which looked like the whole story. It was not: that comment sits
+    # BEFORE the token block, which `after_root` already excludes. The real offender was
+    # `color: var(--paper, #fff)` in .rescue-button:hover, where `--paper` is declared
+    # nowhere, so the rule was a hard-coded white. Stripping comments did not and could
+    # not have fixed it.
+    #
+    # THE STRIP STAYS ANYWAY, on its own merit: a gate that fails on the note documenting
+    # its own rule is a gate somebody deletes, and the next hand-picked green then goes in
+    # unnoticed. It is a hazard that had not fired yet rather than the one that had.
+    #
+    # MEASURED: red at 30512de, before today's commits, so the .rescue-button defect was
+    # introduced earlier the same day rather than by this batch -- and it was mine.
+    #
+    # THE SAME DEFECT AND THE SAME FIX ONE FILE OVER (rule 8).
+    # tests/test_env_example_covers_every_compose_variable.referenced_variables() excludes
+    # comment lines, and its own comment says why: "these compose files carry long
+    # explanatory comments that QUOTE example references ... Counting them would put two
+    # variables that do not exist into the required set." Identical shape -- prose that
+    # names the forbidden thing in order to forbid it. CLAUDE.md rule 18 does it too,
+    # quoting the British spellings it bans, and says so.
+    #
+    # NON-GREEDY AND re.DOTALL: CSS has only /* ... */ comments, and `.*?` with re.DOTALL stops at
+    # the first close rather than swallowing every rule between the first comment's open
+    # and the last one's close -- which would make this gate pass by scanning almost
+    # nothing, the failure mode that matters most for a check like this.
+    scannable = re.sub(r"/\*.*?\*/", "", after_root, flags=re.DOTALL)
+    literals = re.findall(r"#[0-9a-fA-F]{3,8}\b", scannable)
     assert not literals, (
         f"{len(literals)} hex colour(s) outside the token block: {sorted(set(literals))}. "
         f"Every colour belongs to a custom property on :root -- this file's header says so and "
         f"names the drift it cost last time."
     )
+
+    # AND THE STRIP MUST NOT HAVE EATEN THE FILE, which is the half that keeps this honest:
+    # a regex that removed everything would make the assertion above vacuous and the gate
+    # would read green forever. Asserted as a proportion rather than a byte count so it
+    # does not need editing every time a comment is added.
+    assert len(scannable) > len(after_root) * 0.3, (
+        f"stripping comments left {len(scannable)} of {len(after_root)} characters, so this gate "
+        f"is scanning almost nothing and would pass whatever the rules contain"
+    )
+    assert "var(--" in scannable, "the stripped text contains no token reference at all"
 
 
 def test_the_state_border_treatments_survived_the_retheme():

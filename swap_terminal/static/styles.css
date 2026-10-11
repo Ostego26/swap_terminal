@@ -2346,7 +2346,25 @@ h2:target {
 .rescue-button:hover,
 .rescue-button:focus-visible {
   background: currentColor;
-  color: var(--paper, #fff);
+  /* --accent-ink AND NOT `var(--paper, #fff)`, WHICH IS WHAT THIS SAID UNTIL 2026-10-11.
+   *
+   * `--paper` IS DECLARED NOWHERE IN THIS FILE, so that var() always fell through to its
+   * fallback and the rule was a hard-coded white -- the one thing this file's header says
+   * cannot happen, inside a rule added hours earlier the same day. It was mine.
+   *
+   * tests/test_pipboy_theme.py caught it, and the first diagnosis was wrong: the scanner
+   * also reported a `#fff` quoted inside the comment at --qr-quiet-zone, and that looked
+   * like the whole story. It was not -- that comment sits BEFORE the token block, which
+   * the gate already excludes. The scanner now strips comments anyway, because a gate that
+   * fails on the note documenting its own rule is a gate somebody deletes, but the strip
+   * is a separate improvement and fixed nothing here.
+   *
+   * --accent-ink IS THE RIGHT TOKEN rather than --bg: it exists precisely for text sitting
+   * ON an accent fill, which is what this hover does -- the button inverts, so the label
+   * takes the colour that reads against a filled accent. Using --bg would work today only
+   * because the two happen to hold the same value, which is the coincidence rule 11 warns
+   * about. */
+  color: var(--accent-ink);
   outline: 2px solid currentColor;
   outline-offset: 1px;
 }

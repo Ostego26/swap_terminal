@@ -957,7 +957,25 @@ def apply_swap(args, config: dict, adapters: dict, pair: tuple[str, str], db_pat
     fetch_prices_or_refuse(config)
     started = time.monotonic()
     try:
-        with db_session(db_path) as db:
+        # create=True AND THIS IS ONE OF EXACTLY TWO PLACES THAT MAY PASS IT.
+        #
+        # db.connect_db() refuses a path that names no database as of 2026-10-10,
+        # because creating one by default is how a mistyped SWAP_DB_PATH became a SECOND
+        # database that three workers polled for an hour. That refusal is right for every
+        # reader -- and WRONG here, because `open_swap.py --apply` creating the database
+        # is documented behavior that this file prints on its own dry-run screen:
+        #
+        #     already open  (none) -- there is no database at <path> yet, so no swap of
+        #                   any kind is open. --apply creates the file and the schema.
+        #
+        # I converted this call site with the readers on 2026-10-10 and took 13 tests in
+        # tests/test_open_swap.py down with it, every one of them with DatabaseNotFound.
+        # The sweep was mechanical and this was the one caller whose intent it got wrong,
+        # which is the measurement: a blanket edit over 15 production call sites found 14
+        # readers and one creator, and the creator says so in its own output.
+        #
+        # THE OTHER PLACE IS db.init_db(). There is no third.
+        with db_session(db_path, create=True) as db:
             # The same bootstrap init_db() and every worker's cycle run: the
             # schema is idempotent, and apply_migrations() is what adds
             # swaps.deposit_tag to a database created before 2026-09-26. Without

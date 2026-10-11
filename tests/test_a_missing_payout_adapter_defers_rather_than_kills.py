@@ -68,6 +68,15 @@ CONFIG = {name: getattr(Config, name) for name in dir(Config) if name.isupper()}
 #: valid_addresses.py builds a real base58check testnet address for exactly this.
 GRC_PAYOUT = valid_addresses.GRC_PAYOUT
 
+#: The deposit side of each seeded swap. DERIVED AND NOT TYPED, because
+#: tests/test_address_literals_are_valid.py refuses an address-shaped literal that does
+#: not decode -- and `bcrt1qdeposit`, which is what this was, is exactly the shape a
+#: truncated copy-paste makes. Nothing on the payout path validates the DEPOSIT address,
+#: so a bad one here would never have failed a test of its own; the gate is what caught
+#: it, which is the argument for having it (rule 19: fix the instances, do not raise the
+#: ceiling).
+BTC_DEPOSIT = valid_addresses.BTC_REGTEST_DEPOSIT
+
 #: A payout chain that is NOT in WALLET_UNLOCK_ASSETS, for the send path. LTC_PARTICIPANT
 #: is a tltc bech32 address the address authority accepts; the name is the fixture's
 #: own, from its HTLC origins, and what matters here is only that it is a valid LTC
@@ -104,10 +113,10 @@ def conn(tmp_path):
         "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, payout_address,"
         " expected_input_amount, actual_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
         " output_amount_estimate, status, min_confirmations, expires_at, created_at, updated_at,"
-        " credited_at) VALUES ('s_credited','q','BTC','GRC','bcrt1qdeposit',?,0.0001,0.0001,"
+        " credited_at) VALUES ('s_credited','q','BTC','GRC',?,?,0.0001,0.0001,"
         "9868961.0,150,0.001,1000.0,'payout_pending',2,'2999-01-01T00:00:00+00:00',"
         "'2026-10-10T00:00:00+00:00','2026-10-10T00:00:00+00:00','2026-10-10T00:00:00+00:00')",
-        (GRC_PAYOUT,),
+        (BTC_DEPOSIT, GRC_PAYOUT),
     )
     connection.commit()
     return connection
@@ -135,10 +144,10 @@ def ltc_conn(tmp_path):
         "INSERT INTO swaps (id, quote_id, from_asset, to_asset, deposit_address, payout_address,"
         " expected_input_amount, actual_input_amount, quoted_rate, fee_bps, network_fee_reserve,"
         " output_amount_estimate, status, min_confirmations, expires_at, created_at, updated_at,"
-        " credited_at) VALUES ('s_credited','q','BTC','LTC','bcrt1qdeposit',?,0.0001,0.0001,"
+        " credited_at) VALUES ('s_credited','q','BTC','LTC',?,?,0.0001,0.0001,"
         "100.0,150,0.001,0.01,'payout_pending',2,'2999-01-01T00:00:00+00:00',"
         "'2026-10-10T00:00:00+00:00','2026-10-10T00:00:00+00:00','2026-10-10T00:00:00+00:00')",
-        (LTC_PAYOUT,),
+        (BTC_DEPOSIT, LTC_PAYOUT),
     )
     connection.commit()
     return connection
