@@ -1335,6 +1335,93 @@ def say_arm_result(chain: str, value: str, why: str, *, apply: bool) -> None:
     say("  for this chain has still never been exercised on a chain.")
 
 
+def set_verdict(assignments: list[str], secrets: set[str]) -> tuple[dict[str, str], list[str]]:
+    """NAME=VALUE pairs to write, and a refusal line for each one that cannot be.
+
+    =========================================================================
+    THE OPERATOR PRESSED ENTER PAST BOTH SOL PROMPTS, AND THAT WAS A REASONABLE
+    REFLEX
+    =========================================================================
+
+    2026-10-11. I had spent the afternoon telling them to press enter past every prompt,
+    because for three BTC variables there was nothing to type. Then two prompts appeared
+    that did need answers -- SOL_HOT_WALLET and SOL_PAYOUT_KEYPAIR_HOST_FILE, both of
+    which they already had -- and five enters went past all five. The run reported
+    NOTHING TO WRITE, correctly, and SOL stayed unconfigured.
+
+    AN INTERACTIVE PROMPT IS THE WRONG SHAPE FOR A VALUE THAT IS NOT A SECRET. It cannot
+    be pasted as part of a command, cannot be re-run from shell history, and cannot be
+    put in a note for next time -- so each attempt is a fresh chance to mistype or skip.
+    getpass() earns that cost for a credential. A public key and a file path do not.
+
+    ARGV IS WORLD-READABLE THROUGH /proc, WHICH IS WHY THIS REFUSES A SECRET. The whole
+    reason set_grc_passphrase.sh prompts rather than taking an argument is that
+    /proc/<pid>/cmdline can be read by any process on the host for as long as the command
+    runs. So --set is allowed for exactly the names .env.example does NOT mark SECRET, and
+    the refusal says why rather than just declining.
+
+    AN UNKNOWN NAME IS REFUSED TOO, which is typo protection rather than ceremony: `--set
+    SOL_HOTWALLET=...` would otherwise write a variable nothing reads, and the operator
+    would be left looking at a correctly-written .env and an unconfigured chain. That is
+    the silent-absence defect this whole tool exists for, arriving through its own door.
+
+    RETURNS BOTH, so one call answers "what will be written" and "what was refused and
+    why" -- a caller cannot report a partial result as a success (rule 13).
+    """
+    manageable = set(every_variable_this_tool_can_set())
+    values: dict[str, str] = {}
+    refusals: list[str] = []
+    for raw in assignments:
+        name, separator, value = raw.partition("=")
+        name, value = name.strip(), value.strip()
+        if not separator:
+            refusals.append(f"{raw!r} is not NAME=VALUE, so nothing was taken from it")
+        elif name in secrets:
+            refusals.append(
+                f"{name} is marked SECRET in .env.example and --set puts a value in argv, which "
+                f"/proc/<pid>/cmdline exposes to every process on this host for as long as the "
+                f"command runs. Nothing was written for it. Use the prompt, which reads with no "
+                f"echo -- or set_grc_passphrase.sh for the Gridcoin one."
+            )
+        elif name not in manageable:
+            refusals.append(
+                f"{name} is not a variable this tool manages, so writing it would put a line in "
+                f".env that nothing reads. Did you mean one of: "
+                f"{', '.join(sorted(n for n in manageable if n.startswith(name[:4]))) or 'none of them'}?"
+            )
+        elif not value:
+            refusals.append(f"{name} was given no value. To leave it unset, omit it entirely.")
+        elif "'" in value:
+            refusals.append(
+                f"{name}'s value contains a single quote, which a single-quoted .env value cannot "
+                f"carry in any dotenv dialect. Stored mangled it would fail later as an "
+                f"authentication or path error nobody connects to this step."
+            )
+        else:
+            values[name] = value
+    return values, refusals
+
+
+def say_set_result(values: dict[str, str], refusals: list[str], *, apply: bool) -> None:
+    """What --set will write and what it refused. Names only for anything secret-adjacent.
+
+    THE VALUES ARE PRINTED BECAUSE NONE OF THEM CAN BE A SECRET -- set_verdict() refuses
+    a name marked SECRET before it reaches here, so echoing what was taken is safe and is
+    the only way an operator can see a typo in a path before the container is recreated.
+    That is the inverse of the rule everywhere else in this file, and it holds only
+    because of the guard upstream.
+    """
+    say("  SETTING")
+    for name, value in sorted(values.items()):
+        say(f"    {name:30} {value}")
+    if not values:
+        say("    (none)")
+    for refusal in refusals:
+        say(f"    REFUSED: {refusal}")
+    if values and not apply:
+        say("    Nothing was written. Re-run with --apply.")
+
+
 def change_posture(args, already: dict) -> int | None:
     """Apply --arm or --disarm, or None when neither was given. Returns main()'s exit code.
 
@@ -1773,6 +1860,12 @@ def main() -> int:
               "--read-daemon-confs."),
     )
     parser.add_argument(
+        "--set", metavar="NAME=VALUE", action="append", default=[], dest="assignments",
+        help=("Write one variable without a prompt. Repeatable. REFUSED for any name marked "
+              "SECRET in .env.example, because argv is world-readable through /proc -- those "
+              "still go through the no-echo prompt. Needs --apply to write."),
+    )
+    parser.add_argument(
         "--disarm", metavar="CHAIN", default="",
         help=("Remove that chain's docker-compose.web.armed-<chain>.yml from COMPOSE_FILE in .env, "
               "so the container can no longer sign that chain's payouts. Needs --apply to write, "
@@ -1796,6 +1889,15 @@ def main() -> int:
     # changes a custody posture and nothing else, so mixing it with a credential sweep
     # would make one command do two unrelated things to .env -- and the operator reading
     # the output could not tell which half did what (rule 14).
+    if args.assignments:
+        values, refusals = set_verdict(args.assignments, secrets)
+        say_set_result(values, refusals, apply=args.apply)
+        if values and args.apply:
+            write_env(values)
+            say_what_was_written(values, already)
+        say_arming(already)
+        return 1 if refusals else 0
+
     posture = change_posture(args, already)
     if posture is not None:
         return posture

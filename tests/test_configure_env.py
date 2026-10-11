@@ -1690,3 +1690,117 @@ def test_the_arming_block_separates_what_it_can_set_from_what_it_will_not(capsys
     withheld = printed.split("never set", 1)[1]
     assert "GRIDCOIN_WALLET_PASSPHRASE" in withheld and "XRP_PAYOUT_SECRET_SEED" in withheld
     assert "none of these" not in printed, "the sentence that called all four credentials is back"
+
+
+# ===========================================================================
+# --set, because an interactive prompt is the wrong shape for a non-secret
+# ===========================================================================
+#
+# 2026-10-11. I spent the afternoon telling the operator to press enter past every
+# prompt, because for three BTC variables there was nothing to type. Then two prompts
+# appeared that DID need answers -- SOL_HOT_WALLET and SOL_PAYOUT_KEYPAIR_HOST_FILE,
+# both of which they already had -- and five enters went past all five. The run
+# reported NOTHING TO WRITE, correctly, and SOL stayed unconfigured.
+#
+# A prompt cannot be pasted as part of a command, re-run from shell history, or kept in
+# a note, so every attempt is a fresh chance to skip or mistype. getpass() earns that
+# cost for a credential. A public key and a file path do not.
+
+
+def test_a_non_secret_can_be_set_without_a_prompt(env_file_with_overlays, monkeypatch, capsys):
+    """MUTATION: drop the `args.assignments` branch from main().
+
+    The whole point: one command, re-runnable, visible in shell history, no tty.
+    """
+    env_file_with_overlays.write_text("COMPOSE_FILE=docker-compose.yml\n")
+    monkeypatch.setattr(configure_env, "listening_ports", set)
+    monkeypatch.setattr("sys.argv", [
+        "configure_env.py", "--set", "SOL_HOT_WALLET=SoLHotWalletPublicKey",
+        "--set", "SOL_PAYOUT_KEYPAIR_HOST_FILE=/home/somebody/.config/solana/hot.json", "--apply"])
+
+    assert configure_env.main() == 0
+
+    written = env_file_with_overlays.read_text()
+    assert "SOL_HOT_WALLET='SoLHotWalletPublicKey'" in written
+    assert "SOL_PAYOUT_KEYPAIR_HOST_FILE='/home/somebody/.config/solana/hot.json'" in written
+    assert "COMPOSE_FILE=docker-compose.yml" in written, "a line it does not own was lost"
+    # And the values ARE echoed, which is safe only because a SECRET name is refused
+    # upstream -- it is the only way an operator sees a typo in a path before a recreate.
+    assert "/home/somebody/.config/solana/hot.json" in capsys.readouterr().out
+
+
+def test_a_SECRET_name_is_refused_because_argv_is_world_readable(env_file_with_overlays):
+    """THE GUARD THAT MATTERS. MUTATION: drop the `name in secrets` branch.
+
+    /proc/<pid>/cmdline is readable by every process on the host for as long as the
+    command runs, which is exactly why set_grc_passphrase.sh prompts instead of taking
+    an argument. Allowing --set for a passphrase would undo that, by a route that looks
+    like a convenience.
+    """
+    secrets = configure_env.secret_names()
+    assert "GRIDCOIN_WALLET_PASSPHRASE" in secrets, "the fixture no longer marks it secret"
+
+    values, refusals = configure_env.set_verdict(
+        ["GRIDCOIN_WALLET_PASSPHRASE=hunter2", "SOL_HOT_WALLET=ok"], secrets)
+
+    assert "GRIDCOIN_WALLET_PASSPHRASE" not in values, "a passphrase was accepted on argv"
+    assert values == {"SOL_HOT_WALLET": "ok"}, "the non-secret in the same call was dropped too"
+    assert any("/proc" in line for line in refusals), f"the refusal does not say why: {refusals}"
+    # And the refusal must not echo the value it refused.
+    assert not any("hunter2" in line for line in refusals), "the refused secret was printed"
+
+
+def test_an_unmanaged_name_is_refused_with_a_suggestion(env_file_with_overlays):
+    """MUTATION: drop the `name not in manageable` branch.
+
+    `--set SOL_HOTWALLET=...` would otherwise write a line nothing reads, leaving an
+    operator looking at a correctly-written .env and an unconfigured chain -- the
+    silent-absence defect this whole tool exists for, arriving through its own door.
+    """
+    values, refusals = configure_env.set_verdict(
+        ["SOL_HOTWALLET=typo"], configure_env.secret_names())
+
+    assert values == {}
+    assert any("not a variable this tool manages" in line for line in refusals)
+    assert any("SOL_HOT_WALLET" in line for line in refusals), (
+        f"the refusal suggests no real name: {refusals}"
+    )
+
+
+@pytest.mark.parametrize(("given", "expected"), [
+    ("SOL_HOT_WALLET", "is not NAME=VALUE"),
+    ("SOL_HOT_WALLET=", "was given no value"),
+    ("SOL_HOT_WALLET=it's", "single quote"),
+])
+def test_the_malformed_shapes_are_each_refused_by_name(given, expected):
+    """One refusal per shape, each saying which. MUTATION: collapse them into one message.
+
+    The single-quote case is the one with a cost beyond the retype: a value stored mangled
+    does not fail here, it fails later as a path or authentication error nobody connects
+    to this step -- which is why set_grc_passphrase.sh refuses one too.
+    """
+    values, refusals = configure_env.set_verdict([given], configure_env.secret_names())
+
+    assert values == {}
+    assert len(refusals) == 1
+    assert expected in refusals[0], f"{given!r} produced {refusals[0]!r}"
+
+
+def test_a_refused_set_exits_nonzero_even_when_another_value_was_written(
+        env_file_with_overlays, monkeypatch, capsys):
+    """Rule 13: "skipped" and "success" must not share an output -- or an exit code.
+
+    MUTATION: `return 0` unconditionally. A script doing `--set A --set B --apply && next`
+    would then proceed having written only one of the two, with the refusal scrolled past.
+    """
+    env_file_with_overlays.write_text("COMPOSE_FILE=docker-compose.yml\n")
+    monkeypatch.setattr(configure_env, "listening_ports", set)
+    monkeypatch.setattr("sys.argv", [
+        "configure_env.py", "--set", "SOL_HOT_WALLET=good",
+        "--set", "SOL_NONSENSE=bad", "--apply"])
+
+    assert configure_env.main() == 1, "a partially refused run reported success"
+    written = env_file_with_overlays.read_text()
+    assert "SOL_HOT_WALLET='good'" in written, "the acceptable value was not written"
+    assert "SOL_NONSENSE" not in written
+    assert "REFUSED" in capsys.readouterr().out
