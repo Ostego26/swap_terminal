@@ -2221,6 +2221,7 @@ WEB_SURFACES = (
     ("JSON", "/api/rates", "the rate table (routes/rates.py)"),
     ("JSON", "/api/quotes", "POST: price one pair (routes/quotes.py)"),
     ("JSON", "/api/swaps", "POST: create a swap (routes/swaps.py)"),
+    ("JSON", "/api/address/check", "POST: one address's live verdict, local decode AND the chain's own validator (routes/atm.py)"),
     ("JSON", "/api/swaps/<id>", "one swap, as the page reads it (routes/swaps.py)"),
     ("JSON", "/api/health", "liveness (routes/health.py)"),
     ("JSON", "/api/admin/overview", "the dashboard's own data (routes/admin.py)"),

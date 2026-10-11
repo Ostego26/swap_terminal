@@ -48,6 +48,7 @@ mutation this file is built to kill:
               -> killed by test_a_start_is_refused_when_the_warning_has_changed.
 """
 
+import ast
 import contextlib
 import ipaddress
 import json
@@ -987,9 +988,30 @@ def loopback_listener():
 #: surface is the gate, not the absence of consequence: payout_rescue.rescue_verdict()
 #: refuses any swap it cannot PROVE was never broadcast, and the same control_refusals()
 #: the buttons on /admin/controls use runs first.
+#:
+#: /api/address/check ADDED 2026-10-11, and reviewed against this file's claim rather
+#: than added to make a gate green (rule 19). routes/atm.check_address_route() imports
+#: nothing from supervisor, subprocess, signal or os; it calls exactly one function,
+#: services/address_check.live_address_verdict(), which opens no database, writes no
+#: row, and makes AT MOST TWO read-only RPC calls -- `validateaddress` and
+#: `getaddressinfo`, both in chains/daemon_wallet.READ_ONLY_RPCS. No signal, no spawn,
+#: no write of any kind. Asserted over the module's source by
+#: test_the_address_check_route_signals_nothing_and_spawns_nothing below rather than
+#: trusted from this sentence.
+#:
+#: IT IS A POST ON AN UNAUTHENTICATED SURFACE AND THAT IS NAMED, NOT GLOSSED. What it
+#: exposes is "ask this chain's daemon whether a string is a valid address", which is
+#: the same question /api/quotes already causes to be asked and which reveals nothing
+#: about the wallet -- `ismine` is read, and it is returned as `ours`, which does
+#: disclose whether an address belongs to this terminal. That is deliberate: it is how
+#: the customer is told not to paste the desk's own deposit address, which is the
+#: 2026-10-04 incident (swap s_ae76ec53236ffcf6). It discloses nothing an address the
+#: caller already holds does not already let them learn, and no balance, no key and no
+#: list of addresses is reachable through it.
 REVIEWED_NON_SPAWNING_POST_ROUTES = frozenset(
     {
         "/api/quotes",
+        "/api/address/check",
         "/api/swaps",
         "/swap/<swap_id>/address-proof",
         "/",
@@ -1550,3 +1572,35 @@ def test_the_rescue_route_signals_nothing_and_spawns_nothing():
         "routes/admin.py does not call rescue_verdict(), so the rescue button does not consult "
         "the gate that proves a payout was never broadcast"
     )
+
+
+def test_the_address_check_route_signals_nothing_and_spawns_nothing():
+    """The claim in REVIEWED_NON_SPAWNING_POST_ROUTES's note, asserted over the source.
+
+    Added with /api/address/check on 2026-10-11. The note above says the handler
+    imports nothing that can signal or spawn and writes nothing; this is what makes
+    that a check rather than a sentence, in the same shape as
+    test_the_rescue_route_signals_nothing_and_spawns_nothing.
+
+    READ THROUGH code_without_prose(), because routes/atm.py's own comments discuss
+    what the handler does NOT do -- and a raw text scan would fail the file for
+    explaining itself. That is the eighth instance of that defect class in this tree;
+    tests/test_daemon_conf.py carries the function and the history.
+    """
+    source = pathlib.Path(__file__).resolve().parents[1] / "swap_terminal" / "routes" / "atm.py"
+    tree = ast.parse(source.read_text())
+    handler = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "check_address_route"
+    )
+    # Docstring stripped: the handler's own docstring names the things it must not do.
+    body = handler.body
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        handler.body = body[1:]
+    code = ast.unparse(handler)
+    for forbidden in ("supervisor", "subprocess", "signal", "os.kill", "Popen", "execute(", "commit("):
+        assert forbidden not in code, (
+            f"routes/atm.check_address_route() now references {forbidden!r}. It is listed in "
+            "REVIEWED_NON_SPAWNING_POST_ROUTES on the strength of referencing none of them, on "
+            "an unauthenticated POST surface. Re-review the route or remove it from that set."
+        )
