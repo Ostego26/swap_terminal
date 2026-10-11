@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
 from db import SCHEMA, connect_db  # noqa: E402
+from prose import code_without_prose  # noqa: E402
 from services import pair_view, payout_service  # noqa: E402
 from services.chain_reachability import (  # noqa: E402
     STALE_AFTER_SECONDS,
@@ -74,6 +76,8 @@ from services.chain_reachability import (  # noqa: E402
 )
 from services.helpers import utc_now_iso  # noqa: E402
 from services.pair_view import pair_serviceability  # noqa: E402
+from services.swap_service import create_swap  # noqa: E402
+from valid_addresses import LTC_PARTICIPANT  # noqa: E402
 
 TIMED_OUT = "Connection to host.docker.internal timed out. (connect timeout=30.0)"
 
@@ -364,3 +368,183 @@ def test_the_verdict_costs_exactly_one_query(db):
         db.set_trace_callback(None)
     assert len(queries) == 1, f"reachability_rows() issued {len(queries)} statements: {queries}"
     assert set(rows) == {"GRC", "LTC"}
+
+
+# --- the gate next to the write --------------------------------------------------
+#
+# THE PAGE NOT OFFERING A PAIR IS NOT THE SAME AS THE WRITE REFUSING IT, and the gap
+# between those two is where the operator's swap died. A POST to /api/swaps does not
+# come from the page, and a customer who loaded the page before a daemon died is
+# holding a quote for a pair that was serviceable when it priced.
+
+
+class RefusesToBeAsked:
+    """An adapter that FAILS THE TEST if any RPC is spent on it.
+
+    This is how "the gate fires before any RPC" is measured rather than asserted: the
+    thing that must not happen raises. A stub that returned a plausible answer instead
+    would let the gate be removed with every test still passing, because create_swap
+    would simply do the work and succeed.
+    """
+
+    can_spend = True
+
+    def __init__(self, asset):
+        self.asset = asset
+
+    def get_balance(self):
+        raise ConnectionError(TIMED_OUT)
+
+    def address_report(self, address, want="both"):
+        raise AssertionError(
+            "address_report() was called on a chain already known not to answer. On the "
+            "operator's host that was two 30s connect timeouts; the gate exists to not "
+            "spend them."
+        )
+
+    def validate_address(self, address):
+        raise AssertionError("validate_address() was called on a chain known not to answer")
+
+    def deposit_address(self, index):
+        raise AssertionError("a deposit address was derived for a chain known not to answer")
+
+
+def seed_quote(db, from_asset="GRC", to_asset="LTC"):
+    """A real `quotes` row, because create_swap() reads the pair off the quote.
+
+    The first version of this proof passed a made-up quote id and got "Quote not
+    found" -- a refusal, in 0.0001s, that proved nothing about the gate. The quote
+    lookup is correctly FIRST, since the assets come from it.
+    """
+    now = datetime.now(UTC)
+    db.execute(
+        "INSERT INTO quotes (id, from_asset, to_asset, input_amount, quoted_rate, fee_bps,"
+        " network_fee_reserve, output_amount_estimate, expires_at, created_at)"
+        " VALUES ('q_1', ?, ?, 500.0, 0.0001, 50, 0.0001, 0.0495, ?, ?)",
+        (from_asset, to_asset, (now + timedelta(minutes=10)).isoformat(), now.isoformat()),
+    )
+    db.commit()
+    return "q_1"
+
+
+#: A REAL LTC TESTNET ADDRESS, derived rather than typed. The first draft of these
+#: tests used a hand-made string, and modules/address_authority refused it correctly --
+#: "decodes as neither bech32 nor base58check under Bitcoin's alphabet" -- which made
+#: four tests fail for a reason that had nothing to do with reachability. The local
+#: decode working is what made the fixture wrong.
+#:
+#: tests/valid_addresses.py exists so no test invents an address, and
+#: tests/test_address_literals_are_valid.py counts every address-shaped literal in the
+#: tree for exactly this reason.
+LTC_PAYOUT = LTC_PARTICIPANT
+
+
+def swap_config():
+    return {"ALLOWED_PAIRS": [("GRC", "LTC")], "RPC": {}, "MIN_CONFIRMATIONS": {}}
+
+
+def test_create_swap_refuses_an_unreachable_destination_BEFORE_any_rpc(db):
+    """The whole point, through the real create_swap(). 0.0004s where it was 120s.
+
+    RefusesToBeAsked raises on every RPC, so this test cannot pass unless the gate
+    fires first.
+    """
+    quote = seed_quote(db)
+    adapters = {"GRC": Answers("GRC"), "LTC": RefusesToBeAsked("LTC")}
+    payout_service._REPORTED_INVENTORY_FAILURES.clear()
+    payout_service.refresh_wallet_inventory(db, adapters)
+
+    with pytest.raises(ValueError) as refused:
+        create_swap(db, swap_config(), adapters, quote, LTC_PAYOUT)
+    message = str(refused.value)
+    assert "LTC" in message
+    assert "did not answer" in message
+    assert "Nothing was written" in message
+    assert db.execute("SELECT COUNT(*) AS n FROM swaps").fetchone()["n"] == 0
+
+
+def test_the_refusal_does_not_claim_the_chains_are_reachable(db):
+    """Two messages in create_swap() SAID "both chains are reachable" and it never asked.
+
+    Rule 16, in text a customer reads. The gate makes the weaker claim true -- "both
+    chains answered when they were last asked" -- and the strong one is gone.
+    """
+    # code_without_prose() AND NOT read_text(), because the raw scan failed on a
+    # DOCSTRING describing another module's pair states -- the ninth occurrence of that
+    # defect class in this tree, and the reason tests/prose.py exists. The refusal
+    # messages are f-strings in `raise` statements, so they survive the strip; only the
+    # explanatory text goes.
+    source = code_without_prose(REPO_ROOT / "swap_terminal" / "services" / "swap_service.py")
+    assert "both chains are reachable" not in source, (
+        "a refusal still claims the chains are reachable. create_swap() checks that a "
+        "chain is CONFIGURED and, since 2026-10-11, that it ANSWERED when last asked; "
+        "neither is 'is reachable right now', and a message that says so will be trusted."
+    )
+
+
+def test_create_swap_refuses_an_unreachable_SOURCE_before_minting_an_address(db):
+    """The source is the leg that mints the deposit address, so it is checked first.
+
+    "it never told me where to send 500grc" -- the operator, on the step this prevents
+    being reached at all.
+    """
+    quote = seed_quote(db, from_asset="GRC", to_asset="LTC")
+    adapters = {"GRC": RefusesToBeAsked("GRC"), "LTC": Answers("LTC")}
+    payout_service._REPORTED_INVENTORY_FAILURES.clear()
+    payout_service.refresh_wallet_inventory(db, adapters)
+
+    with pytest.raises(ValueError) as refused:
+        create_swap(db, swap_config(), adapters, quote, LTC_PAYOUT)
+    assert "GRC" in str(refused.value)
+
+
+def test_a_stale_reading_does_NOT_refuse_a_swap(db):
+    """The gate must not outlive its evidence. A stale row means the WORKERS are down.
+
+    Proven by the adapter being reached: RefusesToBeAsked raises from address_report(),
+    so an AssertionError here is the gate correctly standing aside and letting the swap
+    proceed to the step that actually touches the chain.
+    """
+    quote = seed_quote(db)
+    adapters = {"GRC": Answers("GRC"), "LTC": RefusesToBeAsked("LTC")}
+    record_reachability(db, "LTC", "get_balance", reachable=False, detail=TIMED_OUT)
+    db.execute(
+        "UPDATE chain_reachability SET checked_at = ? WHERE asset = 'LTC'",
+        ("2020-01-01T00:00:00+00:00",),
+    )
+    db.commit()
+
+    with pytest.raises(AssertionError, match="already known not to answer"):
+        create_swap(db, swap_config(), adapters, quote, LTC_PAYOUT)
+
+
+def test_a_MISSING_table_does_not_refuse_a_swap(db):
+    """THE GATE'S OWN FAILURE MUST NOT REFUSE. It exists to stop a swap choking.
+
+    An older database file that has not had SCHEMA applied has no such table, and that
+    must never be the thing that turns a customer away. Same proof as above: the
+    adapter being reached is the gate standing aside.
+    """
+    quote = seed_quote(db)
+    adapters = {"GRC": Answers("GRC"), "LTC": RefusesToBeAsked("LTC")}
+    db.execute("DROP TABLE chain_reachability")
+    db.commit()
+
+    with pytest.raises(AssertionError, match="already known not to answer"):
+        create_swap(db, swap_config(), adapters, quote, LTC_PAYOUT)
+
+
+def test_a_reachable_pair_is_not_stopped_by_the_gate(db):
+    """The gate must be invisible when both chains answered. Nothing new refuses.
+
+    Reaching the adapter is the assertion: the swap gets past the gate and on to the
+    checks that were always there.
+    """
+    quote = seed_quote(db)
+    adapters = {"GRC": Answers("GRC"), "LTC": RefusesToBeAsked("LTC")}
+    record_reachability(db, "GRC", "get_balance", reachable=True)
+    record_reachability(db, "LTC", "get_balance", reachable=True)
+    db.commit()
+
+    with pytest.raises(AssertionError, match="already known not to answer"):
+        create_swap(db, swap_config(), adapters, quote, LTC_PAYOUT)

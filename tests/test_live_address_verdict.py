@@ -58,6 +58,7 @@ sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
 from chains.base import AddressReport, RPCError  # noqa: E402
 from db import SCHEMA  # noqa: E402
+from prose import javascript_without_comments  # noqa: E402
 from services.address_check import BAD, GOOD, UNKNOWN, live_address_verdict  # noqa: E402
 from valid_addresses import GRC_PAYOUT, XRP_CUSTOMER_PAYOUT  # noqa: E402
 
@@ -112,69 +113,6 @@ class LegacyAdapter:
 
     def owns_address(self, address):
         self.asked.append(("owns_address", address))
-
-
-def javascript_without_comments(text: str) -> str:
-    """`text` with every // and /* */ comment removed, strings left intact.
-
-    THE SIXTH AND SEVENTH OCCURRENCES OF ONE DEFECT CLASS, both inside an hour, both
-    in this file's own gates. The two scans below assert that static/script.js does
-    not contain a per-chain address rule and does not compute the submit gate from the
-    state string. Both failed on COMMENTS:
-
-      "base58"            appeared in a sentence about one address being substituted
-                          for another, so the file was failed for discussing an
-                          encoding it does not implement.
-      `state !== "good"`  appeared in the comment explaining why the gate is a
-                          PARAMETER and not that comparison -- so the fix's own
-                          explanation tripped the gate written to enforce the fix.
-
-    tests/test_daemon_conf.code_without_prose() has been the answer to exactly this
-    for Python since 2026-10-10, and CLAUDE.md records four earlier instances. It was
-    never applied to JavaScript, because until now no gate read JavaScript. There is
-    no ast.unparse here, so this is a scanner rather than a parse.
-
-    WHAT IT HANDLES AND WHAT IT DOES NOT, stated because a scanner that silently
-    mishandles a case is worse than one with a known edge. It tracks single quotes,
-    double quotes and template literals, so a `//` or `/*` inside a string survives
-    and a quote inside a comment does not open a string. It does NOT track regex
-    literals: `/foo/.test(x)` would have its slash read as the start of a comment if
-    it were ever followed by another slash. static/script.js contains no regex literal
-    (checked: zero `.test(`, `.match(`, `.replace(/` and `new RegExp`), and
-    test_the_comment_stripper_does_its_job below pins the behavior that is claimed.
-    """
-    out = []
-    i = 0
-    quote = ""
-    n = len(text)
-    while i < n:
-        ch = text[i]
-        if quote:
-            out.append(ch)
-            if ch == "\\" and i + 1 < n:
-                out.append(text[i + 1])
-                i += 2
-                continue
-            if ch == quote:
-                quote = ""
-            i += 1
-            continue
-        if ch in "\"'`":
-            quote = ch
-            out.append(ch)
-            i += 1
-            continue
-        if ch == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                i += 1
-            continue
-        if ch == "/" and i + 1 < n and text[i + 1] == "*":
-            end = text.find("*/", i + 2)
-            i = n if end == -1 else end + 2
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
 
 
 def test_the_comment_stripper_does_its_job():

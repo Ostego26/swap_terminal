@@ -85,6 +85,14 @@ def _unreachable_leg(reachability: dict, from_asset: str, to_asset: str) -> str:
     ONE REASON AND NOT TWO, matching pair_serviceability()'s own stated rule: "the
     first condition that refuses is the one reported", because two reasons for one
     pair leaves the operator to work out which to act on.
+
+    A NEAR-TWIN EXISTS AND RULE 8 REQUIRES BOTH SITES TO NAME IT:
+    services/swap_service._unreachable_leg_for_swap(). The ONLY difference is where the
+    rows come from -- this one is handed a dict by a caller that already read it for up
+    to thirty pairs, that one reads the table for a single swap and is silent if the
+    read fails. The decision itself, which leg and in what order and when a row is too
+    old to act on, is chain_reachability.reachability_refusal()'s in both and is not
+    re-derived in either.
     """
     for asset in (from_asset, to_asset):
         refusal = reachability_refusal(reachability, asset)

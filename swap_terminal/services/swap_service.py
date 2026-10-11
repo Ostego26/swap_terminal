@@ -40,6 +40,7 @@ from chains.registry import (
     why_unconfigured,
 )
 from modules.address_authority import check_address, check_receive_address, expected_network
+from services.chain_reachability import reachability_refusal, reachability_rows
 
 from .custody_separation import payout_to_the_desk_refusal
 from .helpers import new_id, parse_iso, utc_now_iso
@@ -899,6 +900,43 @@ def refuse_unusable_payout_address(config, adapters: dict, to_asset: str, payout
     # that is going to be refused should not leave a derived key behind.
 
 
+def _unreachable_leg_for_swap(db, from_asset: str, to_asset: str) -> str:
+    """The first leg of this swap whose chain did not answer, or "". NEVER RAISES.
+
+    A SEPARATE FUNCTION FROM pair_view._unreachable_leg() ONLY IN WHERE IT GETS THE
+    ROWS, and rule 8 requires that difference be named at both sites: that one is handed
+    a dict by a caller that already read it for thirty pairs, this one reads for one
+    swap. The DECISION -- which leg, in which order, and when a row is too old to act on
+    -- is chain_reachability.reachability_refusal()'s in both, and is not re-derived here.
+
+    THE SOURCE IS ASKED FIRST, as it is there, because the source is the leg that mints
+    the deposit address: the step the operator's GRC -> LTC attempt never reached, and
+    the one whose absence they actually reported ("it never told me where to send
+    500grc").
+
+    A BROKEN OR MISSING TABLE IS SILENT, not an error. This gate exists to stop a swap
+    choking on an unreachable chain; a swap that cannot be created because the GATE
+    broke would be the same failure wearing a different hat. An older database that has
+    not had the schema applied has no such table, and that must not be the thing that
+    refuses a customer.
+    """
+    try:
+        rows = reachability_rows(db)
+    except Exception as exc:  # noqa: BLE001 -- checked: this is a REFUSAL GATE, so its own failure must not refuse. A database missing the table (an older file that has not had SCHEMA applied) or locked by another writer would otherwise turn "we could not check" into "no swap for you", which is the opposite of the graceful behavior this gate was added for. Logged at WARNING so it is visible rather than silent.
+        logger.warning(
+            "could not read chain_reachability, so the reachability gate is NOT being applied to "
+            "this swap: %s  <- the swap proceeds and will fail at whichever step touches the "
+            "chain, with that step's own reason",
+            exc,
+        )
+        return ""
+    for asset in (from_asset, to_asset):
+        refusal = reachability_refusal(rows, asset)
+        if refusal:
+            return refusal
+    return ""
+
+
 def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) -> dict:
     quote = get_quote_or_raise(db, quote_id)
     to_asset = quote["to_asset"]
@@ -929,8 +967,49 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
             "No swap was created, because "
             + " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
             + f" The {from_asset}->{to_asset} pair is in ALLOWED_PAIRS, which is why the quote priced -- "
-            f"ALLOWED_PAIRS says what this terminal is WILLING to swap and the adapters say what it can "
-            f"REACH, and those are different questions. Nothing was written."
+            f"ALLOWED_PAIRS says what this terminal is WILLING to swap and the adapters say which chains "
+            f"it is CONFIGURED for, and those are different questions. Nothing was written."
+        )
+    # AND CONFIGURED IS NOT REACHABLE EITHER, which is the gate added 2026-10-11 and
+    # the third distinction in as many paragraphs. The sentence above said "the adapters
+    # say what it can REACH" and that was never true: an adapter is six settings and a
+    # class, and it is built without opening a socket (chains/registry.build_adapters()
+    # says so in its first line). Rule 16 -- a wrong comment is a bug -- and this one
+    # was in a message a CUSTOMER reads.
+    #
+    # MEASURED ON THE OPERATOR'S HOST, which is why this is here rather than only on the
+    # page. Their LTC and GRC adapters both existed and neither daemon answered
+    # (ConnectTimeout to host.docker.internal:19332 and :25715), so every check in this
+    # function passed and the RPC-spending ones below -- the payout-address pass and
+    # deposit_account()'s getnewaddress -- paid four 30s connect timeouts. Gunicorn's
+    # worker timeout is 60s, so the worker was KILLED mid-request: the customer got a 500
+    # with no reason, and no deposit address was ever minted.
+    #
+    # BEFORE ANY RPC AND AFTER EVERY FREE CHECK, which is this function's existing order
+    # and services/pair_view.pair_serviceability()'s: the cheapest refusal first. This
+    # one is a single SELECT over at most six rows, written by the payout and reconcile
+    # workers from a call they already make -- services/chain_reachability.py has the
+    # measurement and says why it is a stored row and not a probe.
+    #
+    # THE PAGE ALREADY STOPS OFFERING SUCH A PAIR (routes/atm.py passes the same rows to
+    # allowed_pair_rows), and that is not the same as this. A POST to /api/swaps does not
+    # come from the page, and a customer who loaded the page before a daemon died is
+    # holding a quote for a pair that was serviceable when it priced. The gate that
+    # matters is the one next to the write.
+    #
+    # IT CANNOT WRONGLY REFUSE A WORKING CHAIN FOR LONG, and that is reachability_refusal()'s
+    # doing rather than a claim here: a missing row, a stale row and an unreadable
+    # timestamp are all silent, so the only thing that refuses is a FRESH reading that
+    # the chain did not answer. If it is wrong, it is wrong for less than one worker
+    # cycle and in the direction of a refusal that costs a retry.
+    unreachable = _unreachable_leg_for_swap(db, from_asset, to_asset)
+    if unreachable:
+        raise ValueError(
+            f"No swap was created, because {unreachable}. The {from_asset}->{to_asset} pair is in "
+            f"ALLOWED_PAIRS and both chains are configured here -- but a chain that is not "
+            f"answering can neither hand you a deposit address nor pay you out, and taking a "
+            f"deposit against it would strand your funds until it came back. Nothing was written. "
+            f"Try again in a minute, or pick another pair."
         )
     # REACHABLE IS NOT THE SAME AS ABLE TO PAY, and this is the authority rather
     # than the page. routes/ui.py stops OFFERING such a pair, but a POST to
@@ -964,8 +1043,8 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
     if cannot_pay:
         raise ValueError(
             f"No swap was created, because {cannot_pay} The {from_asset}->{to_asset} pair is in "
-            f"ALLOWED_PAIRS and both chains are reachable -- but a swap that cannot be paid out takes "
-            f"a deposit it can never settle. Nothing was written."
+            f"ALLOWED_PAIRS and both chains answered when they were last asked -- but a swap that "
+            f"cannot be paid out takes a deposit it can never settle. Nothing was written."
         )
     # AND THE ACCOUNT THE PAYOUT WOULD BE DEBITED FROM MUST EXIST, which the check
     # above cannot ask. Added 2026-10-02 with the XRP payout wiring, to close a hole
@@ -998,7 +1077,8 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
     except ValueError as error:
         raise ValueError(
             f"No swap was created: {error} The {from_asset}->{to_asset} pair is in ALLOWED_PAIRS, both "
-            f"chains are reachable and {to_asset} has a signing seed -- but the account it would pay "
+            f"chains answered when they were last asked and {to_asset} has a signing seed -- but the "
+            f"account it would pay "
             f"FROM is not configured, so the payout would refuse after the deposit had already been "
             f"credited. Nothing was written."
         ) from error

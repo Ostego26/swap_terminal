@@ -60,7 +60,6 @@ recorded above.
 
 from __future__ import annotations
 
-import ast
 import contextlib
 import pathlib
 import socket
@@ -72,6 +71,7 @@ import requests
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "swap_terminal"))
 
+from prose import code_without_prose
 from rpc_timeout import (
     CONNECT_TIMEOUT_SECONDS,
     _connect_seconds_from_env,
@@ -90,37 +90,6 @@ HTTP_ADAPTERS = (
     "swap_terminal/chains/solana.py",
     "swap_terminal/chains/xrp.py",
 )
-
-
-def code_without_prose(path: pathlib.Path) -> str:
-    """One module's CODE, with every docstring and comment removed.
-
-    THE SAME FUNCTION AS tests/test_daemon_conf.code_without_prose(), and it is
-    duplicated here rather than imported for one reason: importing it would make this
-    file depend on a test module whose own imports pull in chains/daemon_conf and its
-    environment handling, which has nothing to do with RPC timeouts. The duplication
-    is NAMED AT BOTH SITES as CLAUDE.md rule 8 requires -- see the note added to
-    test_daemon_conf.py pointing here.
-
-    Why it is needed at all: the gate below asserts that no adapter still passes
-    `timeout=self.timeout`, and every one of those files now carries a COMMENT
-    explaining why it does not. A raw text scan would match the comment and fail the
-    file for explaining itself. That is the fifth time this exact defect has been hit
-    in this tree, which is why the fix is a function and not a cleverer regex.
-    """
-    tree = ast.parse(path.read_text())
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        body = getattr(node, "body", [])
-        if (
-            body
-            and isinstance(body[0], ast.Expr)
-            and isinstance(body[0].value, ast.Constant)
-            and isinstance(body[0].value.value, str)
-        ):
-            node.body = body[1:] or [ast.Pass()]
-    return ast.unparse(tree)
 
 
 def _refused_port() -> int:

@@ -23,7 +23,6 @@ credentials, no port, and reports "unconfigured" for a daemon that is running.
 
 from __future__ import annotations
 
-import ast
 import pathlib
 
 import pytest
@@ -36,6 +35,7 @@ from chains.daemon_conf import (
     parse_daemon_conf,
     rpc_settings_from_conf,
 )
+from prose import code_without_prose as shared_code_without_prose
 
 # Distinctive on purpose: a real-looking password would risk a false pass if some
 # fragment of it happened to appear in surrounding prose.
@@ -569,12 +569,12 @@ def test_EVERY_entry_point_THAT_RESOLVES_A_CHAIN_is_on_one_side_or_the_other():
 def code_without_prose(path: pathlib.Path) -> str:
     """One root script's CODE, with every docstring and comment removed.
 
-    A SECOND COPY OF THIS FUNCTION EXISTS, and rule 8 requires both sites to name the
-    other: tests/test_rpc_connect_timeout.py has an identical one. It is duplicated
-    rather than imported because importing from here would pull chains/daemon_conf and
-    its environment handling into a file about RPC timeouts, which has no business with
-    either. If a THIRD copy is ever wanted, that is the signal to move this into a
-    shared test helper module instead -- two is the most that stays honest.
+    THIS IS NOW A THIN WRAPPER OVER tests/prose.code_without_prose(), and the move is
+    exactly what the note here asked for. It read: "If a THIRD copy is ever wanted, that
+    is the signal to move this into a shared test helper module instead -- two is the
+    most that stays honest." A third was wanted within the hour. tests/prose.py's header
+    counts all nine occurrences of the defect this answers; the copies are gone, and this
+    name stays because the gates below call it.
 
     BOTH GATES BELOW READ THIS INSTEAD OF THE RAW TEXT, and that is a fix rather than
     a refinement. They matched the literal string `conf_fallback_settings` anywhere in
@@ -600,14 +600,7 @@ def code_without_prose(path: pathlib.Path) -> str:
     checked rather than assumed: a file that both mentions and calls the function would
     have been failing the SERVICE_SIDE gate already, and none was.
     """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        body = getattr(node, "body", None)
-        if isinstance(node, ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) \
-                and body and isinstance(body[0], ast.Expr) \
-                and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
-            node.body = body[1:] or [ast.Pass()]
-    return ast.unparse(ast.fix_missing_locations(tree))
+    return shared_code_without_prose(path)
 
 
 def test_every_DIRECT_DRIVER_uses_the_shared_resolver():
