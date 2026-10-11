@@ -179,7 +179,10 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
                     # happen and the operator should see that BEFORE the RPC call,
                     # not in a summary line that appears once it has completed.
                     print(f"  {WORKER_NAME} cycle={cycle}: {pending} swap(s) pending payout, broadcasting now", flush=True)
-                refresh_wallet_inventory(db, adapters)
+                # should_stop, because this runs BEFORE process_pending_payouts() and makes
+                # one get_balance per configured chain -- a whole timeout after SIGTERM for
+                # balances this cycle is about to discard.
+                refresh_wallet_inventory(db, adapters, should_stop)
                 # should_stop IS PASSED DOWN since 2026-10-11 so a stop lands BETWEEN
                 # swaps rather than at the grace deadline. Finishing the whole cycle was
                 # the design, and a cycle is bounded by the chain RPC timeouts (30s

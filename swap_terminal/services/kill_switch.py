@@ -185,13 +185,30 @@ _HOLDER_RECORD_BYTES = 512
 # because it is passed to supervisor's monotonic arithmetic -- an interface, not a
 # report (rule 6), and the figure is converted on the way out for display.
 #
-# Shorter than supervisor.DEFAULT_GRACE_SECONDS (10.0) ON PURPOSE, and this is the
-# one number here that is a judgment rather than a measurement: a browser request
-# that takes 30s to come back is rule 14's blinking cursor, and three workers at
-# 10s each is 30s in the worst case. 5s each caps the worst case at 15s, which is
-# inside gunicorn.conf.py's 60s worker timeout with room for the orphan scan. The
-# workers' own loops sleep in 30-60s cycles and handle SIGTERM at the top of a
-# cycle, so a worker mid-sleep exits immediately; 5s is for one mid-RPC.
+# MUCH shorter than supervisor.DEFAULT_GRACE_SECONDS ON PURPOSE, and this is the one
+# number here that is a judgment rather than a measurement: a browser request that takes
+# a minute to come back is rule 14's blinking cursor. A page-driven stop is an operator
+# saying "stop now", and for that a prompt answer beats a graceful one.
+#
+# TWO HALVES OF THE ARGUMENT THAT USED TO BE HERE WERE WRONG BY 2026-10-11 and are
+# corrected rather than deleted, because the judgment survives and the reasoning did not:
+#
+#   "three workers at 10s each is 30s in the worst case. 5s each caps the worst case at
+#    15s"  -- the grace is no longer spent PER WORKER. supervisor.stop_workers_together()
+#    signals all three and polls one shared deadline, so the worst case is ONE grace, not
+#    three. This 5s caps the page at ~5s, not 15.
+#
+#   "5s is for one mid-RPC"  -- it is not, and cannot be. The shortest chain timeout in
+#    the tree is 30s (config.py:1386) and ICP's is 60 (config.py:1505), so 5s SIGKILLs a
+#    worker that is mid-RPC rather than accommodating it. What 5s actually covers is a
+#    worker between units of work, which since 2026-10-11 is a case the service loops
+#    consult should_stop for -- so the common stop is well inside it.
+#
+# SO A PAGE-DRIVEN STOP CAN STILL SIGKILL A WORKER MID-SEND, and that is the accepted
+# cost of answering the request. The container stop
+# (swap_terminal/stop_budget.WORKER_GRACE_SECONDS) is the one sized to let a unit finish;
+# this one is sized to answer a browser. Anyone changing it should move it UP, toward that
+# number, not down.
 WEB_GRACE_SECONDS = 5.0
 
 #: What a START arms, per worker. The inverse of

@@ -685,7 +685,8 @@ class LatePass(NamedTuple):
     addresses: int
 
 
-def reconcile_late_deposits(db, config: dict, adapters: dict, *, now: str) -> LatePass:
+def reconcile_late_deposits(db, config: dict, adapters: dict, *, now: str,
+                            should_stop=None) -> LatePass:
     """Re-read recently finished swaps' deposit addresses. Returns what the pass did.
 
     ORCHESTRATION AND NOTHING ELSE (rule 10). The window is a constant with its
@@ -728,6 +729,24 @@ def reconcile_late_deposits(db, config: dict, adapters: dict, *, now: str) -> La
     scanned: dict[tuple[str, str], list[dict]] = {}
     recorded = 0
     for swap in targets:
+        # A CHECK HERE BECAUSE A SIGTERM ARRIVING MID-CYCLE REACHED THIS LOOP IN FULL.
+        # Measured 2026-10-11 by a review pass over all three workers: the between-units
+        # seam added earlier that day guarded ONLY the per-swap loop in
+        # process_pending_payouts() and process_active_swaps(), and every other loop in a
+        # cycle ran to completion after the stop was requested. All three workers came back
+        # seam_is_sufficient=False, which means the commit that added the seam claimed more
+        # than it delivered.
+        #
+        # THIS PASS SITS ENTIRELY AFTER THE LAST SEAM CONSULTATION in the reconcile cycle --
+        # workers/reconcile_worker.py calls it after process_active_swaps() -- and it scans
+        # one address per completed swap inside the late window. A wide window means many
+        # scans, every one after the stop was requested.
+        #
+        # ENDING EARLY LOSES NOTHING: a late deposit is late by definition and the window is
+        # 86,400s wide, so a swap not reached this cycle is reached by the next. That is the
+        # same guarantee this pass already relies on for a swap whose scan failed.
+        if should_stop is not None and should_stop():
+            break
         asset = swap["from_asset"]
         address = (swap["deposit_address"] or "").strip()
         if asset not in accounted:

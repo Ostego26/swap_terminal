@@ -244,7 +244,7 @@ def run_cycle(db, config: dict, adapters: dict, cycle: int, should_stop=None) ->
     # (rule 6's boundary: seconds where an API demands them, and this one demands an ISO
     # string). Taken BEFORE the work so nothing this cycle writes falls outside it.
     cycle_began = utc_now_iso()
-    refresh_wallet_inventory(db, adapters)
+    refresh_wallet_inventory(db, adapters, should_stop)
     # should_stop, for the reason at the payout worker's call site. This worker has the
     # LONGEST cycle of the three -- a 60s poll, an inventory refresh, this pass and the
     # late-deposit pass -- and the grace is spent once for all three
@@ -283,7 +283,11 @@ def run_cycle(db, config: dict, adapters: dict, cycle: int, should_stop=None) ->
     #
     # IT COMMITS NOTHING OF ITS OWN: the db_session() in main() owns the transaction, exactly
     # as process_active_swaps()' own writes do.
-    late = reconcile_late_deposits(db, config, adapters, now=utc_now_iso())
+    # should_stop: this pass is the LAST thing in the cycle and sits past every other seam,
+    # so without it a stop requested anywhere earlier still paid for one scan per completed
+    # swap inside the 86,400s late window.
+    late = reconcile_late_deposits(db, config, adapters, now=utc_now_iso(),
+                                   should_stop=should_stop)
     late_unresolved = db.execute(
         # READ BACK FROM SQL rather than threaded up from the pass. "How many late deposits is
         # a person still sitting on" is a question about rows in the table and not about what

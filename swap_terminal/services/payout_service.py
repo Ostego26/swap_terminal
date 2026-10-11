@@ -1698,9 +1698,34 @@ def inventory_assets(db) -> set:
     return {str(row["asset"]) for row in rows}
 
 
-def refresh_wallet_inventory(db, adapters: dict):
+def refresh_wallet_inventory(db, adapters: dict, should_stop=None):
     now = utc_now_iso()
     for asset, adapter in adapters.items():
+        # A CHECK HERE BECAUSE A SIGTERM ARRIVING MID-CYCLE REACHED THIS LOOP IN FULL.
+        # Measured 2026-10-11 by a review pass over all three workers: the between-units
+        # seam added earlier that day guarded ONLY the per-swap loop in
+        # process_pending_payouts() and process_active_swaps(), and every other loop in a
+        # cycle ran to completion after the stop was requested. All three workers came back
+        # seam_is_sufficient=False, which means the commit that added the seam claimed more
+        # than it delivered.
+        #
+        # This loop makes ONE get_balance per configured chain, each bounded only by that
+        # chain's own timeout, and it runs BEFORE the per-swap seam in every payout cycle
+        # (workers/payout_worker.py) and every reconcile cycle (workers/reconcile_worker.py).
+        # Six chains with one hung daemon is a whole timeout spent after SIGTERM, for
+        # balances nobody is going to read.
+        #
+        # A PARTIAL REFRESH IS ALREADY THIS FUNCTION'S NORMAL OUTCOME, which is what makes
+        # breaking out safe: the `except Exception: continue` below exists precisely so one
+        # unreachable chain leaves its row at the previous values while the others update.
+        # Stopping early is that same state by a different route -- a row not reached keeps
+        # the values it had rather than being zeroed.
+        if should_stop is not None and should_stop():
+            logger.info(
+                "stop requested: wallet inventory refresh ended early. Rows not reached keep "
+                "their previous values, exactly as they do when a chain is unreachable."
+            )
+            break
         try:
             balance = float(adapter.get_balance())
         except Exception as exc:  # noqa: BLE001 -- checked: one chain being unreachable must not stop the other two from being refreshed, so this continues rather than raising. It is NOT silent: the row for that asset keeps its previous values and the WARNING below says which asset and why, so a stale inventory figure can be traced to the poll that failed instead of looking like a balance that did not move.

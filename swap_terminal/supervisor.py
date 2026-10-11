@@ -115,6 +115,7 @@ from pathlib import Path
 # already present.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import stop_budget
 from config import Config
 from microfortnights import format_duration
 
@@ -160,7 +161,21 @@ DEFAULT_RUN_DIR = Path(os.environ.get("ST_WORKER_RUN_DIR") or BASE_DIR / "runtim
 # signal.alarm-style waits and time.monotonic() arithmetic are an interface,
 # not a report (rule 6): the µfn figure is printed, the arithmetic is in
 # seconds.
-DEFAULT_GRACE_SECONDS = 10.0
+#
+# DERIVED FROM stop_budget SINCE 2026-10-11, AND IT WAS A FLAT 10.0. This is the
+# default for stop_worker(), stop_workers_together() AND the `stop` subcommand's
+# --grace, so `python3 swap_terminal/supervisor.py stop` gave a worker 10 seconds
+# while `docker compose down` gave it 65. A worker mid-unit survived the container
+# stop and was SIGKILLed by the command line one -- the same two-numbers-in-two-files
+# defect as `graceful_timeout = 30` against a 20s wait, and as the compose file
+# spelling its own `:-15` over the derived default. Both of those were found and
+# fixed without anyone asking whether a THIRD copy existed. It did, here.
+#
+# WHY stop_budget OWNS IT rather than this module: that file already derives the
+# number from the longest chain call a worker can block on, which is the quantity
+# that decides whether a grace is long enough for anything. Importing it costs
+# nothing -- it reads two environment variables and has no other dependency.
+DEFAULT_GRACE_SECONDS = stop_budget.WORKER_GRACE_SECONDS
 
 # Poll interval while waiting for a process to disappear.
 REAP_POLL_SECONDS = 0.05

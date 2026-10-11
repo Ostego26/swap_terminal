@@ -286,3 +286,143 @@ def test_the_worker_grace_exceeds_the_longest_chain_rpc_timeout():
         f"block for {longest}. A worker finishing its current unit of work cannot fit "
         f"inside the grace, which is what made every stop a SIGKILL."
     )
+
+
+# ---------------------------------------------------------------------------
+# THE SEAM WAS NOT WHERE THE TIME WAS. A review pass over all three workers on
+# 2026-10-11 came back seam_is_sufficient=False for every one of them.
+# ---------------------------------------------------------------------------
+
+#: Every function on a worker cycle that loops over units of work and must therefore
+#: consult should_stop. DERIVED from the workers' own call graph by the review, and
+#: listed here because a test cannot infer "is on a worker cycle" from the code.
+#:
+#: THE FIRST FIX COVERED TWO OF SIX. process_pending_payouts and process_active_swaps
+#: got the seam; refresh_wallet_inventory (one get_balance per chain, BEFORE the payout
+#: seam), scan_shared_accounts (one chain scan per shared account, BEFORE the deposit
+#: seam, and it runs even with no active swaps), reconcile_shared_accounts (AFTER the
+#: deposit seam, and it re-scans precisely the accounts whose scan just failed) and
+#: reconcile_late_deposits (last thing in the reconcile cycle, one scan per completed
+#: swap in an 86,400s window) all ran to completion after SIGTERM.
+SEAMED_FUNCTIONS = {
+    "swap_terminal/services/payout_service.py": ["process_pending_payouts", "refresh_wallet_inventory"],
+    "swap_terminal/services/deposit_service.py": [
+        "process_active_swaps", "scan_shared_accounts", "reconcile_shared_accounts",
+    ],
+    "swap_terminal/services/late_deposit_service.py": ["reconcile_late_deposits"],
+}
+
+
+def test_every_looping_function_on_a_worker_cycle_takes_a_should_stop():
+    """Each function in SEAMED_FUNCTIONS must accept should_stop and consult it.
+
+    ASSERTED ON THE SIGNATURE AND ON THE BODY, by AST, because either alone passes while
+    the other is missing: a parameter nobody reads is the shape the first fix would have
+    had if I had threaded it without checking it, and a check in a function the worker
+    calls without it is dead code.
+
+    MUTATION: drop should_stop from any one of the six and this fails naming it.
+    """
+    import ast  # noqa: PLC0415 -- used only by this gate
+
+    missing_param, never_consulted = [], []
+    for relative, functions in SEAMED_FUNCTIONS.items():
+        tree = ast.parse((REPOSITORY_ROOT / relative).read_text())
+        found = {
+            node.name: node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name in functions
+        }
+        for name in functions:
+            node = found.get(name)
+            assert node is not None, f"{relative} no longer defines {name}"
+            names = [a.arg for a in node.args.args] + [a.arg for a in node.args.kwonlyargs]
+            if "should_stop" not in names:
+                missing_param.append(f"{relative}::{name}")
+                continue
+            consults = any(
+                isinstance(inner, ast.Name) and inner.id == "should_stop"
+                for stmt in node.body for inner in ast.walk(stmt)
+            )
+            if not consults:
+                never_consulted.append(f"{relative}::{name}")
+
+    assert missing_param == [], (
+        f"{missing_param} loop over units of work on a worker cycle and take no should_stop, "
+        f"so a stop is not consulted until the loop finishes. That was true of four of these "
+        f"six until 2026-10-11."
+    )
+    assert never_consulted == [], (
+        f"{never_consulted} accept should_stop and never read it -- a parameter that cannot "
+        f"stop anything, which is worse than not having one because it reads as covered."
+    )
+
+
+def test_every_worker_forwards_should_stop_to_everything_it_calls():
+    """A seam in a service is inert unless the worker passes its predicate down.
+
+    THE HOLE THIS CLOSES is the one the first fix left: process_active_swaps took a
+    should_stop and did not forward it to scan_shared_accounts or
+    reconcile_shared_accounts, so two of the three loops in a deposit cycle never saw it.
+    Asserted on the call site's arguments rather than on the source text, so a comment
+    mentioning should_stop cannot satisfy it.
+
+    MUTATION: drop `should_stop` from the scan_shared_accounts call in
+    process_active_swaps and this fails naming that call.
+    """
+    import ast  # noqa: PLC0415 -- used only by this gate
+
+    callers = {
+        "swap_terminal/workers/payout_worker.py": ["process_pending_payouts", "refresh_wallet_inventory"],
+        "swap_terminal/workers/deposit_watcher.py": ["process_active_swaps"],
+        "swap_terminal/workers/reconcile_worker.py": [
+            "process_active_swaps", "refresh_wallet_inventory", "reconcile_late_deposits",
+        ],
+        "swap_terminal/services/deposit_service.py": ["scan_shared_accounts", "reconcile_shared_accounts"],
+    }
+    unforwarded = []
+    for relative, names in callers.items():
+        tree = ast.parse((REPOSITORY_ROOT / relative).read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            called = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if called not in names:
+                continue
+            passed = any(
+                isinstance(a, ast.Name) and a.id == "should_stop" for a in node.args
+            ) or any(
+                kw.arg == "should_stop" and isinstance(kw.value, ast.Name)
+                and kw.value.id == "should_stop" for kw in node.keywords
+            )
+            if not passed:
+                unforwarded.append(f"{relative}: {called}(...)")
+    assert unforwarded == [], (
+        f"{unforwarded} -- called on a worker cycle without should_stop, so the seam inside is "
+        f"unreachable from that path and the loop runs in full after SIGTERM."
+    )
+
+
+def test_one_place_owns_the_worker_grace():
+    """supervisor's default and the container's must be the same number.
+
+    `python3 swap_terminal/supervisor.py stop` gave a worker 10 seconds while
+    `docker compose down` gave it 65, because supervisor.DEFAULT_GRACE_SECONDS was its own
+    literal -- the THIRD copy of this defect in two days, after `graceful_timeout = 30`
+    against a 20s wait and the compose file spelling its own `:-15` over the derived
+    default. The first two were fixed without anyone asking whether a third existed.
+
+    THE KILL SWITCH IS DELIBERATELY DIFFERENT AND IS NOT ASSERTED HERE.
+    services/kill_switch.WEB_GRACE_SECONDS is 5.0 because a page-driven stop has to answer
+    a browser, which is a judgment the operator made; its comment now says plainly that
+    such a stop CAN SIGKILL a worker mid-send, which is the cost. Forcing it to match would
+    be making a gate out of someone else's trade-off.
+
+    MUTATION: set supervisor.DEFAULT_GRACE_SECONDS back to a literal 10.0 and this fails.
+    """
+    import supervisor  # noqa: PLC0415 -- after conftest's path shim
+
+    assert supervisor.DEFAULT_GRACE_SECONDS == stop_budget.WORKER_GRACE_SECONDS, (
+        f"supervisor defaults to {supervisor.DEFAULT_GRACE_SECONDS}s and the container uses "
+        f"{stop_budget.WORKER_GRACE_SECONDS}s, so the same worker is SIGKILLed by one stop path "
+        f"and not the other."
+    )

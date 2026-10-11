@@ -586,7 +586,7 @@ class SharedScanResult(dict):
     unreachable: tuple = ()
 
 
-def scan_shared_accounts(db, config, adapters: dict, swaps) -> SharedScans:
+def scan_shared_accounts(db, config, adapters: dict, swaps, should_stop=None) -> SharedScans:
     """Scan every shared deposit account ONCE and keep the result for the whole cycle.
 
     THE ONE-CYCLE LATENCY THIS COSTS, AND WHY IT IS ACCEPTED RATHER THAN RE-SCANNED.
@@ -707,6 +707,31 @@ def scan_shared_accounts(db, config, adapters: dict, swaps) -> SharedScans:
     # address on an asset, so asking it twice would be two copies of one answer (rule 8).
     skips: dict[tuple[str, str], frozenset[str]] = {}
     for asset, address in shared_scan_targets(swaps, config, adapters):
+        # A CHECK HERE BECAUSE A SIGTERM ARRIVING MID-CYCLE REACHED THIS LOOP IN FULL.
+        # Measured 2026-10-11 by a review pass over all three workers: the between-units
+        # seam added earlier that day guarded ONLY the per-swap loop in
+        # process_pending_payouts() and process_active_swaps(), and every other loop in a
+        # cycle ran to completion after the stop was requested. All three workers came back
+        # seam_is_sufficient=False, which means the commit that added the seam claimed more
+        # than it delivered.
+        #
+        # THIS LOOP IS THE ONE THAT RUNS EVEN WITH NO ACTIVE SWAPS. A tag-attributed asset
+        # with a configured account is scanned every cycle regardless, and one SOL scan is
+        # 1 getSignaturesForAddress plus up to DEFAULT_SIGNATURE_LIMIT=500 getTransaction
+        # calls (chains/solana.py:548). After SIGTERM that is up to 501 round trips for a
+        # result the cycle is about to discard.
+        #
+        # A SKIPPED TARGET IS NOT A LOST DEPOSIT. Its absence from `scans` means
+        # refresh_swap_from_chain() makes the swap's own scan instead of reusing a shared
+        # one, and the next cycle re-scans the account from scratch -- exactly where a
+        # FAILED scan already leaves things (see the except below). That is why this can be
+        # a plain break with no state to record.
+        if should_stop is not None and should_stop():
+            logger.info(
+                "stop requested: shared-account scanning ended early. Targets not reached are "
+                "simply absent from this cycle's scans, which the next cycle redoes."
+            )
+            break
         # KEYED ON (asset, address) SINCE 2026-10-10, not on asset. skip_txids() is now
         # scoped to the address being scanned, so one answer per asset would be the
         # wrong answer for a second address on the same asset -- which is exactly the
@@ -1111,7 +1136,9 @@ def process_active_swaps(db, config, adapters: dict, should_stop=None) -> list[d
     # EVERY CONSUMER MEANS BOTH: the loop below AND reconcile_shared_accounts(). Passing it to
     # the loop alone would have left the reconciler making the fifth scan, which is the one
     # that runs even when nothing is open -- i.e. it would have fixed the N and left the +1.
-    scans = scan_shared_accounts(db, config, adapters, swaps)
+    # FORWARDED, since 2026-10-11. This loop runs BEFORE the per-swap seam below, so
+    # without this a stop was not consulted until every shared account had been scanned.
+    scans = scan_shared_accounts(db, config, adapters, swaps, should_stop)
 
     # =========================================================================
     # A GUARDED LOOP AND NOT A LIST COMPREHENSION, SINCE 2026-10-10
@@ -1196,12 +1223,15 @@ def process_active_swaps(db, config, adapters: dict, should_stop=None) -> list[d
     # being credited. So the pre-loop reading is covered by the status check and the post-loop
     # reading by the credited check, and both decline. The position stays where HEAD had it
     # because there is no reason to move it, not because a test pins it.
-    reconcile_shared_accounts(db, config, adapters, scans=scans)
+    # FORWARDED for the same reason, and this one sits AFTER the per-swap seam -- so before
+    # this line a stop requested mid-loop still paid for a full reconciliation pass.
+    reconcile_shared_accounts(db, config, adapters, scans=scans, should_stop=should_stop)
     db.commit()
     return processed
 
 
-def reconcile_shared_accounts(db, config, adapters: dict, scans: SharedScans | None = None) -> int:
+def reconcile_shared_accounts(db, config, adapters: dict, scans: SharedScans | None = None,
+                              should_stop=None) -> int:
     """Once per cycle, record what arrived at a shared account that NO swap will credit.
 
     WHY HERE AND NOT IN refresh_swap_from_chain(). The question is "does any swap claim this
@@ -1231,6 +1261,26 @@ def reconcile_shared_accounts(db, config, adapters: dict, scans: SharedScans | N
     """
     recorded = 0
     for asset in sorted(TAG_ATTRIBUTED_ASSETS):
+        # A CHECK HERE BECAUSE A SIGTERM ARRIVING MID-CYCLE REACHED THIS LOOP IN FULL.
+        # Measured 2026-10-11 by a review pass over all three workers: the between-units
+        # seam added earlier that day guarded ONLY the per-swap loop in
+        # process_pending_payouts() and process_active_swaps(), and every other loop in a
+        # cycle ran to completion after the stop was requested. All three workers came back
+        # seam_is_sufficient=False, which means the commit that added the seam claimed more
+        # than it delivered.
+        #
+        # THIS ONE IS THE WORST OF THE FOUR, because of WHEN it fires. It runs AFTER the
+        # per-swap loop, so it is past the only seam the earlier fix added, and it makes a
+        # FRESH scan for any tag-attributed asset missing from this cycle's scans -- which
+        # is precisely the case when that asset's shared scan FAILED. So a cycle that just
+        # spent a timeout failing to reach a chain spends another one here, after the stop
+        # was requested.
+        if should_stop is not None and should_stop():
+            logger.info(
+                "stop requested: shared-account reconciliation ended early. An asset not "
+                "reached is re-reconciled next cycle; nothing here is a one-shot."
+            )
+            break
         adapter = adapters.get(asset)
         if adapter is None:
             continue

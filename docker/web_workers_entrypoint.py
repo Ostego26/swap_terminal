@@ -260,8 +260,9 @@ def main() -> int:
         "  starting three workers, then gunicorn.",
         "  ON STOP: all four get SIGTERM TOGETHER, because pid 1 is dumb-init with no",
         "  --single-child and gunicorn shares this process's group. gunicorn exits first",
-        "  (~0.1s); the workers finish the unit of work in hand and then exit, and their",
-        "  absence is PROVEN by /proc. A worker is never interrupted mid-payout.",
+        "  (~0.1s); the workers stop STARTING new work and finish the unit in hand, and",
+        "  their absence is PROVEN by /proc -- by exit if the unit fits in the grace, by",
+        "  SIGKILL if it does not. One unit can exceed it: see stop_budget.py.",
     ])
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     prepare_database()
