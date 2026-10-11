@@ -46,6 +46,7 @@ start_deaf_workers() refuses to return until every one of those files exists.
 
 from __future__ import annotations
 
+import re
 import sys
 import time
 from pathlib import Path
@@ -307,4 +308,192 @@ def test_the_gunicorn_config_actually_uses_the_derived_timeout(tmp_path, monkeyp
         f"gunicorn would use graceful_timeout={namespace['graceful_timeout']!r} and "
         f"stop_budget derives {stop_budget.gunicorn_graceful_timeout()!r}. Two numbers that "
         f"must agree, in two files, is the defect this module was split out to end."
+    )
+
+
+# ---------------------------------------------------------------------------
+# WHO OWNS A DEFAULT. The third instance of one defect class in this area, and the
+# first two were fixed without anyone asking whether there was a third.
+# ---------------------------------------------------------------------------
+
+#: Variables where a compose file spells a default that DIFFERS from Python's, on
+#: purpose. A register rather than a blanket exemption, so each one carries its reason
+#: and a NEW divergence fails instead of joining a pattern.
+#:
+#: This is not a ratchet (rule 19). A ratchet tolerates a backlog of the same defect;
+#: this records cases that are not the defect at all -- two different values for two
+#: different things that happen to share a variable name across deployments.
+DELIBERATE_DEFAULT_DIVERGENCES = {
+    "SWAP_TERMINAL_PORT": (
+        "docker-compose.web.hostnet.yml:149 binds it DIRECTLY, because host networking "
+        "publishes nothing, and 5101 avoids the 5100 the normal deployment publishes. "
+        "config.py's own default is 5000, the in-container bind. Two values for two "
+        "deployments -- swap_terminal/stack_authority.py:786-791 spells it out and "
+        "probes all of them for exactly this reason."
+    ),
+}
+
+
+def stop_budget_owned_variables() -> set[str]:
+    """Every environment variable swap_terminal/stop_budget.py supplies the default for.
+
+    DERIVED BY AST FROM ITS OWN SOURCE rather than listed here, so a fourth duration
+    added to that module is covered the day it is added. Every one is a
+    `_seconds_from_env("NAME", ...)` call, and that function exists precisely because
+    these defaults belong in one place.
+    """
+    import ast  # noqa: PLC0415 -- used only by this gate
+
+    tree = ast.parse((REPOSITORY_ROOT / "swap_terminal" / "stop_budget.py").read_text())
+    owned = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name != "_seconds_from_env" or not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            owned.add(first.value)
+    return owned
+
+
+def compose_spelled_defaults() -> dict[str, set[tuple[str, str]]]:
+    """{VAR: {(file, default)}} for every NON-EMPTY `${VAR:-default}` in a compose file.
+
+    COMMENTED LINES ARE SKIPPED, which matters more here than usual: these files carry
+    long comment blocks that QUOTE the very patterns being searched for, including the
+    exact line this gate was written to forbid. A scan over raw text would match the
+    retraction explaining the fix and report the defect as still present -- the
+    prose-as-code trap, which this repository has now walked into five times.
+
+    `${VAR:-}` YIELDS NOTHING, by the `[^}]+` in the pattern, and that is the whole
+    design: an empty default is compose forwarding an override without claiming a value,
+    which is what a variable Python owns must look like.
+    """
+    found: dict[str, set[tuple[str, str]]] = {}
+    for path in sorted(REPOSITORY_ROOT.glob("docker-compose*.yml")):
+        for line in path.read_text().splitlines():
+            if line.strip().startswith("#"):
+                continue
+            for var, value in re.findall(r"\$\{([A-Z_][A-Z0-9_]*):-([^}]+)\}", line):
+                found.setdefault(var, set()).add((path.name, value))
+    return found
+
+
+def test_no_compose_file_spells_a_default_that_stop_budget_owns():
+    """A compose `environment:` entry ALWAYS sets the variable, so its default WINS.
+
+    THE DEFECT, measured on the operator's host 2026-10-11. docker-compose.web.yml read
+    `ST_WORKER_GRACE_SECONDS: "${ST_WORKER_GRACE_SECONDS:-15}"`. There is no way for a
+    compose environment entry to pass "nothing", so the container received 15 whatever
+    stop_budget computed. The derived default became 65 that day and the deployment went
+    on using 15 -- the fix was INERT -- and the startup banner printed
+
+        worker grace    15.0s  <- one hung chain call (60.0s, ICP_CALL_TIMEOUT) plus 5.0s
+
+    the number and its own explanation disagreeing in one line, on the screen the
+    operator reads at every boot.
+
+    AND IT WAS THE THIRD OF ITS KIND IN THIS ONE AREA. `graceful_timeout = 30` against a
+    20s wait; the entrypoint banner against its own corrected docstring; this. Each was
+    fixed without asking whether there was another, which is what this gate replaces --
+    the first two were caught by reading, this one by the operator looking at a banner,
+    and a fourth will be caught here.
+
+    THE FIX IS AN EMPTY DEFAULT, not deleting the line. Deleting it would stop an
+    operator overriding the grace at all, because compose only passes variables it
+    declares. `${VAR:-}` forwards their value or nothing, and stop_budget treats unset
+    and empty alike.
+
+    MUTATION: put any number back after the `:-` for ST_WORKER_GRACE_SECONDS and this
+    fails naming the file and the value.
+    """
+    owned = stop_budget_owned_variables()
+    assert owned, (
+        "no _seconds_from_env() calls found in stop_budget.py, so this gate is measuring "
+        "nothing -- the helper was renamed or the defaults moved back inline"
+    )
+    assert "ST_WORKER_GRACE_SECONDS" in owned, (
+        f"the variable this gate exists for is not among {sorted(owned)}"
+    )
+
+    spelled = compose_spelled_defaults()
+    offenders = {var: sorted(spelled[var]) for var in sorted(owned) if var in spelled}
+    assert offenders == {}, (
+        f"these compose entries spell a default for a variable swap_terminal/stop_budget.py "
+        f"owns: {offenders}. A compose environment entry always sets the variable, so its "
+        f"value WINS and the Python default becomes unreachable -- which is how a 65s grace "
+        f"shipped as 15s. Use ${{VAR:-}} so the line forwards an override and nothing else."
+    )
+
+
+def test_a_default_in_both_compose_and_python_either_agrees_or_is_registered():
+    """Where both sides spell a literal default, they must match or be in the register.
+
+    THE WIDER FORM of the gate above, for variables whose default Python states as a
+    string literal rather than through stop_budget. It found one divergence on first
+    run -- SWAP_TERMINAL_PORT, 5101 in the host-networking overlay against config.py's
+    5000 -- which is DELIBERATE and documented, so it is registered with its reason
+    rather than being made to agree.
+
+    REGISTERING IT WAS THE POINT, NOT A CONCESSION. Forcing those two to match would
+    break host networking, and a gate that fails for a legitimate reason gets deleted
+    rather than fixed -- which this file has already argued once, about `http_request`
+    being forbidden in one canister and required in another.
+    """
+    import ast  # noqa: PLC0415 -- used only by this gate
+
+    # THE ROOT .py FILES AND THE PACKAGE, NOT THE PACKAGE ALONE. The first version of
+    # this gate walked swap_terminal/ only, and a mutation setting GUNICORN_WORKERS to 4
+    # in compose went UNCAUGHT -- because gunicorn.conf.py, which owns that default,
+    # lives at the repository root beside wsgi.py and the operator-facing scripts. Rule
+    # 3's error inside the gate written to catch rule 3's error: the denominator was a
+    # subtree rather than the tree. `.claude` is excluded because it holds agent
+    # worktrees, not this project's code.
+    python_defaults: dict[str, set[tuple[str, str]]] = {}
+    candidates = sorted(REPOSITORY_ROOT.glob("*.py")) + sorted(
+        (REPOSITORY_ROOT / "swap_terminal").rglob("*.py")
+    )
+    for path in candidates:
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            tree = ast.parse(path.read_text(errors="replace"))
+        except SyntaxError:  # pragma: no cover -- a file this suite could not import anyway
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if (getattr(node.func, "attr", None) != "getenv") or len(node.args) != 2:
+                continue
+            name, default = node.args
+            if (isinstance(name, ast.Constant) and isinstance(name.value, str)
+                    and isinstance(default, ast.Constant) and isinstance(default.value, str)):
+                python_defaults.setdefault(name.value, set()).add(
+                    (path.relative_to(REPOSITORY_ROOT).as_posix(), default.value)
+                )
+
+    spelled = compose_spelled_defaults()
+    disagreeing = {}
+    for var in sorted(set(spelled) & set(python_defaults)):
+        compose_values = {value for _, value in spelled[var]}
+        python_values = {value for _, value in python_defaults[var]}
+        if compose_values != python_values and var not in DELIBERATE_DEFAULT_DIVERGENCES:
+            disagreeing[var] = {
+                "compose": sorted(spelled[var]),
+                "python": sorted(python_defaults[var]),
+            }
+    assert disagreeing == {}, (
+        f"{disagreeing} -- a default spelled on both sides, differing, and not in "
+        f"DELIBERATE_DEFAULT_DIVERGENCES. Compose's value is the one the container gets, so "
+        f"the Python default is dead and the next reader of it is misled. Either make them "
+        f"agree, or register the divergence with the reason it is correct."
+    )
+
+    stale = sorted(set(DELIBERATE_DEFAULT_DIVERGENCES) - set(spelled))
+    assert stale == [], (
+        f"{stale} is registered as a deliberate divergence and no compose file spells a "
+        f"default for it any more. Remove the entry rather than leaving it to describe "
+        f"something that stopped being true (rule 19: a register that reaches zero is deleted)."
     )

@@ -182,7 +182,22 @@ services:
       # it is not 4: two payout workers paid the same swap twice, 2 sends for 1
       # swap. The bottleneck here is SQLite's single writer lock, not CPU.
       GUNICORN_WORKERS: "${GUNICORN_WORKERS:-2}"
-      ST_WORKER_GRACE_SECONDS: "${ST_WORKER_GRACE_SECONDS:-15}"
+      # NO NUMBER HERE, AND THE EMPTY DEFAULT IS THE POINT. This read
+      # "${ST_WORKER_GRACE_SECONDS:-15}" until 2026-10-11, and a compose
+      # `environment:` entry ALWAYS sets the variable -- there is no way to pass
+      # "nothing" -- so the container received 15 whatever Python computed. When the
+      # derived default became 65 the deployment went on using 15, the fix was inert,
+      # and the operator's startup banner printed
+      #
+      #   worker grace    15.0s  <- one hung chain call (60.0s, ICP_CALL_TIMEOUT) plus 5.0s
+      #
+      # with the number and its own explanation disagreeing in one line, on the screen
+      # they read at every boot.
+      #
+      # swap_terminal/stop_budget.py OWNS THE DEFAULT and treats unset and empty alike,
+      # so this line forwards the operator's override or nothing. The override path is
+      # unchanged: export it, or uncomment it in .env.
+      ST_WORKER_GRACE_SECONDS: "${ST_WORKER_GRACE_SECONDS:-}"
 
       # EVERY NAME HERE IS MEASURED AGAINST config.py, NOT REMEMBERED, and the
       # first draft of this block got three of them wrong in a way that killed

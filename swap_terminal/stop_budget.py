@@ -57,6 +57,49 @@ from __future__ import annotations
 
 import os
 
+
+def _seconds_from_env(name: str, default: float) -> float:
+    """`name` from the environment as seconds, where UNSET and EMPTY both mean `default`.
+
+    WHY EMPTY COUNTS AS UNSET, and it is a defect measured on the operator's host rather
+    than a nicety. docker-compose.web.yml forwards this variable so an operator can
+    override it, and a compose `environment:` entry ALWAYS sets the variable -- there is
+    no way to pass "nothing". The file used to carry its own default,
+    `"${ST_WORKER_GRACE_SECONDS:-15}"`, so the container received 15 no matter what this
+    module computed. On 2026-10-11 the derived default became 65 and the deployment went
+    on using 15: the fix was inert, and the startup banner printed
+
+        worker grace    15.0s  <- one hung chain call (60.0s, ICP_CALL_TIMEOUT) plus 5.0s
+
+    with the number and its own explanation disagreeing in one line, on the screen the
+    operator reads at every boot. That is the third instance of one defect class in this
+    area -- two numbers that must agree, in two files, with nothing making them agree --
+    after `graceful_timeout = 30` against a 20s wait and the entrypoint banner against
+    its own docstring.
+
+    SO COMPOSE NOW FORWARDS `"${ST_WORKER_GRACE_SECONDS:-}"` -- the operator's value or
+    an empty string -- and this function owns the default. One source for the number,
+    and the override path still works.
+
+    A MALFORMED VALUE REFUSES BY NAME. `float(os.getenv(...))` raised a bare ValueError
+    that named neither the variable nor the file, at import, which in the container means
+    gunicorn does not start and the entrypoint does not start -- the least debuggable
+    moment there is. Fail-closed is right; fail-closed without saying which variable is
+    not.
+    """
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name}={raw!r} is not a number of seconds. It is read at import by "
+            f"swap_terminal/stop_budget.py, so a bad value stops gunicorn and the worker "
+            f"entrypoint from starting at all. Unset it or leave it empty to use the "
+            f"default of {default}."
+        ) from exc
+
 #: The longest a SINGLE chain call can block. SIXTY, and the first version of this line
 #: said thirty.
 #:
@@ -120,14 +163,14 @@ RPC_OVERRUN_MARGIN_SECONDS = 5.0
 #: AND IT COSTS NOTHING WHEN THINGS WORK. An idle worker exits within one 0.25s poll of
 #: SIGTERM; a worker mid-cycle against a responsive daemon finishes its unit in well under
 #: a second. The grace is a CEILING on patience, not a duration anything waits out.
-WORKER_GRACE_SECONDS = float(os.getenv(
+WORKER_GRACE_SECONDS = _seconds_from_env(
     "ST_WORKER_GRACE_SECONDS",
-    str(LONGEST_RPC_TIMEOUT_SECONDS + RPC_OVERRUN_MARGIN_SECONDS),
-))
+    LONGEST_RPC_TIMEOUT_SECONDS + RPC_OVERRUN_MARGIN_SECONDS,
+)
 
 #: How long docker/web_workers_entrypoint.py waits for gunicorn to exit, AFTER the
 #: workers are proven gone, before it SIGKILLs gunicorn.
-GUNICORN_GRACE_SECONDS = float(os.getenv("ST_GUNICORN_GRACE_SECONDS", "20"))
+GUNICORN_GRACE_SECONDS = _seconds_from_env("ST_GUNICORN_GRACE_SECONDS", 20.0)
 
 #: How much earlier gunicorn's own graceful shutdown must finish than the wait above
 #: it. NOT tuning: it is the difference between a handoff and a race. gunicorn on
