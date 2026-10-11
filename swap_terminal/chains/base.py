@@ -527,6 +527,26 @@ def ownership_from_reply(method: str, reply: dict) -> tuple[bool, str, str] | No
     return bool(reply["ismine"]), f"{method} answered ismine", str(reply.get("account") or "")
 
 
+def _ask_plan(want: str):
+    """(methods to try in order, a predicate saying when enough is known) for `want`.
+
+    THE DECISION BEHIND address_report()'s COST, extracted so it can be called with
+    seeded inputs rather than inferred from a call count (rule 10). Its three cases and
+    the two measured regressions that produced them are in address_report()'s docstring.
+
+    AN UNKNOWN `want` BEHAVES AS "both", which is the only safe default: it gathers
+    MORE than asked rather than less, so a typo costs a round trip instead of returning
+    None for a fact the caller needed and will read as "nobody answered".
+    """
+    if want == "validity":
+        return ("validateaddress", "getaddressinfo"), (lambda valid, mine: valid is not None)
+    if want == "ownership":
+        return ("getaddressinfo", "validateaddress"), (lambda valid, mine: mine is not None)
+    return ("validateaddress", "getaddressinfo"), (
+        lambda valid, mine: valid is not None and mine is not None
+    )
+
+
 class AddressReport(NamedTuple):
     """Everything one Bitcoin-style daemon will say about an address, from ONE pass.
 
@@ -737,7 +757,10 @@ class RPCAdapter:
         None by design, because the XRP Ledger has no such question), so a
         warning here always means something is actually wrong.
         """
-        report = self.address_report(address)
+        # want="ownership" SO THIS KEEPS THE ONE-CALL COST IT ALWAYS HAD on a modern
+        # Core, where `ismine` is a getaddressinfo field. See address_report()'s `want`
+        # paragraph for the two round trips that parameter exists to not spend.
+        report = self.address_report(address, want="ownership")
         if report.mine is None:
             # THE WARNING STAYS AT WARNING, and the sentence is unchanged from the
             # 2026-10-01 measurement that earned it: a payout-address ownership
@@ -754,7 +777,7 @@ class RPCAdapter:
             return AddressOwnership(None, report.why_mine)
         return AddressOwnership(report.mine, report.why_mine, report.account)
 
-    def address_report(self, address: str) -> AddressReport:
+    def address_report(self, address: str, want: str = "both") -> AddressReport:
         """Both facts about `address`, from AT MOST TWO RPC calls and often one.
 
         THE ONE PLACE THAT KNOWS WHICH RPC METHODS CARRY WHICH FIELD, and the
@@ -763,17 +786,54 @@ class RPCAdapter:
         reply, which on an unreachable daemon was 120s against a 60s gunicorn
         worker timeout.
 
-        ORDER IS `validateaddress` THEN `getaddressinfo`, and it is not arbitrary.
-        `validateaddress` exists on every vintage this tree talks to -- including
-        Gridcoin, where `getaddressinfo` is ABSENT (measured: rpc code -32601) --
-        and on the older ones it carries `isvalid`, `ismine` and `account`
-        together. So the common case is ONE call, and the second is made only when
-        the first left a question open.
+        `want` SAYS WHICH FACTS THE CALLER NEEDS, and it decides BOTH the order and
+        the stopping point. Two drafts got this wrong in two different ways, and both
+        were caught by measurement rather than by reading:
 
-        STOPS AS SOON AS BOTH ARE KNOWN. A modern Bitcoin Core answers `isvalid`
-        from `validateaddress` and moved the wallet fields to `getaddressinfo` in
-        0.18, so there it is two calls -- which is still half of what the two
-        callers cost before.
+          the first had no parameter and always asked `validateaddress` first, so
+          address_ownership() cost TWO calls on a modern Core where it used to cost
+          one -- `ismine` is a getaddressinfo field there. Caught by
+          tests/test_address_validation.test_owns_address_never_reaches_a_key, which
+          asserts the exact method LIST and not a count.
+
+          the second fixed the order but still gathered both facts, so
+          validate_address() cost TWO on a modern Core where it used to cost one: it
+          got `isvalid` from the first reply and then asked again for an `ismine`
+          nobody wanted. Caught by instrumenting requests.post and counting.
+
+        So:
+
+          "validity"   `validateaddress`, and STOP once `isvalid` is known. What
+                       validate_address() asks. 1 call on every vintage.
+          "ownership"  `getaddressinfo` first, and STOP once `ismine` is known. What
+                       address_ownership() asks. 1 call on a modern Core, 2 on
+                       Gridcoin, where getaddressinfo does not exist.
+          "both"       `validateaddress` first, and stop once both are known. What
+                       the combined caller asks. 1 call on Gridcoin -- where
+                       `validateaddress` carries `isvalid`, `ismine` and `account`
+                       together -- and 2 on a modern Core.
+
+        MEASURED, with seeded daemon replies, against what the create path paid before
+        (validate_address() plus owns_address(), separately) -- and the first version
+        of this table was WRONG about the first row, which is why the row is here:
+
+            modern Core, reachable    2 calls  ->  2    NO WIN. Each method already
+                                                        stopped on its first reply.
+            Gridcoin, reachable       3 calls  ->  1
+            EITHER, UNREACHABLE       4 calls  ->  2    The case that mattered.
+
+        THE THIRD ROW IS THE ONE THAT KILLED A GUNICORN WORKER. When a daemon does not
+        answer, every method is tried and every one fails, so each of the two callers
+        paid both -- four connect timeouts. At the 30s that `requests` applied to a
+        scalar timeout that is 120s against a 60s worker timeout. With the connect leg
+        bounded separately (rpc_timeout.py, 5s) and this pass, the same failure costs
+        10s and the route returns its own sentence instead of a 500.
+
+        So this change is worth ~nothing on a healthy modern Core, a third on Gridcoin,
+        and half in the failure mode that was actually reported. That is a weaker claim
+        than the one this docstring made first, and it is the measured one.
+
+        Every standalone caller keeps exactly the cost it had.
 
         NEVER RAISES. Every failure is collected into `why_valid` / `why_mine` and
         the corresponding fact is None, which is what rule 12 requires of a broad
@@ -790,8 +850,9 @@ class RPCAdapter:
         why_mine = ""
         account = ""
 
-        for method in ("validateaddress", "getaddressinfo"):
-            if valid is not None and mine is not None:
+        methods, enough = _ask_plan(want)
+        for method in methods:
+            if enough(valid, mine):
                 break
             called.append(method)
             try:
@@ -842,7 +903,9 @@ class RPCAdapter:
         vintages: `validateaddress` carried `isvalid` on older builds, and
         Bitcoin Core moved wallet-related fields to `getaddressinfo` in 0.18.
         """
-        report = self.address_report(address)
+        # want="validity" SO THIS STAYS ONE CALL. Gathering `ismine` as well would ask
+        # a second method for a fact this function does not return.
+        report = self.address_report(address, want="validity")
         if report.valid is None:
             # UNCHANGED CONTRACT: unanswerable RAISES, and the message says in so many
             # words that it is not a statement about the address. That sentence is the

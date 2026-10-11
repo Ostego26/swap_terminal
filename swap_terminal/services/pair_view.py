@@ -68,11 +68,32 @@ instead of reasoning about adapters at all.
 from chains.registry import unconfigured_chains, why_cannot_pay_out, why_unconfigured
 from modules.htlc_assets import settlement_verdict
 
+from .chain_reachability import reachability_refusal
 from .quote_service import why_cannot_establish_payout_floor, why_cannot_quote
 from .swap_service import why_cannot_take_deposits
 
 
-def pair_serviceability(config, adapters, from_asset: str, to_asset: str) -> dict:
+def _unreachable_leg(reachability: dict, from_asset: str, to_asset: str) -> str:
+    """The first leg of this pair that did not answer, or "".
+
+    BOTH LEGS, AND THE SOURCE IS ASKED FIRST, because a source that cannot be reached
+    cannot produce a deposit address -- the step the operator's GRC -> LTC attempt
+    never got to, and the one whose absence they actually saw ("it never told me where
+    to send 500grc"). A destination that cannot be reached can neither validate a
+    payout address nor pay one.
+
+    ONE REASON AND NOT TWO, matching pair_serviceability()'s own stated rule: "the
+    first condition that refuses is the one reported", because two reasons for one
+    pair leaves the operator to work out which to act on.
+    """
+    for asset in (from_asset, to_asset):
+        refusal = reachability_refusal(reachability, asset)
+        if refusal:
+            return refusal
+    return ""
+
+
+def pair_serviceability(config, adapters, from_asset: str, to_asset: str, reachability: dict | None = None) -> dict:
     """Can THIS ordered pair actually complete in THIS process? The only copy.
 
     THREE CONDITIONS, AND A PAIR NEEDS ALL THREE. Each has its own authority and
@@ -144,29 +165,69 @@ def pair_serviceability(config, adapters, from_asset: str, to_asset: str) -> dic
     primary setting when it is absent rather than raising on a page.
     """
     missing = unconfigured_chains(adapters, from_asset, to_asset)
-    cannot_pay = "" if missing else why_cannot_pay_out(adapters, to_asset)
-    cannot_take = "" if missing or cannot_pay else why_cannot_take_deposits(config, adapters, from_asset)
-    cannot_quote = "" if missing or cannot_pay or cannot_take else why_cannot_quote(config, to_asset)
+    # THE SIXTH CONDITION, ADDED 2026-10-11, AND IT IS SECOND BECAUSE IT IS FREE.
+    #
+    # Operator, after a GRC -> LTC swap died with no deposit address and a 500:
+    # "have a robust and graceful way or verifying each step of the process was
+    # completed so nothing chokes."
+    #
+    # An adapter EXISTING and the chain ANSWERING are different facts, and this
+    # function could only ever check the first. Measured on their host: LTC and GRC
+    # both had adapters and neither daemon answered -- ConnectTimeout to
+    # host.docker.internal:19332 and :25715 -- so all five conditions below passed,
+    # the page badged the pair AVAILABLE, and create_swap then spent four 30s connect
+    # timeouts past gunicorn's 60s worker timeout and was killed mid-request.
+    #
+    # IT IS A DICT LOOKUP AND NOT A PROBE, which is what makes it placeable here at
+    # all. services/chain_reachability.py reads a row the payout and reconcile workers
+    # already write every cycle, from a call they were already making -- the fact was
+    # measured once a minute and dropped into a log (rule 7: "A measurement that only
+    # exists in a log is not learning"). Probing here would cost the sum of six RPC
+    # timeouts on a page render, which is precisely what admin_view.probe_chain() is
+    # kept off a page to avoid.
+    #
+    # `reachability=None` MEANS DO NOT CONSIDER IT, not "unreachable". Every caller
+    # that predates this keeps its exact behavior, and a caller with no database is
+    # not made to refuse every pair. reachability_refusal() is also silent for a
+    # missing or a stale row, for the reasons in its own docstring.
+    #
+    # AND IT SHORT-CIRCUITS THE ONE NETWORK READ BELOW: cannot_establish is the only
+    # condition here that touches a socket, and a chain already known not to answer no
+    # longer gets asked. So this makes the page cheaper as well as more truthful.
+    unreachable = "" if missing or reachability is None else _unreachable_leg(
+        reachability, from_asset, to_asset
+    )
+    cannot_pay = "" if missing or unreachable else why_cannot_pay_out(adapters, to_asset)
+    cannot_take = (
+        "" if missing or unreachable or cannot_pay
+        else why_cannot_take_deposits(config, adapters, from_asset)
+    )
+    cannot_quote = (
+        "" if missing or unreachable or cannot_pay or cannot_take
+        else why_cannot_quote(config, to_asset)
+    )
     # THE FIFTH CONDITION IS LAST BECAUSE IT IS THE ONLY ONE THAT COSTS A NETWORK
     # READ, and the short-circuit above means it is reached only for a pair that has
     # already passed every answerable test. See why_cannot_establish_payout_floor().
     cannot_establish = (
         ""
-        if missing or cannot_pay or cannot_take or cannot_quote
+        if missing or unreachable or cannot_pay or cannot_take or cannot_quote
         else why_cannot_establish_payout_floor(adapters, to_asset)
     )
     return {
         "missing": missing,
+        "unreachable": unreachable,
         "cannot_pay": cannot_pay,
         "cannot_take": cannot_take,
         "cannot_quote": cannot_quote,
         "cannot_establish": cannot_establish,
-        "serviceable": not missing and not cannot_pay and not cannot_take and not cannot_quote
-        and not cannot_establish,
+        "serviceable": not missing and not unreachable and not cannot_pay and not cannot_take
+        and not cannot_quote and not cannot_establish,
         "reason": (
             " Also: ".join(why_unconfigured(asset, config.get("RPC")) for asset in missing)
             if missing
-            else cannot_pay
+            else unreachable
+            or cannot_pay
             or cannot_take
             or cannot_quote
             or cannot_establish
@@ -177,7 +238,7 @@ def pair_serviceability(config, adapters, from_asset: str, to_asset: str) -> dic
     }
 
 
-def allowed_pair_rows(config, adapters) -> list[dict]:
+def allowed_pair_rows(config, adapters, reachability: dict | None = None) -> list[dict]:
     """Every allowed pair, as a row that says whether it can actually complete.
 
     TWO AUTHORITIES, NOT ONE, and the difference is the whole reason this function
@@ -230,7 +291,7 @@ def allowed_pair_rows(config, adapters) -> list[dict]:
         # the operator a pair was ENABLED that the customer page was refusing in the
         # same process. The row shape below is unchanged to the key, so this page,
         # /api/health and open_swap.py see exactly what they saw before.
-        verdict = pair_serviceability(config, adapters, from_asset, to_asset)
+        verdict = pair_serviceability(config, adapters, from_asset, to_asset, reachability)
         rows.append(
             {
                 "from_asset": from_asset,

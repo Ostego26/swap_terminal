@@ -4,8 +4,8 @@ Role: submodule (persistence; holds no decision of its own)
 Reads: swap_terminal.db
 Writes: swap_terminal.db -- creates quotes, swaps, deposit_events,
        unattributable_deposits, late_deposits, payouts, wallet_inventory,
-       market_context, swap_audit_log, wallet_inventory_corrections,
-       xrp_destination_tags
+       chain_reachability, market_context, swap_audit_log,
+       wallet_inventory_corrections, xrp_destination_tags
        and address_proof_challenges if they are absent, plus the two triggers
        that make an allocated XRP destination tag immutable and undeletable and
        the three that make an address-proof challenge single-use, unrepointable
@@ -502,6 +502,53 @@ CREATE TABLE IF NOT EXISTS wallet_inventory (
     hot_reserved REAL NOT NULL DEFAULT 0,
     hot_available REAL NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
+);
+
+-- WHETHER EACH CHAIN ANSWERED, LAST TIME ANYBODY ASKED. Added 2026-10-11 at the
+-- operator's instruction: "have a robust and graceful way or verifying each step of
+-- the process was completed so nothing chokes."
+--
+-- THE FACT WAS ALREADY BEING MEASURED AND THROWN AWAY, which is the whole argument
+-- for a table. services/payout_service.refresh_wallet_inventory() calls get_balance()
+-- on every configured chain on every payout and reconcile cycle, and when a chain does
+-- not answer it logs a WARNING -- once per process -- and drops the outcome. So the
+-- terminal learned every ~60s that LTC and GRC were unreachable, said so to a log file,
+-- and then offered GRC -> LTC on the customer page and spent 120s of RPC timeouts
+-- trying to create the swap. Rule 7 is explicit: "A measurement that only exists in a
+-- log is not learning. If it decides something, it belongs in SQL where the next run
+-- can read it."
+--
+-- WHY A TABLE AND NOT A PROBE AT RENDER TIME. services/admin_view.probe_chain() exists
+-- and is deliberately wired to ONE explicit endpoint, for the reason its own docstring
+-- gives: "a page whose load time is the sum of six RPC timeouts is a page an operator
+-- interrupts, which is rule 14's opening failure." The same is true of the customer's
+-- pair list and more so of a keystroke. Reading a row is free; asking a chain is not.
+--
+-- IT IS NOT AN AUTHORITY AND NOTHING IRREVERSIBLE READS IT (rule 15). It gates whether
+-- a swap may be ATTEMPTED, which is a refusal, and a stale row can only refuse a pair
+-- that would have worked or admit one that will fail at the next step with its own
+-- reason. No payout, no signature and no broadcast consults it -- those read the chain
+-- itself, because a row in a table is not a confirmation.
+--
+-- checked_at IS CARRIED SO STALENESS IS VISIBLE RATHER THAN INVISIBLE. A reader that
+-- cannot tell a reading from a minute ago from one from last week will trust both
+-- equally, which is rule 14's defect: "pasted output has to be self-describing a day
+-- later." Every consumer prints the age beside the verdict.
+CREATE TABLE IF NOT EXISTS chain_reachability (
+    asset TEXT PRIMARY KEY,
+    -- 1 answered, 0 did not. NOT NULL: a row's absence is already the third state
+    -- ("nobody has asked yet"), so a NULL here would be a second spelling of it.
+    reachable INTEGER NOT NULL,
+    -- What was asked, e.g. 'get_balance'. Recorded because "GRC is unreachable" is a
+    -- claim about a METHOD on an endpoint, and an operator reading it needs to know
+    -- which -- a chain whose get_balance refuses by design (SOL with no hot wallet)
+    -- is not an unreachable chain, and this column is what lets the two be told apart.
+    asked TEXT NOT NULL,
+    -- The reason, for an operator and for the customer-facing sentence. Never a
+    -- secret: it is an exception string from a transport or an RPC error, and
+    -- services/payout_service.py's caller is the only writer.
+    detail TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL
 );
 
 -- THE MARKET CONTEXT BEHIND A PRICE. Added 2026-09-27 at the operator's

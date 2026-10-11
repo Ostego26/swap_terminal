@@ -118,6 +118,7 @@ from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR, signing_seed, signing_s
 from chains.xrp_signing import CONFIRM_XRP_SEND
 from failure_signature import failure_signature
 from modules.address_authority import check_address
+from services.chain_reachability import record_reachability
 
 from .helpers import iso_to_epoch_nanos, utc_now_iso
 from .swap_service import SHARED_ACCOUNT_PAYOUT_ASSETS, payout_source_account, set_swap_status
@@ -1747,6 +1748,23 @@ def refresh_wallet_inventory(db, adapters: dict, should_stop=None):
             # the reason, which begins at 205. The key kept the only part that changed and
             # discarded the only part that identified the failure. failure_signature.py has
             # the measurement and says what it normalizes and what it deliberately keeps.
+            # THE OUTCOME IS NOW RECORDED AND NOT ONLY LOGGED. Operator, 2026-10-11:
+            # "have a robust and graceful way or verifying each step of the process was
+            # completed so nothing chokes."
+            #
+            # This loop already knew, every cycle, that LTC and GRC were not answering.
+            # It said so to a log file -- ONCE per process -- and dropped it, and the
+            # customer page then offered GRC -> LTC and spent 120s of connect timeouts
+            # failing to create it. Rule 7: "A measurement that only exists in a log is
+            # not learning. If it decides something, it belongs in SQL where the next
+            # run can read it."
+            #
+            # WRITTEN EVEN THOUGH THE WARNING IS SUPPRESSED, which is the point of
+            # putting it before that check: the suppression is about not repeating a
+            # SENTENCE to a human, and the row is a FACT whose freshness is what makes
+            # it usable. A row written once and never refreshed would go stale and stop
+            # gating -- see chain_reachability.STALE_AFTER_SECONDS.
+            record_reachability(db, asset, "get_balance", reachable=False, detail=str(exc)[:500])
             signature = failure_signature(asset, exc)
             if signature not in _REPORTED_INVENTORY_FAILURES:
                 _REPORTED_INVENTORY_FAILURES.add(signature)
@@ -1755,6 +1773,12 @@ def refresh_wallet_inventory(db, adapters: dict, should_stop=None):
                     "ONCE per process rather than every cycle: %s", asset, exc
                 )
             continue
+        # AND THE SUCCESS IS RECORDED TOO, which is what makes the row a reading rather
+        # than a list of complaints. Without this a chain that came back would keep its
+        # last failure until the row went stale, so a recovered daemon would stay
+        # "unreachable" for up to STALE_AFTER_SECONDS -- a gate that outlives its cause
+        # is the thing rule 19 calls a patch.
+        record_reachability(db, asset, "get_balance", reachable=True)
         row = db.execute("SELECT * FROM wallet_inventory WHERE asset = ?", (asset,)).fetchone()
         reserved = float(row["hot_reserved"]) if row else 0.0
         available = balance - reserved

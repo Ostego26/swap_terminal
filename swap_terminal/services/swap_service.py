@@ -745,7 +745,11 @@ def ask_the_chain_once(adapter, to_asset: str, address: str):
         if not adapter.validate_address(address):
             raise ValueError(f"Invalid {to_asset} payout address")
         return None
-    report = combined(address)
+    # want="both" IS THE DEFAULT AND IS PASSED EXPLICITLY, because this call site is
+    # the entire reason address_report() exists: it is the one that needs BOTH facts
+    # and used to get them from two methods making four round trips. Leaving it
+    # implicit would make the one deliberate "both" in the tree look incidental.
+    report = combined(address, want="both")
     if report.valid is None:
         # THE SAME CONTRACT validate_address() HAS ALWAYS HAD, word for word:
         # unanswerable RAISES, and the message says it is not a statement about the

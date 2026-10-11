@@ -82,6 +82,7 @@ from flask import Blueprint, current_app, jsonify, redirect, render_template, re
 from modules.address_authority import check_address
 from modules.htlc_assets import custodial_customer_note
 from services.address_check import live_address_verdict
+from services.chain_reachability import reachability_rows
 from services.pair_view import (
     CUSTOMER_STATES,
     allowed_pair_rows,
@@ -173,7 +174,15 @@ def render_step(answers: dict, error: str = "") -> str:
     this function was handed rather than a branch it made (base.html's header).
     """
     step = current_step(answers)
-    rows = allowed_pair_rows(current_app.config, current_app.config["ADAPTERS"])
+    # THE STORED REACHABILITY READING IS PASSED IN, so a pair whose chain is not
+    # answering is not offered. It is a single SELECT over at most six rows, written by
+    # the payout and reconcile workers from a call they already make -- see
+    # services/chain_reachability.py for why it is a row and not a probe. Omitting it
+    # is what let the customer page badge GRC -> LTC available while both daemons were
+    # timing out (operator's host, 2026-10-11).
+    rows = allowed_pair_rows(
+        current_app.config, current_app.config["ADAPTERS"], reachability_rows(get_db())
+    )
     lamps = source_lamps(rows)
     from_asset = answers.get("from_asset", "")
     options = destinations_for(rows, from_asset) if from_asset else []
@@ -420,7 +429,15 @@ def _first_bad_answer(answers: dict) -> tuple[dict, str]:
     services/wizard.py's reject_* functions, which is what lets every one of
     those judgments be tested without a Flask client.
     """
-    rows = allowed_pair_rows(current_app.config, current_app.config["ADAPTERS"])
+    # THE STORED REACHABILITY READING IS PASSED IN, so a pair whose chain is not
+    # answering is not offered. It is a single SELECT over at most six rows, written by
+    # the payout and reconcile workers from a call they already make -- see
+    # services/chain_reachability.py for why it is a row and not a probe. Omitting it
+    # is what let the customer page badge GRC -> LTC available while both daemons were
+    # timing out (operator's host, 2026-10-11).
+    rows = allowed_pair_rows(
+        current_app.config, current_app.config["ADAPTERS"], reachability_rows(get_db())
+    )
     for step in STEPS:
         needs = step["needs"]
         if not needs or not answers.get(needs):
