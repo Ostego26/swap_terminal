@@ -157,6 +157,23 @@ ICP_DISCOVERY = {
     "ICP_OWNER_PRINCIPAL": ["dfx", "identity", "get-principal"],
 }
 
+#: Help text for a variable that CAN be discovered but was not, so the question is
+#: answerable. Each names the command that would have discovered it, because an operator
+#: looking at "ICP_LEDGER_CANISTER_ID >" with no help has no way to answer and a canister
+#: id is not guessable -- every fresh replica issues different ones, which is why nothing
+#: in this tree hardcodes one.
+FALLBACK_HELP = {
+    "ICP_LEDGER_CANISTER_ID": (
+        "the ledger canister id. `python3 swap_stack.py status` prints it, or "
+        "`docker compose exec -T icp-replica dfx canister id icp_ledger_canister`. The replica did "
+        "not answer, so it could not be read here. Leave BLANK to leave ICP unconfigured."
+    ),
+    "ICP_OWNER_PRINCIPAL": (
+        "the desk's own principal. `docker compose exec -T icp-replica dfx identity get-principal`. "
+        "The replica did not answer. Leave BLANK to leave ICP unconfigured."
+    ),
+}
+
 #: Variables with no default and no discovery, in the order an operator can answer them.
 #: Each carries what it is and how to find it, because "SOL_DEPOSIT_ACCOUNT=" on its own
 #: is a question nobody can answer from the prompt alone (rule 14).
@@ -393,6 +410,77 @@ def write_env(values: dict[str, str]) -> None:
         os.umask(previous)
 
 
+def asked_for(discovered: dict, already: dict) -> list[tuple[str, str]]:
+    """ASKED, plus any RPC port that discovery missed. Nothing falls between the two.
+
+    =========================================================================
+    A VARIABLE IN NEITHER LIST WAS SILENTLY ABSENT, FOUND ON THE OPERATOR'S FIRST
+    GOOD RUN
+    =========================================================================
+
+    COMPUTED AS A COMPLEMENT, NOT AS A SECOND LIST, and that is the whole shape of the
+    fix. "Everything this tool can set, minus what was discovered, minus what is already
+    in .env" has no gap by construction -- where a hand-maintained second list would
+    close the three ports and leave the next discovery-only variable in the same hole.
+    I wrote it as that second list first and the ICP values immediately fell through it:
+    they are discovered from the replica, so a replica that does not answer left them
+    reported-as-unset and never asked for.
+
+    The three Bitcoin-family ports were discovery-only: probed against
+    network_target.CHAIN_PORTS, and not in ASKED because probing was expected to answer.
+    When it did not, the variable appeared in no list at all. Their run printed
+
+        WOULD WRITE      7 discovered value(s) and 9 asked value(s)
+
+    with BTC_RPC_PORT in neither -- nothing was listening on 18443 or 18332, so their
+    bitcoind was down or on another port. BTC would have stayed unset, the container
+    would have built no BTC adapter, and the ATM page would have shown BTC as NONE after
+    a configuration run that reported success. That is the SAME DEFECT THIS WHOLE TOOL
+    EXISTS FOR -- a variable nothing sets and nothing mentions -- reproduced inside the
+    fix for it, and it is rule 14's "treat 'skipped' plus 'success' in the same output as
+    a defect in the output".
+
+    SO DISCOVERY IS A SHORTCUT, NOT A GATE. A probed port saves the operator a question;
+    a probe that finds nothing turns back into the question. The hint comes from
+    ChainPorts.test_hint, so the prompt names the ports that chain actually uses rather
+    than asking for a number with no help -- and that hint is the same string the
+    workers' banner and create_swap()'s refusal print, which is why it lives in that
+    table (rule 8).
+
+    ORDER IS ASKED-FIRST, THEN THE MISSED PORTS, so a second run looks the same as the
+    first for everything that did not change.
+    """
+    asked = {name for name, _what in ASKED}
+    missed = []
+    for variable in every_variable_this_tool_can_set():
+        if variable in asked or variable in discovered or already.get(variable):
+            continue
+        missed.append((variable, FALLBACK_HELP.get(variable, _port_help(variable))))
+    return [*ASKED, *missed]
+
+
+def _port_help(variable: str) -> str:
+    """Help text for an RPC port whose probe found nothing, from CHAIN_PORTS' own hint.
+
+    THE HINT IS THE SAME STRING the workers' banner and create_swap()'s refusal print,
+    which is why it lives in that table rather than here (rule 8) -- and why its own
+    comment records being wrong once: it named only 25779 while the operator's Gridcoin
+    test daemon listens on 25715, on the one line whose job is to say what to set.
+
+    FALLS BACK TO A BARE SENTENCE for a variable that is not a port at all, so a name
+    added to every_variable_this_tool_can_set() without an entry in FALLBACK_HELP gets a
+    usable prompt rather than a KeyError. An unhelpful prompt is a defect; a crash in a
+    configuration tool is a worse one.
+    """
+    for asset, ports in CHAIN_PORTS.items():
+        if ports.port_variable == variable:
+            return (
+                f"{asset}'s RPC port -- nothing is listening on {ports.test_hint}, so its daemon "
+                f"is down or on another port. Leave BLANK to leave {asset} unconfigured."
+            )
+    return f"{variable} -- could not be discovered. Leave BLANK to leave it unset."
+
+
 def say_banner(apply: bool, already: dict) -> None:
     """What this run is about to do, before it does any of it (rule 14).
 
@@ -438,7 +526,23 @@ def discover_all() -> dict[str, tuple[str, str]]:
     return found
 
 
-def say_dry_run(needed: list, values: dict, secrets: set) -> None:
+def every_variable_this_tool_can_set() -> list[str]:
+    """Every name this tool could put in .env, so "still unset" can be computed honestly.
+
+    DERIVED FROM THE THREE SOURCES rather than listed, because a fourth list would be the
+    one that goes stale: ASKED, the RPC ports in CHAIN_PORTS, and the discovery defaults.
+    A variable added to any of them is covered here without being added twice (rule 8).
+    """
+    return [
+        *(name for name, _what in ASKED),
+        *(ports.port_variable for ports in CHAIN_PORTS.values()),
+        *ENDPOINT_DEFAULTS,
+        *ICP_DISCOVERY,
+        "ICP_DFX_SERVICE",
+    ]
+
+
+def say_dry_run(needed: list, values: dict, secrets: set, already: dict) -> None:
     """What an --apply run would ask for and write. Rule 14: `(none)` is a result.
 
     A SECRET IS NAMED AND ITS PURPOSE IS NOT, which is the one place this output is
@@ -454,6 +558,16 @@ def say_dry_run(needed: list, values: dict, secrets: set) -> None:
     say("")
     say(f"  WOULD WRITE      {len(values)} discovered value(s) and {len(needed)} asked value(s)")
     say("  Nothing was written. Re-run with --apply to be prompted and have .env updated.")
+    say("")
+    say("  AFTERWARDS, STILL UNSET  <- the chains these belong to stay unconfigured, and the")
+    say("                           ATM page will show them as NONE. That is a result, not a")
+    say("                           failure of this run (rule 14).")
+    will_be_set = set(values) | {name for name, _what in needed} | set(already)
+    still_unset = sorted(set(every_variable_this_tool_can_set()) - will_be_set)
+    for name in still_unset:
+        say(f"    {name}")
+    if not still_unset:
+        say("    (none)  <- every variable this tool can set is accounted for")
 
 
 def collect_answers(needed: list, secrets: set) -> dict[str, str]:
@@ -529,11 +643,11 @@ def main() -> int:
     say_banner(args.apply, already)
 
     discovered = discover_all()
-    needed = [(name, what) for name, what in ASKED if not already.get(name)]
     values = {name: value for name, (value, _why) in discovered.items() if not already.get(name)}
+    needed = [(name, what) for name, what in asked_for(discovered, already) if not already.get(name)]
 
     if not args.apply:
-        say_dry_run(needed, values, secrets)
+        say_dry_run(needed, values, secrets, already)
         return 0
 
     values.update(collect_answers(needed, secrets))

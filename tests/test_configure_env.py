@@ -357,3 +357,137 @@ def test_two_listening_test_ports_for_one_chain_are_not_resolved_by_guessing(env
     monkeypatch.setattr(configure_env, "listening_ports", lambda: set(btc.test_ports))
 
     assert "BTC_RPC_PORT" not in configure_env.discover_ports()
+
+
+# =============================================================================
+# A VARIABLE IN NEITHER LIST WAS SILENTLY ABSENT
+# =============================================================================
+#
+# FOUND ON THE OPERATOR'S FIRST SUCCESSFUL RUN. The three Bitcoin-family ports were
+# discovery-only -- probed against CHAIN_PORTS, and absent from ASKED because probing was
+# expected to answer. Nothing was listening on 18443 or 18332, so their run printed
+#
+#     WOULD WRITE      7 discovered value(s) and 9 asked value(s)
+#
+# with BTC_RPC_PORT in NEITHER list. BTC would have stayed unset, the container would have
+# built no BTC adapter, and the ATM page would have shown BTC as NONE after a
+# configuration run that reported success. That is the defect this whole tool exists for
+# -- a variable nothing sets and nothing mentions -- reproduced inside the fix for it, and
+# rule 13's "treat 'skipped' plus 'success' in the same output as a defect in the output".
+#
+# AND THE FIRST REPAIR HAD THE SAME HOLE. A hand-written second list covering the three
+# ports left the two ICP values -- which are discovered from the replica -- falling through
+# it: a replica that does not answer reported them as unset and never asked. The ask list
+# is now the COMPLEMENT of what this tool can set, which has no gap by construction.
+
+
+def test_a_port_that_discovery_misses_becomes_a_question(env_file, monkeypatch, capsys):
+    """THE REGRESSION TEST. MUTATION: make asked_for() return ASKED unchanged.
+
+    Nothing listening anywhere is exactly the operator's BTC case: their daemon was down
+    or on another port, and a probe cannot tell those apart -- which is why the answer is
+    to ask rather than to guess.
+    """
+    monkeypatch.setattr(configure_env, "listening_ports", set)
+    monkeypatch.setattr("sys.argv", ["configure_env.py"])
+
+    configure_env.main()
+    would_ask = capsys.readouterr().out.split("WOULD ASK FOR", 1)[1]
+
+    for ports in CHAIN_PORTS.values():
+        assert ports.port_variable in would_ask, (
+            f"{ports.port_variable} was neither discovered nor asked for, so the chain would stay "
+            f"unconfigured after a run that reported success"
+        )
+    # AND THE PROMPT IS ANSWERABLE, which is the half a bare name does not satisfy: the
+    # hint comes from ChainPorts.test_hint, the same string the workers' banner prints.
+    assert "18443 regtest, 18332 testnet" in would_ask
+    assert "down or on another port" in would_ask
+
+
+def test_an_undiscoverable_icp_value_also_becomes_a_question(env_file, monkeypatch, capsys):
+    """The case the FIRST repair missed, which is why the list is a complement now.
+
+    The ICP values are read from the running replica. A replica that does not answer is
+    an ordinary state -- it is started for a session of work and stopped after -- so
+    "could not discover" must turn into a question, not into silence.
+    """
+    monkeypatch.setattr(configure_env, "discover_icp", lambda: {})
+    monkeypatch.setattr("sys.argv", ["configure_env.py"])
+
+    configure_env.main()
+    would_ask = capsys.readouterr().out.split("WOULD ASK FOR", 1)[1]
+
+    for variable in ("ICP_LEDGER_CANISTER_ID", "ICP_OWNER_PRINCIPAL"):
+        assert variable in would_ask, f"{variable} was reported unset and never asked for"
+    # A canister id is not guessable -- every fresh replica issues different ones -- so the
+    # prompt has to name the command that prints it.
+    assert "dfx canister id icp_ledger_canister" in would_ask
+    assert "swap_stack.py status" in would_ask
+
+
+def test_nothing_this_tool_can_set_falls_between_discovery_and_the_prompt(env_file, monkeypatch, capsys):
+    """THE GENERAL GATE. MUTATION: add a name to every_variable_this_tool_can_set() only.
+
+    This is the assertion the two above are instances of, and it is the one that survives
+    somebody adding a fourteenth variable: after a run, every name this tool can set is
+    either already in .env, discovered, or queued to be asked. A name in none of those is
+    the hole, whatever its chain.
+    """
+    monkeypatch.setattr(configure_env, "listening_ports", set)
+    monkeypatch.setattr(configure_env, "discover_icp", lambda: {})
+    monkeypatch.setattr("sys.argv", ["configure_env.py"])
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+
+    assert "(none)  <- every variable this tool can set is accounted for" in printed, (
+        "the run reported at least one variable it will neither set nor ask about, which is how "
+        "BTC_RPC_PORT reached the operator"
+    )
+
+
+def test_the_still_unset_section_is_honest_when_something_IS_left_out(env_file, monkeypatch, capsys):
+    """The control: the section must be capable of reporting something.
+
+    Without this, `(none)` above could be a constant and the gate would pass forever.
+    Removing a variable from the ask list is the mutation, done here by patching
+    asked_for() to drop one -- so the section has to name it.
+    """
+    monkeypatch.setattr(configure_env, "listening_ports", set)
+    monkeypatch.setattr(
+        configure_env, "asked_for",
+        lambda _discovered, _already: [(name, what) for name, what in configure_env.ASKED
+                                       if name != "SOL_HOT_WALLET"],
+    )
+    monkeypatch.setattr("sys.argv", ["configure_env.py"])
+
+    configure_env.main()
+    still_unset = capsys.readouterr().out.split("AFTERWARDS, STILL UNSET", 1)[1]
+
+    assert "SOL_HOT_WALLET" in still_unset, "a genuinely unset variable was not reported"
+    assert "(none)" not in still_unset
+
+
+def test_every_help_string_tells_the_operator_what_to_do(env_file):
+    """A prompt is only as good as its help, and these are the ones nobody can guess.
+
+    MUTATION: empty any FALLBACK_HELP value. A port can at least be looked up; a canister
+    id cannot, so an empty help string there is a question with no answerable form.
+    """
+    for variable, help_text in configure_env.FALLBACK_HELP.items():
+        assert help_text.strip(), f"{variable} has empty help"
+        assert "BLANK" in help_text, (
+            f"{variable}'s help does not say that leaving it blank is allowed, so an operator who "
+            f"cannot answer has no stated way past it"
+        )
+
+    # And the port fallback, which is generated rather than listed.
+    for ports in CHAIN_PORTS.values():
+        generated = configure_env._port_help(ports.port_variable)
+        assert ports.test_hint in generated, "the generated port help does not name the test ports"
+        assert "BLANK" in generated
+
+    # A name with no entry anywhere must still get a usable prompt rather than a KeyError:
+    # a crash in a configuration tool is worse than an unhelpful prompt.
+    assert configure_env._port_help("SOMETHING_NEW").strip()
