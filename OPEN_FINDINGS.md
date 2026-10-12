@@ -1284,6 +1284,55 @@ wrote. **CLAUDE.md's rule 18 count is wrong today and should be corrected to thi
 measurement when that lands**, in the same self-correcting style the file already
 uses twice.
 
+### 24. Finding 6b happened three more times, in my own commits, on 2026-10-12
+
+**The mechanism was built and I went around it.** Finding 6b records three commit
+messages that "stated a test count nobody counted", and `suite_baseline.py` exists to
+end that. Three of my commits the same day did it again, every one the same way:
+`record` prints
+
+    recorded          5568 tests
+
+which is tests **COLLECTED**, and I wrote it into the commit message as *passed*.
+Measured afterwards with `python3 -m pytest` and the junit report:
+
+| commit | claimed | actual |
+|---|---|---|
+| `1ecf267` | `suite 5548 passed, 4 skipped, 0 failed` | 5544 passed, 4 skipped (5548 collected) |
+| `27d8bba` | `suite 5563 passed, 4 skipped, 0 failed` | 5561 passed, 4 skipped (5565 collected) |
+| `ffe0717` | `suite 5577 passed, 4 skipped, 0 failed` | 5564 passed, 4 skipped (5568 collected) |
+
+**Two of the three were not even the collected number — they were invented.** Rule 17's
+exact failure: a hypothesis written in the register of a measurement, where the reader
+cannot tell which they are holding. A count in a commit message is read as a
+measurement permanently.
+
+**The claim that was true in all three: `0 failed`.** Every one of those runs was green,
+and `suite_baseline.py record` refuses to record a broken run silently (`broken at
+record` was `(none)` each time). So the commits did not hide a regression — they
+misreported the size of a passing suite. That distinction is stated because it is the
+difference between a wrong number and a false all-clear, and only the first happened.
+
+**NOT FIXED BY AMENDING.** Rule 4 allows one rewrite of shared history and it is for
+purging a secret. All three commits are pushed; the record is corrected here instead.
+
+**Fixed so the cause stops existing:** `suite_baseline.commit_line()` prints one
+labelled line from the junit report the baseline is built from —
+
+    for the commit    suite 5564 passed, 4 skipped, 0 errored, 0 failed (5568 collected)
+
+— in the form a commit message quotes verbatim, with passed and collected as visibly
+different numbers and every broken outcome named even at zero. The two numbers used to
+be printed hundreds of lines apart, one by `record` and one by pytest, and the message
+was typed from memory of one of them. `tests/test_suite_baseline.py` asserts the
+collected total can never read as the passed count, that a broken run cannot be quoted
+as clean, and that the broken outcomes are derived from `BROKEN` rather than spelled.
+
+**What remains:** nothing in this repository checks a commit message against the suite.
+A hook could, and none is proposed here — the number now exists in one pasteable line,
+and the next count that is wrong will be wrong because somebody retyped a line they
+could have copied, which is a different problem from the one that was fixed.
+
 ---
 
 ## Closed

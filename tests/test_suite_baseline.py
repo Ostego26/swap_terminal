@@ -31,6 +31,12 @@ from conftest import root_entry_point
 
 suite_baseline = root_entry_point("suite_baseline.py")
 
+#: Bound once, for the reason the module itself is bound once: these three gates are
+#: about ONE function, and `suite_baseline.commit_line` at every call site reads as
+#: though the module were being reloaded.
+commit_line = suite_baseline.commit_line
+BROKEN = suite_baseline.BROKEN
+
 PASSED = suite_baseline.PASSED
 compare = suite_baseline.compare
 
@@ -285,3 +291,66 @@ def test_the_module_part_of_a_node_id_survives_parameters():
     assert suite_baseline._module_of("tests.test_a::test_x[a,b]") == "tests.test_a"
     assert suite_baseline._module_of("tests.test_a") == "tests.test_a"
     assert suite_baseline._module_of("") == ""
+
+
+# --- the line a commit message quotes ------------------------------------------
+
+
+def test_the_commit_line_states_passed_and_collected_as_DIFFERENT_numbers():
+    """THE DEFECT WAS MINE, THREE TIMES IN ONE DAY, and it is finding 6b again.
+
+    `record` printed `recorded N tests` -- tests COLLECTED -- and three of my commit
+    messages on 2026-10-12 wrote that number as "N passed". Measured afterwards against
+    the real pytest summary:
+
+        1ecf267   claimed 5548 passed   actual 5544 passed, 4 skipped
+        27d8bba   claimed 5563 passed   actual 5561 passed, 4 skipped
+        ffe0717   claimed 5577 passed   actual 5564 passed, 4 skipped
+
+    Two were not even the collected number. Rule 17's exact failure: a hypothesis in the
+    register of a measurement, and a count in a commit message is read as a measurement
+    forever.
+
+    SO THE TWO NUMBERS MUST BE DISTINGUISHABLE IN ONE LINE. A line carrying only one of
+    them is what invited the conversion, and a reader who sees both can tell at a glance
+    that 5564 + 4 = 5568.
+    """
+    outcomes = {f"t{index}": "passed" for index in range(10)}
+    outcomes["s1"] = "skipped"
+    outcomes["s2"] = "skipped"
+
+    line = commit_line(outcomes)
+
+    assert "10 passed" in line
+    assert "2 skipped" in line
+    assert "12 collected" in line, "collected must be stated and LABELLED, not implied"
+    assert "12 passed" not in line, (
+        "the collected total must never read as the passed count -- that conversion is "
+        "the entire defect this line exists to remove"
+    )
+
+
+def test_every_broken_outcome_is_named_even_at_zero():
+    """Rule 14: `0 failed` is a result; a missing word is ambiguous with not-measured.
+
+    Derived from BROKEN rather than spelled, so a fourth outcome cannot be silently
+    left out of the one line a commit message quotes.
+    """
+    line = commit_line({"a": "passed"})
+
+    for outcome in BROKEN:
+        assert f"0 {outcome}" in line, f"{outcome} must appear even when there are none"
+
+
+def test_a_broken_run_cannot_be_quoted_as_clean():
+    """The line has to be unusable as a green claim when the suite is not green.
+
+    A commit message quoting it verbatim then cannot say "0 failed" over a red run,
+    which is the half of finding 6b that matters: "Counting failures hides a new break
+    that lands the same day an old one is fixed."
+    """
+    line = commit_line({"a": "passed", "b": "failed", "c": "errored"})
+
+    assert "1 failed" in line
+    assert "1 errored" in line
+    assert "0 failed" not in line

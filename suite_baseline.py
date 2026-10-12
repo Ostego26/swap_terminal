@@ -381,12 +381,64 @@ def cmd_record(pytest_args: tuple[str, ...]) -> int:
     broken = sorted(node for node, outcome in outcomes.items() if outcome in BROKEN)
     write_baseline(BASELINE_PATH, outcomes)
     print(f"  recorded          {len(outcomes)} tests")
+    # THE LINE A COMMIT MESSAGE QUOTES, VERBATIM. See commit_line() for the three of my
+    # own commits that stated a count nobody counted, and why printing the collected
+    # total alone invited it.
+    print(f"  for the commit    {commit_line(outcomes)}")
     _say_group("broken at record", tuple(broken))
     if broken:
         print("                    ^ these are recorded AS broken, which is honest and is not")
         print("                      an excuse: `check` will report them as `still broken`")
         print("                      every run until they are fixed.")
     return 0
+
+
+def commit_line(outcomes: dict[str, str]) -> str:
+    """ONE line stating the suite's result, with nothing left to paraphrase.
+
+    =========================================================================
+    THIS EXISTS BECAUSE I MADE FINDING 6b'S MISTAKE THREE MORE TIMES
+    =========================================================================
+
+    OPEN_FINDINGS finding 6b records three commit messages that "stated a test count
+    nobody counted", and this whole file was written to end that. On 2026-10-12 three
+    more of my own commits did it again, every one the same way: `record` prints
+
+        recorded          5568 tests
+
+    which is tests COLLECTED, and I wrote it into a commit message as "5568 passed".
+    Measured against the real pytest summary afterwards:
+
+        commit    claimed             actual
+        1ecf267   5548 passed          5544 passed, 4 skipped
+        27d8bba   5563 passed          5561 passed, 4 skipped
+        ffe0717   5577 passed          5564 passed, 4 skipped
+
+    Two of the three were not even the collected number -- they were invented. Rule 17
+    is about exactly this: "presenting a hypothesis in the register of a measurement, so
+    the reader cannot tell which they are holding." A count in a commit message is read
+    as a measurement forever.
+
+    THE MECHANISM WAS THE PROBLEM, NOT THE CARE. `record` printed a collected total and
+    pytest printed a passed/skipped summary, in different places, hundreds of lines
+    apart, and the commit message was typed from memory of one of them. So this prints
+    ONE labelled line, from the junit report the baseline itself is built from, in the
+    form a commit message quotes verbatim. There is nothing left to convert.
+
+    COLLECTED IS STATED TOO, and labelled, because it is the number `check` compares and
+    an operator reading both wants to see they agree. Omitting it would just move the
+    confusion.
+    """
+    counts: dict[str, int] = {}
+    for outcome in outcomes.values():
+        counts[outcome] = counts.get(outcome, 0) + 1
+    parts = [f"{counts.get(PASSED, 0)} passed"]
+    # EVERY NON-PASSED OUTCOME, INCLUDING ZEROES FOR THE BROKEN ONES. Rule 14: "0
+    # failed" is a result and a missing word is ambiguous between zero and not measured
+    # -- which is the whole subject of this function.
+    parts.append(f"{counts.get('skipped', 0)} skipped")
+    parts.extend(f"{counts.get(outcome, 0)} {outcome}" for outcome in sorted(BROKEN))
+    return f"suite {', '.join(parts)} ({len(outcomes)} collected)"
 
 
 def cmd_check(pytest_args: tuple[str, ...]) -> int:
