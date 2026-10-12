@@ -88,6 +88,12 @@ from typing import NamedTuple
 # settings cover it for root entry points), so this is a plain comment rather
 # than a noqa claiming a check nobody asked for (rule 19).
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
+# .env BEFORE config, because config.Config is a class body evaluated once at import:
+# a load afterwards changes nothing and looks like it worked. Measured 2026-10-12 --
+# 2 of 34 root tools did this and 32 did not, so the same .env produced different
+# adapters depending on which tool you ran. env_preamble's header has the measurement,
+# why it is an import rather than a call, and the posture it states.
+import env_preamble  # noqa: F401  # isort: skip  -- MUST stay above `from config import Config`
 
 from chains.gridcoin import GridcoinAdapter
 from chains.registry import missing_settings

@@ -121,6 +121,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 # NO E402 SUPPRESSION ON ANY OF THESE, and that is checked rather than copied. Every
 # other root tool in this tree carries one on the imports after its sys.path.insert,
+# .env BEFORE config, because config.Config is a class body evaluated once at import:
+# a load afterwards changes nothing and looks like it worked. Measured 2026-10-12 --
+# 2 of 34 root tools did this and 32 did not, so the same .env produced different
+# adapters depending on which tool you ran. env_preamble's header has the measurement,
+# why it is an import rather than a call, and the posture it states.
+import env_preamble  # noqa: F401  # isort: skip  -- MUST stay above `from config import Config`
 # so adding one was the first draft here too -- and ruff's RUF100 reported all six as UNUSED,
 # because E402 is not enabled for this path. tests/test_step_console.py records the
 # same discovery from the same mistake. A suppression for a finding that does not fire

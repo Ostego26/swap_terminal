@@ -52,6 +52,12 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
+# .env BEFORE config, because config.Config is a class body evaluated once at import:
+# a load afterwards changes nothing and looks like it worked. Measured 2026-10-12 --
+# 2 of 34 root tools did this and 32 did not, so the same .env produced different
+# adapters depending on which tool you ran. env_preamble's header has the measurement,
+# why it is an import rather than a call, and the posture it states.
+import env_preamble  # noqa: F401  # isort: skip  -- MUST stay above `from config import Config`
 
 from chains.registry import build_adapters, missing_settings, why_cannot_pay_out, why_unconfigured
 from chains.solana_units import SOL_DECIMALS, base_units_to_amount

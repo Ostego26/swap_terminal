@@ -108,6 +108,13 @@ from typing import Any, Protocol
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
+# .env BEFORE config, because config.Config is a class body evaluated once at import:
+# a load afterwards changes nothing and looks like it worked. Measured 2026-10-12 --
+# 2 of 34 root tools did this and 32 did not, so the same .env produced different
+# adapters depending on which tool you ran. env_preamble's header has the measurement,
+# why it is an import rather than a call, and the posture it states.
+import env_preamble  # noqa: F401  # isort: skip  -- MUST stay above `from config import Config`
+
 from chains.daemon_conf import conf_fallback_settings, rpc_url
 from chains.registry import missing_settings, why_unconfigured
 from chains.wallet_hint import which_wallets_are_on_disk

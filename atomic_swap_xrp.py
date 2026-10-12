@@ -258,6 +258,12 @@ if str(APP_ROOT) not in sys.path:
     # The rootless-import gap rule 10 names, and which regtest_htlc_verify.py
     # and xrp_htlc_escrow.py both document at their own copy of these lines.
     sys.path.insert(0, str(APP_ROOT))
+# .env BEFORE config, because config.Config is a class body evaluated once at import:
+# a load afterwards changes nothing and looks like it worked. Measured 2026-10-12 --
+# 2 of 34 root tools did this and 32 did not, so the same .env produced different
+# adapters depending on which tool you ran. env_preamble's header has the measurement,
+# why it is an import rather than a call, and the posture it states.
+import env_preamble  # noqa: F401, E402  # isort: skip  -- MUST stay above `from config import Config`; E402 because this file's sys.path line is inside an `if`, which ruff does not accept as preamble -- the same reason every import below it already carries one
 
 from chains.base import RPCAdapter  # noqa: E402 -- the sys.path line above must run first
 from chains.daemon_conf import conf_fallback_settings  # noqa: E402 -- same

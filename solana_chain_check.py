@@ -72,6 +72,12 @@ REPO_ROOT = Path(__file__).resolve().parent
 APP_ROOT = REPO_ROOT / "swap_terminal"
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
+# .env BEFORE config, because config.Config is a class body evaluated once at import:
+# a load afterwards changes nothing and looks like it worked. Measured 2026-10-12 --
+# 2 of 34 root tools did this and 32 did not, so the same .env produced different
+# adapters depending on which tool you ran. env_preamble's header has the measurement,
+# why it is an import rather than a call, and the posture it states.
+import env_preamble  # noqa: F401, E402  # isort: skip  -- MUST stay above `from config import Config`; E402 because this file's sys.path line is inside an `if`, which ruff does not accept as preamble -- the same reason every import below it already carries one
 
 # All five imports are reachable only because of the sys.path line above;
 # hoisting them would break the import it enables. That is what the E402

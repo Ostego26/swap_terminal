@@ -151,6 +151,22 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
+# .env FIRST, BEFORE config, AND THIS TOOL WAS UNUSABLE WITHOUT IT.
+#
+# Measured on the operator's host 2026-10-12, in the same minute `swap_stack.py pairs`
+# reported `adapters here GRC, ICP, LTC, SOL, XRP` from the same .env:
+#
+#     adapters here   (none) -- no chain is configured in this process
+#     REFUSED: GRC has no adapter in this process: GRC_RPC_PORT, GRC_RPC_USER and
+#     GRC_RPC_PASS are unset (or 0) ...
+#
+# IMPORTING env_preamble IS THE LOAD. config.Config is a class body evaluated once at
+# import, so it has to happen before `from config import Config` -- and it is an import
+# rather than a call because ruff's E402 permits only a sys.path preamble, so a bare
+# function call here flagged all twenty imports below. See that module's header for the
+# measurement (2 of 34 root tools loaded .env) and for the posture it states.
+import env_preamble  # noqa: F401  # isort: skip  -- MUST stay above `from config import Config`
+
 from chains.base import RPCError
 from chains.registry import unconfigured_chains, why_unconfigured
 from chains.solana import SolanaRPCError
