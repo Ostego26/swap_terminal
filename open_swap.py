@@ -162,7 +162,7 @@ from modules.address_authority import check_address
 from modules.htlc_assets import settlement_line
 from report_block import CONTINUATION, labeled, wrapped
 from requests.exceptions import RequestException
-from services.pair_view import allowed_pair_rows
+from services.pair_view import allowed_pair_rows, refusals_by_cause
 from services.payout_capacity import as_amount, largest_fundable_payout
 from services.pricing import fetch_usd_prices
 from services.quote_service import RESERVE_MEASURED, create_quote, get_network_fee_reserve, validate_pair
@@ -381,53 +381,57 @@ def blocked_by(unavailable: list[dict]) -> str:
     is the same overclaim this whole day was spent removing, and I committed a fresh
     one into the line that removes it.
 
-    THREE causes now, and they are three different actions for the operator: a chain
-    with no adapter needs settings exported, a chain that cannot pay out needs a
-    signing decision that is theirs (rule 16), and a chain that cannot take deposits
-    needs one shared-account variable set. Naming them separately is the whole point;
-    concatenating every full sentence instead would produce a paragraph nobody reads,
-    so each cause names its CHAINS and the fix is one clause.
+    SIX causes now, and that count is NOT written here any more -- it is
+    len(services/pair_view.REFUSAL_KEYS), which is the list the function that
+    evaluates them reads. Each is a different action for the operator: a chain with
+    no adapter needs settings exported, a chain that did not answer needs a daemon
+    or a firewall rule, a chain that cannot pay out needs a signing decision that is
+    theirs (rule 16), a chain that cannot take deposits needs one shared-account
+    variable set. Naming them separately is the whole point; concatenating every
+    full sentence instead would produce a paragraph nobody reads.
 
-    THE THIRD ARRIVED 2026-10-01 AND THIS FUNCTION CALLED ITSELF DEFECTIVE, exactly as
-    written: pair_view gained a deposit-source test, four pairs became unavailable for a
-    reason this function did not know, and the fallback below printed "Cause NOT
-    ESTABLISHED ... this is a defect in pair_catalog()". It was. That sentence existing
-    is why the gap took one test run to find instead of reaching an operator as an
-    unexplained UNAVAILABLE -- a wrong explanation is worse than an absent one, and an
-    absent one that names itself as a bug is better than both.
+    THIS FUNCTION CALLED ITSELF DEFECTIVE FOUR TIMES, exactly as its own fallback
+    was written to do, and the fourth is why the list moved out of it:
+
+        cannot_take       2026-10-01   caught by a test run
+        cannot_quote      2026-10-02   never caught here at all
+        cannot_establish  2026-10-03   never caught here at all
+        unreachable       2026-10-11   found 2026-10-12 by reading this file, with
+                                       LTC and GRC not answering on the operator's
+                                       host -- so every pair blocked by the sixth
+                                       condition would have printed "this is a defect
+                                       in pair_catalog()" instead of naming the daemon
+
+    The fallback firing is better than a wrong explanation and worse than a right
+    one, and a list that needed hand-editing four times is rule 8's duplicate with a
+    delay on it. There is one list now and it lives beside pair_serviceability();
+    tests/test_pair_refusal_causes.py fails on a SEVENTH condition rather than
+    letting it reach an operator as an unexplained UNAVAILABLE.
     """
-    no_adapter = sorted({asset for row in unavailable for asset in row.get("missing") or []})
-    # The adapters' OWN sentences, DEDUPLICATED -- not a paraphrase of them. An earlier
-    # draft of this function summarised the payout cause in its own words, which put a
-    # second copy of the explanation here (rule 8) and broke the test asserting the
-    # adapter's wording reaches the screen. chains/registry.why_cannot_pay_out() builds
-    # these from each adapter's payout_refusal, so the adapter stays the one place that
-    # says why it cannot pay. Deduplicated because two pairs can share one cause and
-    # printing it twice reads as two problems.
-    cannot_pay = sorted({row["cannot_pay"] for row in unavailable if row.get("cannot_pay")})
-    # THE SAME TREATMENT FOR THE DEPOSIT SIDE: the sentence comes from
-    # services/swap_service.why_cannot_take_deposits(), which derives the variable's name from
-    # TAG_ATTRIBUTION, so that table stays the one place that knows it (rule 11). Deduplicated
-    # for the same reason as above -- XRP->BTC, XRP->GRC and XRP->LTC share one cause, and
-    # printing it three times reads as three problems.
-    cannot_take = sorted({row["cannot_take"] for row in unavailable if row.get("cannot_take")})
-    causes = []
-    if no_adapter:
-        # The FACT, and the remedy is not restated here: create_swap()'s refusal names
-        # the exact variables, the `adapters here` line one row above lists what this
-        # process built, and swap_readiness.py asks the daemons. Repeating
-        # why_unconfigured()'s full sentence for each of up to three chains would make
-        # this line unreadable and would be a third copy of it.
-        causes.append(
-            f"{', '.join(no_adapter)} ha{'s' if len(no_adapter) == 1 else 've'} no adapter in this "
-            f"process"
-        )
-    causes.extend(cannot_pay)
-    causes.extend(cannot_take)
+    # THE LIST OF CAUSES MOVED TO services/pair_view.refusals_by_cause() ON
+    # 2026-10-12, and the reason is this function's own closing paragraph. It
+    # spelled THREE causes by hand and said, correctly, that a cause it did not
+    # know would print "this is a defect in pair_catalog()". That happened three
+    # more times after the sentence was written -- cannot_quote (2026-10-02),
+    # cannot_establish (2026-10-03) and unreachable (2026-10-11) -- so on the
+    # operator's host, with LTC and GRC not answering, every pair blocked by the
+    # sixth condition reported itself as a bug here instead of naming the daemon.
+    #
+    # Rule 8's repair is a survivor that owns the concept, and rule 19's test for a
+    # patch is whether the cause stops existing: the cause was a second list of the
+    # conditions, so there is one list now and it lives beside the function that
+    # evaluates them. A seventh condition reaches this output with no edit here.
+    causes = refusals_by_cause(unavailable)
     if not causes:
-        # Neither cause recognised. Say that rather than inventing one: a pair marked
+        # Neither cause recognized. Say that rather than inventing one: a pair marked
         # UNAVAILABLE with no explanation is a bug report, and a wrong explanation is
         # worse than an absent one.
+        #
+        # THE DISTINCTION refusals_by_cause() CANNOT MAKE, which is why it is made
+        # here: that function returns [] both for rows carrying no refusal and for no
+        # rows at all. This caller is the one that knows it filtered `unavailable` to
+        # pairs the verdict already called unavailable, so an empty list of causes
+        # here means a refusal with no key -- a defect -- rather than good news.
         return "Cause NOT ESTABLISHED -- run swap_readiness.py; this is a defect in pair_catalog()"
     return "Blocked by: " + "; ".join(causes)
 

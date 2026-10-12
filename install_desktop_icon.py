@@ -69,20 +69,30 @@ COMMAND_TARGET = BIN_DIR / "swapterm"
 #: an icon carries no other documentation and "Down" could reasonably be read as
 #: taking the wallet daemons with it. It does not, ever (stack_authority.py's
 #: header refuses to mark them stoppable "under any flag").
+#: The interpreter the action launchers run the wrapper through. An absolute
+#: path, because a .desktop Exec= is not a shell and resolves no PATH of ours.
+BASH = "/bin/bash"
+
 #: Actions that deliberately get NO icon, and why. Named rather than left as an
 #: absence, so test_every_action_is_an_icon_or_explicitly_not() can assert that
 #: ACTION_ENTRIES plus this covers swap_stack.ACTIONS exactly -- which means a new
 #: action cannot quietly fail to get an icon the way `rebuild` just did.
 #:
-#: Both are read-only reports whose whole value is the text, and an icon that
-#: opens a terminal, prints a report and exits gives the operator no time to read
-#: it: the window closes with the process. They belong at a shell prompt, which is
-#: what `swapterm` is for.
-#: The interpreter the action launchers run the wrapper through. An absolute
-#: path, because a .desktop Exec= is not a shell and resolves no PATH of ours.
-BASH = "/bin/bash"
-
-NO_ICON: tuple[str, ...] = ("status", "chains")
+#: ALL THREE ARE READ-ONLY REPORTS whose whole value is the text, and an icon that
+#: opens a terminal, prints a report and exits gives the operator no time to read it:
+#: the window closes with the process. They belong at a shell prompt, which is what
+#: `swapterm` is for.
+#:
+#: `pairs` joined them 2026-10-12. It is the longest of the three -- thirty pair lines,
+#: six condition counts and the distinct causes -- which makes it the one an icon would
+#: serve worst, and it is also the one an operator is most likely to want to PASTE.
+#:
+#: THIS BLOCK USED TO BE SPLICED INTO THE MIDDLE OF ANOTHER ONE, with BASH's own
+#: one-line comment left dangling under it and the read-only paragraph written twice,
+#: once here and once in ACTION_ENTRIES' block above. Rule 1 asks for the reasoning
+#: next to the code it describes, and a `#:` block attached to the wrong name is the
+#: document version of the thing rule 16 calls a wrong comment.
+NO_ICON: tuple[str, ...] = ("status", "chains", "pairs")
 
 # THE VERBS ARE `on` AND `off` AS OF 2026-10-12. Operator: "up.down make it
 # on/off". swap_stack keeps `up`/`down` as aliases so the launchers installed before

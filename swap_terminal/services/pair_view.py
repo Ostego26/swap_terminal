@@ -245,6 +245,108 @@ def pair_serviceability(config, adapters, from_asset: str, to_asset: str, reacha
         ),
     }
 
+#: THE SIX CONDITIONS pair_serviceability() EVALUATES, in the order it evaluates
+#: them, as DATA. Every reader that wants to know why a pair is unavailable reads
+#: this rather than spelling the list again.
+#:
+#: WHY IT EXISTS AS A CONSTANT. open_swap.blocked_by() spelled THREE of them by
+#: hand -- `missing`, `cannot_pay`, `cannot_take` -- and carried a fallback saying
+#: "Cause NOT ESTABLISHED ... this is a defect in pair_catalog()" for a cause it
+#: did not know. That fallback is the right instinct and it fired for real: the
+#: list went stale three separate times after it was written.
+#:
+#:     cannot_quote        added 2026-10-02    blocked_by() did not learn it
+#:     cannot_establish    added 2026-10-03    blocked_by() did not learn it
+#:     unreachable         added 2026-10-11    blocked_by() did not learn it
+#:
+#: So on 2026-10-12, with LTC and GRC unreachable on the operator's host, every
+#: unavailable pair blocked by the sixth condition would have printed "Cause NOT
+#: ESTABLISHED" from the tool written to replace the page -- naming itself as a
+#: bug, correctly, three times in a row. Rule 19's test for a patch: does it stop
+#: the symptom being reported, or stop the cause existing? A hand-written list
+#: that has gone stale three times is the cause, and the cause is that the list
+#: was written twice. There is one now, and
+#: tests/test_pair_refusal_causes.py::test_every_condition_pair_serviceability_
+#: returns_is_a_named_refusal fails on a seventh condition rather than letting it
+#: fall into the fallback.
+#:
+#: `missing` IS FIRST AND IS NOT A SENTENCE. It is a list of asset names, which is
+#: why refusals_by_cause() handles it separately; the other five are prose built by
+#: the authority that refused, and are reported verbatim.
+REFUSAL_KEYS = (
+    "missing",
+    "unreachable",
+    "cannot_pay",
+    "cannot_take",
+    "cannot_quote",
+    "cannot_establish",
+)
+
+#: The two keys in a verdict dict that are NOT a refusal: the boolean every caller
+#: branches on, and the prose for a person. Named here so the gate test can assert
+#: REFUSAL_KEYS plus these two is the WHOLE dict -- an exhaustive check, which is
+#: the only kind that catches a seventh condition nobody told this file about.
+VERDICT_SUMMARY_KEYS = ("serviceable", "reason")
+
+
+def refusals_by_cause(rows: list[dict]) -> list[str]:
+    """Every distinct reason the given pairs are unavailable, GROUPED BY CAUSE.
+
+    ONE REASON PER CAUSE AND NOT ONE REASON FOR ALL. open_swap.pair_catalog() once
+    printed `unavailable[0]["reason"]` as THE reason for every unavailable pair, and
+    the operator's own run showed what that produces:
+
+        GRC->XRP (UNAVAILABLE) ... UNAVAILABLE means allowed but not completable
+        from this process: BTC has no adapter in this process: BTC_RPC_PORT ... unset
+
+    GRC -> XRP has nothing to do with BTC_RPC_PORT. Each cause is a DIFFERENT action
+    for the operator -- a chain with no adapter needs settings exported, a chain that
+    did not answer needs a daemon or a firewall, a chain that cannot pay out needs a
+    signing decision that is theirs (rule 16) -- so they are named separately.
+
+    DERIVED FROM REFUSAL_KEYS, which is the whole point: see that constant for the
+    three times a hand-written list of causes went stale. A seventh condition is
+    reported here the day it is added, with no edit to this function.
+
+    THE AUTHORITIES' OWN SENTENCES, DEDUPLICATED -- never a paraphrase. Each of the
+    five prose conditions is built by the module that refused
+    (chains/registry.why_cannot_pay_out, services/swap_service.why_cannot_take_deposits,
+    services/quote_service.why_cannot_quote and why_cannot_establish_payout_floor,
+    services/chain_reachability.reachability_refusal), so that module stays the one
+    place that knows why. Deduplicated because two pairs can share one cause and
+    printing it twice reads as two problems: on the operator's host 2026-10-11, six
+    pairs shared one "GRC did not answer" and six more shared one for LTC.
+
+    ORDER IS REFUSAL_KEYS' ORDER, which is pair_serviceability()'s evaluation order,
+    which is cheapest-refusal-first. So a reader sees the configuration causes before
+    the network ones, and within one cause the sentences are sorted so the output is
+    stable enough to diff against a recorded baseline.
+
+    Returns [] when nothing refused, which a caller must distinguish from "no cause
+    recognized" ITSELF -- this function cannot tell those apart, because an empty
+    `rows` and a row with no refusal in it both produce []. open_swap.blocked_by()
+    makes that distinction, because it is the one that knows it was handed rows it
+    had already filtered to the unavailable ones.
+    """
+    causes: list[str] = []
+    for key in REFUSAL_KEYS:
+        if key == "missing":
+            # NOT A SENTENCE: a list of asset names, flattened across every row and
+            # deduplicated, because three pairs missing the same chain are one
+            # problem. The REMEDY is deliberately not restated -- create_swap()'s
+            # refusal names the exact variables and /admin carries why_unconfigured()
+            # in full, so repeating that sentence per chain here would be a third
+            # copy of it and would make one line unreadable.
+            assets = sorted({asset for row in rows for asset in row.get(key) or []})
+            if assets:
+                causes.append(
+                    f"{', '.join(assets)} ha{'s' if len(assets) == 1 else 've'} no adapter in "
+                    f"this process"
+                )
+            continue
+        causes.extend(sorted({row[key] for row in rows if row.get(key)}))
+    return causes
+
 
 def allowed_pair_rows(config, adapters, reachability: dict | None = None) -> list[dict]:
     """Every allowed pair, as a row that says whether it can actually complete.
@@ -484,7 +586,7 @@ def asset_rollups(rows: list[dict]) -> list[dict]:
     """One lamp per coin, rolled up from the pair rows. Pure: no config, no adapters.
 
     THE ROLLUP IS OVER BOTH DIRECTIONS and the lamp ALSO CARRIES THE SPLIT, which is
-    the part that matters and the part a single colour cannot say. A coin can be
+    the part that matters and the part a single color cannot say. A coin can be
     perfectly good as a SOURCE and unusable as a DESTINATION -- measured 2026-10-07,
     ICP is exactly that: ICP -> BTC/GRC/LTC quote, and nothing -> ICP does, because
     a payout needs the desk's dfx identity and reads do not. One amber lamp over that
@@ -492,7 +594,7 @@ def asset_rollups(rows: list[dict]) -> list[dict]:
     get ICP out" or "can I get ICP in", and those have opposite answers.
     
     So every lamp reports out_available/out_total and in_available/in_total beside
-    its colour. Rule 14's "state what the number means, next to the number" -- a
+    its color. Rule 14's "state what the number means, next to the number" -- a
     customer reads the screen, not this docstring.
 
     DERIVED FROM THE ROWS allowed_pair_rows() ALREADY BUILT, never re-evaluated. A

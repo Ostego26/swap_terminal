@@ -117,16 +117,48 @@ CHAIN_PORTS: dict[str, ChainPorts] = {
 # asked from three places now: the workers' startup banner, the swap page's pair
 # list, and create_swap()'s refusal. Three copies of a variable NAME is rule 8's
 # shape with a typo waiting in it.
-_ENDPOINT_VARIABLES: dict[str, str] = {
-    "SOL": "SOL_RPC_URL",
-    "XRP": "XRP_RPC_URL",
-    # ICP has no port and no URL: the adapter reaches the ledger by running dfx in
-    # a compose service (chains/icp.py's header has the measurement that rules out
-    # every Python agent library). The canister id is what decides whether an
-    # adapter can exist at all, so it is the primary name -- and naming it here is
-    # what stops configuring_variable()'s <CHAIN>_RPC_PORT fallback from reporting
-    # `ICP_RPC_PORT`, a variable nothing reads.
-    "ICP": "ICP_LEDGER_CANISTER_ID",
+class UrlChain(NamedTuple):
+    """One chain with no conventional port to classify a configured one against.
+
+    THREE FIELDS AND NOT ONE, AND THE THIRD IS WHY THIS BECAME A NamedTuple ON
+    2026-10-12. It was `_ENDPOINT_VARIABLES: dict[str, str]`, carrying the variable
+    name alone, and startup_lines() therefore needed its own list of which chains to
+    print -- which it spelled as the literal `("SOL", "XRP")`. ICP was in the dict and
+    not in the literal, so the chain on ten of Config.ALLOWED_PAIRS' thirty directions
+    got NO LINE AT ALL in the banner whose entire job is to say which network each
+    chain points at. Rule 8's two-lists-of-one-thing, and rule 14's "a chain silently
+    missing from a banner is indistinguishable from a banner that forgot it" -- which
+    that function's own docstring says, three lines above the literal.
+
+    `variable` is the ONE value that decides whether an adapter can exist, which is
+    what configuring_variable() returns.
+    `decides_key` is where that value sits inside the chain's Config.RPC entry, so a
+    reader can be told CONFIGURED or NOT from the same fact the registry uses.
+    `endpoint_key` is what the banner PRINTS, and for ICP it is deliberately a
+    different key: ICP_LEDGER_CANISTER_ID decides whether the adapter exists, and
+    `network_url` is the thing that says mainnet or local -- the fact a network banner
+    is for. Collapsing the two would make the banner print a canister id where a
+    reader is looking for the word mainnet.
+    """
+
+    variable: str
+    decides_key: str
+    endpoint_key: str
+
+
+#: The chains with no port convention, keyed by asset. ONE TABLE, read by both
+#: configuring_variable() and startup_lines(); see UrlChain for the four characters of
+#: duplication that cost ICP its banner line.
+URL_CHAINS: dict[str, UrlChain] = {
+    "SOL": UrlChain("SOL_RPC_URL", "url", "url"),
+    "XRP": UrlChain("XRP_RPC_URL", "url", "url"),
+    # ICP has no port and no endpoint URL of the SOL/XRP shape: the adapter reaches
+    # the ledger by running dfx in a compose service (chains/icp.py's header has the
+    # measurement that rules out every Python agent library). The canister id is what
+    # decides whether an adapter can exist at all, so it is the primary name -- and
+    # naming it here is what stops configuring_variable()'s <CHAIN>_RPC_PORT fallback
+    # from reporting `ICP_RPC_PORT`, a variable nothing reads.
+    "ICP": UrlChain("ICP_LEDGER_CANISTER_ID", "ledger_canister_id", "network_url"),
 }
 
 
@@ -170,7 +202,10 @@ def configuring_variable(chain: str) -> str:
     known = CHAIN_PORTS.get(chain)
     if known:
         return known.port_variable
-    return _ENDPOINT_VARIABLES.get(chain, f"{chain}_RPC_PORT")
+    url_chain = URL_CHAINS.get(chain)
+    if url_chain:
+        return url_chain.variable
+    return f"{chain}_RPC_PORT"
 
 
 class NetworkTargetUnconfigured(RuntimeError):
@@ -345,14 +380,25 @@ def startup_lines(rpc: dict) -> list[str]:
     # network_id before signing. That is a call, not a lookup, so it does not
     # belong in a pure function -- named here so a reader knows the stronger
     # check exists and where.
-    for chain in ("SOL", "XRP"):
+    #
+    # ITERATED FROM URL_CHAINS AND NOT FROM A LITERAL. This loop read ("SOL", "XRP")
+    # until 2026-10-12 while the table beside it held three chains, so ICP -- ten of
+    # thirty allowed directions -- was absent from every startup banner this tree has
+    # ever printed. See UrlChain's docstring; the fix is that there is one list.
+    for chain, url_chain in sorted(URL_CHAINS.items()):
         entry = rpc.get(chain) or {}
-        target = entry.get("url") or (f"port {entry['port']}" if entry.get("port") else "")
-        if target:
-            suffix = " (network confirmed from the server at send time)" if chain == "XRP" else ""
-            lines.append(f"{chain:4} {target:24} <- configured; chain NOT classified here{suffix}")
-        else:
-            lines.append(f"{chain:4} NOT CONFIGURED")
+        # CONFIGURED IS DECIDED BY THE VALUE THE REGISTRY DECIDES ON, and the string
+        # PRINTED can be a different key -- for ICP the canister id decides and the
+        # replica URL is what names the network. A chain configured with no endpoint
+        # to print says so rather than reading as unconfigured, because "no adapter"
+        # and "an adapter pointed somewhere this banner cannot name" are different
+        # problems and a reader acts differently on each.
+        if not entry.get(url_chain.decides_key):
+            lines.append(f"{chain:4} NOT CONFIGURED  <- set {url_chain.variable} to reach this chain")
+            continue
+        target = entry.get(url_chain.endpoint_key) or f"({url_chain.endpoint_key} unset)"
+        suffix = " (network confirmed from the server at send time)" if chain == "XRP" else ""
+        lines.append(f"{chain:4} {target:24} <- configured; chain NOT classified here{suffix}")
     return lines
 
 

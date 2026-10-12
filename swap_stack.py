@@ -2139,6 +2139,92 @@ def cmd_chains(files: tuple[str, ...]) -> int:
     return code
 
 
+#: The read-only pair diagnostic this action runs. Named once; cmd_pairs() builds the
+#: argv from it and tests/test_on_off_and_stale_launchers.py asserts the file exists,
+#: because a renamed entry point is rule 13's `pgrep -f` hazard in a different shape --
+#: nothing imports a root tool, so moving one breaks no import and reports nowhere.
+_PAIR_VERDICTS = "pair_verdicts.py"
+
+
+def cmd_pairs(files: tuple[str, ...]) -> int:
+    """Why each allowed pair is unavailable, grouped by cause. Changes nothing.
+
+    WHY THIS ACTION EXISTS. The operator's screen on 2026-10-11 read NONE / 0/5 out
+    on all six coins -- thirty refusals rendered as one fact -- and "nothing works in
+    the UI" has six possible answers that send them to six different places: export a
+    setting, start a daemon, arm a payout leg, set a deposit account, record a payout
+    cost, or reach a cluster. `chains` answers only the second of those six. This
+    answers all six, with a count per condition out of the number of pairs evaluated.
+
+    IT RUNS ON THE HOST AND NOT IN THE CONTAINER, which is a deliberate choice and
+    not a convenience, so the report says so itself. docker/web.Dockerfile states the
+    policy in its own words -- the 34 root operator tools are not copied into the
+    image, because several of them move funds and `docker compose exec web python3
+    rescue_payout.py` should not be a thing anyone can reach for. pair_verdicts.py
+    moves nothing, and copying one of the 34 in would weaken a stated boundary for a
+    diagnostic that does not need it.
+
+    AND IT GETS THE SAME ANSWER FROM HERE, which was established rather than assumed
+    (rule 17). Five of the six conditions are pure reads of the configuration that
+    main() has already loaded from .env -- the same file compose interpolates -- so
+    they cannot differ between host and container. The sixth, `unreachable`, is a
+    SELECT against the chain_reachability table, whose rows were written by the
+    workers INSIDE the container from calls they were already making: the container's
+    own measurement, read from the host. The one condition that opens a socket,
+    `cannot_establish`, asks the Solana cluster at SOL_RPC_URL, a public endpoint
+    reachable from both.
+
+    What a host run CANNOT tell you is whether the container can reach a daemon right
+    now -- that is `chains`, which probes from inside, and the report names it. The
+    per-chain network banner prints each chain's configured HOST, so a reader can see
+    from the output itself whether they are looking at host.docker.internal or
+    127.0.0.1 rather than having to remember where it ran.
+
+    `files` is accepted and deliberately unused, for cmd_chains()'s reason: every
+    action takes the compose files so ACTIONS can dispatch uniformly, and this one
+    makes no compose call. Naming it `_files` would break that uniformity for one
+    caller's benefit.
+
+    EXIT CODE IS THE VERDICT AND IT IS pair_verdicts.py's OWN -- 0 only when every
+    allowed pair can be quoted. Not re-derived here: a second opinion about the same
+    rows is the defect services/pair_view.py's header records, where /admin and the
+    customer page disagreed about one pair in one process.
+    """
+    del files  # see the docstring: uniform dispatch, no compose call needed
+    say("swap_stack: PAIRS")
+    say("  question          why is each allowed pair unavailable, and is it ONE cause or thirty?")
+    say("  read-only         no quote, no swap, no signature, no broadcast, no wallet unlock")
+    say(f"  running           {_PAIR_VERDICTS} ON THIS HOST, with .env already loaded")
+    say("                    five of the six conditions are pure configuration reads and cannot")
+    say("                    differ from the container's; the sixth is read from the")
+    say("                    chain_reachability rows the container's own workers wrote. Whether")
+    say("                    the container can reach a daemon RIGHT NOW is `chains`, not this.")
+    say("")
+    script = REPO_ROOT / _PAIR_VERDICTS
+    if not script.is_file():
+        # A MOVED ENTRY POINT NAMES THE FILE. Nothing imports a root tool, so a rename
+        # breaks no import and would otherwise surface as a bare non-zero exit from a
+        # subprocess that printed a Python traceback about a path.
+        say(f"  MISSING           {script} is not there, so nothing was asked and this says NOTHING")
+        say("                    about the pairs. It is a repository file; restore it or re-pull.")
+        return 1
+    # NOT capture_output: the report is the output, and buffering it to re-print would
+    # make a tool whose own rule is "announce before, not only after" silent until it
+    # finished. sys.executable rather than "python3" so the interpreter running this
+    # file is the one that runs the report, which is the difference between reading
+    # this stack's configuration and reading whichever python3 is first on PATH.
+    finished = subprocess.run(  # noqa: S603 -- no shell; argv is this file's own list
+        [sys.executable, str(script)], cwd=REPO_ROOT, check=False,
+    )
+    say("")
+    if finished.returncode:
+        say(f"  exit {finished.returncode}            at least one allowed pair cannot be quoted -- the")
+        say("                    `blocked by` block above says which condition, for how many pairs,")
+        say("                    and what to do about each")
+    else:
+        say(f"  exit {finished.returncode}            every allowed pair can be quoted right now")
+    return finished.returncode
+
 def build_parser() -> argparse.ArgumentParser:
     """The command line this file accepts. Its own function so a test can ask it.
 
@@ -2388,6 +2474,7 @@ PRIMARY_ACTIONS = {
     "restart": cmd_restart,
     "rebuild": cmd_rebuild,
     "chains": cmd_chains,
+    "pairs": cmd_pairs,
 }
 
 #: The old spellings, mapped to the SAME function objects.

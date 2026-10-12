@@ -1218,6 +1218,72 @@ non-terminal services, and every `-f` list in the tree reduced to the one file.
   declares it" is not "compose did it", and the two must not be written in the same
   voice.
 
+### 23. Rule 18 has no gate, and the tree is at **164 prose hits**, not 0
+
+**Measured 2026-10-12**, and the denominator is stated because it is the whole
+point of this finding (rule 3): **90 patterns** over the **488** tracked
+`.py`/`.js`/`.jsx`/`.md`/`.rs`/`.html` files, scanning **PROSE ONLY** — Python
+comments and docstrings via `tokenize` + `ast.get_docstring`, JS/Rust `//` and
+`/* */`, Jinja/HTML text with every tag stripped, Markdown with fenced and inline
+code stripped. **164 hits across 86 files.** By word:
+
+    colour     33+ (incl. caps)   grey      21+3   cancell   18+3
+    realis     21+1               neighbour  7     labell     7+1+1
+    behaviour   7                 signall    6+3+2 honour     5
+    optimis     4+1               licence    3     modell     2+1
+    recognis    2                 parenthesise 2   favour     2
+    and one each of travell, programme, judgement, defence, capitalis,
+    authoris, apologis, EQUALLED
+
+**CLAUDE.md says this is a clean gate.** Rule 18: "Measured 2026-09-24: **0
+British spellings** across the `.py`, `.js` and `.md` files in this tree. This
+starts as a clean gate rather than a backlog." The re-measurement block then
+corrects it to 3, and corrects THAT to 7, each time by a hand-run scan with an
+unstated pattern list — and the file says so itself: "THE DENOMINATOR IS THE
+PATTERNS, NOT THE LANGUAGE, and a scan reports on what it was told to look for."
+
+**THE CAUSE IS THAT RULE 18 IS THE ONLY RULE IN CLAUDE.md WITH NO TEST.** Grepped
+2026-10-12: no file under `tests/` scans for a British spelling. Rules 1, 12, 13
+and 19 all have gates; this one is enforced by somebody remembering to look, which
+is why it has now been measured wrong three times in three weeks. **The fix is a
+test, not another hand-count** — and the honest reason there is no test in this
+commit is below.
+
+**Fixed here, in the files this change already touched (rule 19, not a baseline):**
+five — `recognises` in `tests/test_pair_refusal_causes.py`, `recognised` in
+`services/pair_view.py`, two `colour`s in the same file, and `recognised` in
+`open_swap.py`.
+
+**Why the other 159 and the gate are NOT in this commit**, named rather than
+quietly deferred:
+
+- **A sweep over 86 files I was not otherwise in is a large diff on a key-holding
+  system with no behavioral benefit** — which is rule 12's own sentence about
+  `ruff`, and it applies unchanged to spelling.
+- **The gate needs an exemption mechanism FIRST, and a wrong one is worse than
+  none.** Rule 18 is "PROSE ONLY, AND NEVER IDENTIFIERS": an external field name
+  stays as the external system spells it. The raw-text version of this scan
+  returned **229** rather than 164, and **12 of the extra 65 were
+  `aria-labelledby`** in `templates/admin.html` — an HTML attribute, matched by the
+  `labell` pattern. A gate that demanded those be "fixed" would break the
+  accessibility wiring of the operator page to satisfy a grep, which is rule 19's
+  test for a patch failed in the worst direction. `tests/prose.py` already holds
+  `code_without_prose()`; the missing half is the complement, and it belongs in
+  that module (rule 8) rather than in a scan script.
+- **Some of the 164 still need a human judgment the scan cannot make.** The
+  `cancell` hits in `chains/xrp_escrow.py` and `chains/xrp_units.py` sit in prose
+  about XRP's `EscrowCancel` and `CancelAfter`; the words there are English and the
+  fix is `canceled`, but establishing that per site is reading, not sed. Likewise
+  `grey` where a comment names the CSS keyword, which accepts both spellings.
+
+**What would close it:** `tests/prose.py` gains the prose-extracting complement of
+`code_without_prose()`, the 164 are fixed in one pass by a person reading each
+site, and the gate lands asserting **zero** — with the pattern list in the test,
+where it is a denominator somebody can count rather than a sentence somebody
+wrote. **CLAUDE.md's rule 18 count is wrong today and should be corrected to this
+measurement when that lands**, in the same self-correcting style the file already
+uses twice.
+
 ---
 
 ## Closed

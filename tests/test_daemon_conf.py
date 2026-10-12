@@ -271,6 +271,25 @@ SERVICE_SIDE = frozenset({
     # node whose progress has no bearing on whether the terminal can see money, which
     # is the quietest wrong answer available: a right number about the wrong thing.
     "chain_sync_rate.py",
+    # pair_verdicts.py, added 2026-10-12, and the register caught it in the same suite
+    # run that first saw the file -- which is this test doing exactly its job: the file
+    # calls workers/common.build_adapters_from_config() and had no side.
+    #
+    # SERVICE SIDE, AND HERE IT IS THE WHOLE POINT OF THE TOOL RATHER THAN A SAFETY
+    # ARGUMENT. It exists to reproduce the verdict the CUSTOMER PAGE reached -- the
+    # operator saw NONE / 0/5 out on all six coins and had no way to learn which of the
+    # six conditions refused -- so it must build its adapters the way the serving
+    # process does, chains/registry.build_adapters(Config.RPC). A conf fallback would
+    # make it the one thing it must never be: a second opinion. It would report LTC -> GRC
+    # AVAILABLE off the operator's litecoin.conf while the web container, which reads no
+    # conf, goes on refusing that pair, and the operator would be told the page is lying
+    # to them.
+    #
+    # It is the mildest entry in this set by what it DOES -- no send, no credit, no
+    # wallet created, no daemon stopped, one SELECT and at most one cached read of the
+    # Solana rent floor -- and the register is not about severity. A tool whose answer
+    # is "the page is wrong" has to be resolving the page's daemons.
+    "pair_verdicts.py",
     # swap_stack.py, added 2026-10-12, when `off` learned to STOP the chain daemons
     # after the operator asked three times. The register caught it the same hour --
     # it resolves a chain now and had no side.

@@ -33,9 +33,11 @@ from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
 
 from chains.registry import build_adapters, missing_settings, why_unconfigured
+from config import Config
 from network_target import (
     CHAIN_PORTS,
     UNCONFIGURED_PORT,
+    URL_CHAINS,
     NetworkTargetUnconfigured,
     classify,
     configuring_variable,
@@ -131,11 +133,37 @@ def test_every_chain_gets_a_banner_line_even_when_unset():
 
     A chain missing from the banner is indistinguishable from a banner that
     forgot it, and legible absence is the entire point of the banner.
+
+    THIS TEST HELD THE SAME DEFECT AS THE FUNCTION IT GUARDS, and that is why the
+    denominator moved. It iterated `(*CHAIN_PORTS, "SOL", "XRP")` -- the identical
+    hand-written literal startup_lines() itself used -- so ICP being absent from both
+    was invisible from here: the test and the code agreed, which is rule 8's "two
+    copies agree on the day they are written" with the guard as the second copy. Every
+    startup banner this tree has printed was missing the chain on ten of
+    Config.ALLOWED_PAIRS' thirty directions, and this is the test that was supposed to
+    say so.
+
+    THE DENOMINATOR IS NOW WHAT DECIDES WHICH CHAINS EXIST (rule 3): every asset named
+    by Config.ALLOWED_PAIRS. A chain cannot be swapped without being in a pair, and a
+    chain in a pair with no banner line is the exact gap. CHAIN_PORTS and URL_CHAINS
+    are asserted to COVER that set rather than to BE it, so adding a seventh asset to
+    ALLOWED_PAIRS fails here until the banner can name its network.
     """
     lines = startup_lines({})
+    swappable = {asset for pair in Config.ALLOWED_PAIRS for asset in pair}
+    assert swappable, "Config.ALLOWED_PAIRS is empty, so this test is vacuous"
 
-    for chain in (*CHAIN_PORTS, "SOL", "XRP"):
-        assert any(line.startswith(chain) for line in lines), f"{chain} has no banner line"
+    for chain in sorted(swappable):
+        assert any(line.startswith(chain) for line in lines), (
+            f"{chain} is a leg of Config.ALLOWED_PAIRS and has no banner line. Add it to "
+            f"network_target.CHAIN_PORTS (a chain with a conventional mainnet port) or to "
+            f"network_target.URL_CHAINS (one without), and startup_lines() picks it up with "
+            f"no further edit."
+        )
+
+    assert set(CHAIN_PORTS) | set(URL_CHAINS) >= swappable, (
+        "every swappable asset must be classifiable; see the message above"
+    )
 
 
 def test_require_configured_refuses_rather_than_defaulting():

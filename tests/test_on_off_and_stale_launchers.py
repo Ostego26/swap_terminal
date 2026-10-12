@@ -454,3 +454,85 @@ def test_no_icon_comment_claims_the_daemons_are_LEFT_RUNNING():
         assert "starts no chain daemon" not in lowered, (
             f"the {action} icon ({name}) still promises it starts no chain daemon"
         )
+
+
+# --- `pairs`, the sixth action -------------------------------------------------
+
+
+def test_pairs_names_a_file_that_is_actually_there():
+    """Nothing imports a root tool, so a rename breaks no import and reports nowhere.
+
+    This is rule 13's `pgrep -f` hazard in a different shape: cmd_pairs() names
+    pair_verdicts.py as a STRING, and a pattern matches what the tree happens to look
+    like today. The function itself refuses with the path when the file is gone --
+    which is the right behavior at runtime and no help at all if the rename shipped.
+    """
+    assert (REPO_ROOT / swap_stack._PAIR_VERDICTS).is_file(), (
+        f"swap_stack._PAIR_VERDICTS names {swap_stack._PAIR_VERDICTS}, which is not in the "
+        f"repository root. If it moved, move this name with it."
+    )
+
+
+def test_pairs_is_an_action_and_makes_no_compose_call(monkeypatch):
+    """It runs the report on the HOST, so it must not touch docker at all.
+
+    `compose()` is replaced with something that fails the test if called, which is
+    stronger than asserting on the output: the claim in cmd_pairs()'s docstring is
+    "makes no compose call", and the only honest check of that is to make a compose
+    call impossible.
+    """
+    assert swap_stack.PRIMARY_ACTIONS["pairs"] is swap_stack.cmd_pairs
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("cmd_pairs() must not shell out to docker compose")
+
+    monkeypatch.setattr(swap_stack, "compose", refuse)
+    recorded = {}
+
+    def fake_run(argv, **kwargs):
+        recorded["argv"] = argv
+        recorded["cwd"] = kwargs.get("cwd")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(swap_stack.subprocess, "run", fake_run)
+
+    assert swap_stack.cmd_pairs(("docker-compose.yml",)) == 0
+    assert recorded["argv"][0] == sys.executable, (
+        "the interpreter running swap_stack must run the report, not whichever python3 "
+        "is first on PATH -- they can read different configurations"
+    )
+    assert recorded["argv"][1].endswith(swap_stack._PAIR_VERDICTS)
+    assert recorded["cwd"] == REPO_ROOT
+
+
+def test_pairs_returns_the_reports_own_verdict_rather_than_a_second_opinion(monkeypatch):
+    """The exit code is pair_verdicts.py's. A second opinion about the same rows is
+    the defect services/pair_view.py's header records, where /admin and the customer
+    page disagreed about one pair in one process.
+    """
+    monkeypatch.setattr(
+        swap_stack.subprocess, "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 7),
+    )
+
+    assert swap_stack.cmd_pairs(()) == 7
+
+
+def test_a_missing_report_says_NOTHING_WAS_ASKED_rather_than_passing(monkeypatch, capsys):
+    """Rule 13: "skipped" plus "success" in one output is a defect in the output.
+
+    cmd_chains() already takes this posture for a container that is not serving -- "so
+    this says NOTHING about the chains" -- and the same sentence is owed here, because
+    a report that did not run is not a desk with no problems.
+    """
+    monkeypatch.setattr(swap_stack, "_PAIR_VERDICTS", "a_file_that_is_not_in_this_tree.py")
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("nothing should be run when the report is missing")
+
+    monkeypatch.setattr(swap_stack.subprocess, "run", refuse)
+
+    assert swap_stack.cmd_pairs(()) == 1
+    printed = capsys.readouterr().out
+    assert "MISSING" in printed
+    assert "says NOTHING" in printed
