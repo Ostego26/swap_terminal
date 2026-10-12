@@ -144,21 +144,31 @@ class UrlChain(NamedTuple):
     variable: str
     decides_key: str
     endpoint_key: str
+    #: The variable an operator would export to fill `endpoint_key`. Usually the same as
+    #: `variable`; for ICP it is not, and that difference is the whole reason this field
+    #: exists -- see startup_lines()'s comment on the "(... unset here)" branch.
+    endpoint_variable: str
 
 
 #: The chains with no port convention, keyed by asset. ONE TABLE, read by both
 #: configuring_variable() and startup_lines(); see UrlChain for the four characters of
 #: duplication that cost ICP its banner line.
 URL_CHAINS: dict[str, UrlChain] = {
-    "SOL": UrlChain("SOL_RPC_URL", "url", "url"),
-    "XRP": UrlChain("XRP_RPC_URL", "url", "url"),
+    "SOL": UrlChain("SOL_RPC_URL", "url", "url", "SOL_RPC_URL"),
+    "XRP": UrlChain("XRP_RPC_URL", "url", "url", "XRP_RPC_URL"),
     # ICP has no port and no endpoint URL of the SOL/XRP shape: the adapter reaches
     # the ledger by running dfx in a compose service (chains/icp.py's header has the
     # measurement that rules out every Python agent library). The canister id is what
     # decides whether an adapter can exist at all, so it is the primary name -- and
     # naming it here is what stops configuring_variable()'s <CHAIN>_RPC_PORT fallback
     # from reporting `ICP_RPC_PORT`, a variable nothing reads.
-    "ICP": UrlChain("ICP_LEDGER_CANISTER_ID", "ledger_canister_id", "network_url"),
+    # The fourth field differs from the first ONLY here, which is what it is for: the
+    # canister id decides whether an adapter exists, and ICP_DFX_NETWORK_URL is what
+    # names the replica -- supplied to the container by docker-compose.web.yml and
+    # legitimately unset on the host.
+    "ICP": UrlChain(
+        "ICP_LEDGER_CANISTER_ID", "ledger_canister_id", "network_url", "ICP_DFX_NETWORK_URL"
+    ),
 }
 
 
@@ -396,7 +406,20 @@ def startup_lines(rpc: dict) -> list[str]:
         if not entry.get(url_chain.decides_key):
             lines.append(f"{chain:4} NOT CONFIGURED  <- set {url_chain.variable} to reach this chain")
             continue
-        target = entry.get(url_chain.endpoint_key) or f"({url_chain.endpoint_key} unset)"
+        # A CONFIGURED CHAIN WITH NO ENDPOINT TO PRINT NAMES THE VARIABLE, not the dict
+        # key. Measured on the operator's host 2026-10-12, this line read
+        #
+        #     ICP  (network_url unset)      <- configured; chain NOT classified here
+        #
+        # which sends a reader to grep for `network_url`: an internal key of
+        # Config.RPC["ICP"], not something anyone can export. The variable is
+        # ICP_DFX_NETWORK_URL, and on the HOST it is genuinely unset by design --
+        # docker-compose.web.yml:387 supplies `${ICP_DFX_NETWORK_URL:-http://icp-replica
+        # :4943}` to the container, so the container has a replica and a host-side report
+        # has nothing to print. Rule 14's "echo the parameters that decide the answer"
+        # means echoing the name the reader can act on, and saying that an absence here
+        # is expected rather than leaving them to find out.
+        target = entry.get(url_chain.endpoint_key) or f"({url_chain.endpoint_variable} unset here)"
         suffix = " (network confirmed from the server at send time)" if chain == "XRP" else ""
         lines.append(f"{chain:4} {target:24} <- configured; chain NOT classified here{suffix}")
     return lines

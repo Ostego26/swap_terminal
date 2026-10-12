@@ -63,10 +63,17 @@ keeps the seeded row shape tied to the real one.
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
+from db import init_db
+from services.admin_view import pair_rows
+from services.chain_reachability import reachability_rows
+from services.helpers import utc_now_iso
 from services.pair_view import (
     REFUSAL_KEYS,
     VERDICT_SUMMARY_KEYS,
+    allowed_pair_rows,
     pair_serviceability,
     refusals_by_cause,
 )
@@ -217,3 +224,157 @@ def test_a_row_refusing_for_nothing_still_reaches_the_fallback():
     """
     assert NOT_ESTABLISHED in blocked_by([_row()])
     assert NOT_ESTABLISHED in blocked_by([])
+
+
+# --- THE ROW SHAPE, which is where today's defect actually lived ---------------
+
+
+class _Payer:
+    """An adapter that is reachable and can pay, so only `unreachable` can refuse.
+
+    Minimal on purpose: `unreachable` is the SECOND condition and short-circuits the
+    four below it, so nothing past can_spend is ever asked of this object. A richer
+    stub would be measuring the stub.
+    """
+
+    can_spend = True
+    payout_refusal = ""
+
+
+def _fresh(tmp_path, *assets_that_did_not_answer):
+    """Reachability rows for the named chains, THROUGH THE REAL READER.
+
+    THE TIMESTAMP IS GENERATED, NOT TYPED. A literal goes stale: services/
+    chain_reachability.reachability_refusal() falls silent past STALE_AFTER_SECONDS, so
+    a hardcoded date would make every assertion below pass vacuously the day after it
+    was written -- which is a mistake this session has already made once, in a fixture
+    that was fresh for ten minutes and then silently stopped gating.
+
+    AND IT GOES THROUGH THE DATABASE AND reachability_rows() RATHER THAN BUILDING THE
+    DICT. The first version of this helper returned a hand-made dict, which is what let
+    the dedup assertion below fail for the right reason and nearly be "fixed" in the
+    fixture: reachability_rows() is where `age_seconds` is stamped from one clock
+    reading, and that stamping is the thing that makes one down chain produce ONE cause
+    sentence instead of one per pair. A fixture that supplied its own ages would have
+    measured the fixture (BEHAVIORAL_VERIFICATION_PRINCIPLE -- run the real thing).
+    """
+    path = tmp_path / "swap_terminal.db"
+    if not path.exists():
+        init_db(str(path))
+    now = utc_now_iso()
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    with conn:
+        for asset in assets_that_did_not_answer:
+            conn.execute(
+                "INSERT OR REPLACE INTO chain_reachability "
+                "(asset, reachable, asked, detail, checked_at) VALUES (?, 0, ?, ?, ?)",
+                (asset, "get_balance", "[Errno 111] Connection refused", now),
+            )
+    try:
+        return reachability_rows(conn)
+    finally:
+        conn.close()
+
+
+def test_the_row_builder_carries_every_refusal_key():
+    """THE GATE FOR TODAY'S DEFECT, and the one the first version of this file lacked.
+
+    test_the_verdict_dict_holds_exactly_the_named_keys above checks what
+    pair_serviceability() RETURNS. allowed_pair_rows() then COPIES those keys onto a
+    row, and until 2026-10-12 it copied five of six by hand -- so the verdict computed
+    `unreachable`, the row dropped it, and every consumer reading the keys was blind to
+    the condition that was refusing fourteen of thirty pairs on the operator's host:
+
+        GRC -> LTC   blocked by NOTHING NAMED
+        unreachable    0 of 30      <- FALSE; it was the actual cause
+
+    The earlier gate passed throughout, because the row builder is a SECOND list and it
+    asked the first. That is the lesson worth the test: merging one of three copies
+    produces a fix that measurably does nothing, and the count of copies is what has to
+    be established before a merge is claimed (rule 17, applied to one's own fix).
+    """
+    rows = allowed_pair_rows({"ALLOWED_PAIRS": {("BTC", "LTC")}, "RPC": {}}, {})
+
+    assert rows, "ALLOWED_PAIRS was seeded, so a row must come back"
+    for row in rows:
+        missing_keys = sorted(set(REFUSAL_KEYS) - set(row))
+        assert not missing_keys, (
+            f"allowed_pair_rows() dropped {missing_keys} from its row. Every consumer that "
+            f"reads the keys -- open_swap.blocked_by(), pair_verdicts.py, templates/"
+            f"admin.html's cross-check -- then cannot see that condition, while `reason` "
+            f"stays correct and hides it."
+        )
+
+
+def test_an_unreachable_leg_is_named_all_the_way_through_to_the_cause(tmp_path):
+    """End to end: a chain that did not answer reaches the operator as a sentence.
+
+    This is the path that was broken in the middle. pair_serviceability() refused
+    correctly, `reason` carried the sentence correctly, and the three steps in between
+    -- row, condition key, grouped cause -- lost it. So the assertion walks all of them
+    rather than any one.
+    """
+    config = {"ALLOWED_PAIRS": {("GRC", "LTC"), ("LTC", "GRC")}, "RPC": {}}
+    adapters = {"GRC": _Payer(), "LTC": _Payer()}
+    rows = allowed_pair_rows(config, adapters, _fresh(tmp_path, "GRC"))
+
+    assert len(rows) == 2
+    for row in rows:
+        assert not row["serviceable"], "GRC is a leg of both pairs and it did not answer"
+        assert row["unreachable"], "the row must name the condition, not only the reason"
+        assert not row["missing"], "GRC has an adapter here; this is not the missing case"
+
+    causes = refusals_by_cause(rows)
+    assert len(causes) == 1, "both pairs share one down chain, so one cause (deduplicated)"
+    assert "GRC" in causes[0]
+    printed = blocked_by(rows)
+    assert NOT_ESTABLISHED not in printed
+    assert "GRC" in printed
+
+
+def test_the_operator_page_and_the_customer_page_refuse_the_same_pair(tmp_path):
+    """THE DISAGREEMENT services/pair_view.py EXISTS TO PREVENT, measured both ways.
+
+    From 2026-10-11 to 2026-10-12 admin_view.pair_rows() called pair_serviceability()
+    WITHOUT the reachability rows while routes/atm.py passed them. Sharing the function
+    was not enough: the two callers handed it different arguments, so with GRC down the
+    customer page refused GRC -> LTC and /admin called it ENABLED, in one process, from
+    one config -- verbatim the 2026-10-02 defect that module's header records.
+
+    Both surfaces are asked here, with the same three inputs, and the verdicts are
+    compared to each other rather than to a hand-written expectation: what must hold is
+    that they AGREE, and an expectation written here would be a third opinion.
+    """
+    config = {"ALLOWED_PAIRS": {("GRC", "LTC"), ("LTC", "GRC")}, "RPC": {}}
+    adapters = {"GRC": _Payer(), "LTC": _Payer()}
+    reachability = _fresh(tmp_path, "GRC")
+
+    customer = {row["label"]: row["serviceable"] for row in allowed_pair_rows(config, adapters, reachability)}
+    operator = {
+        row["label"]: row["serviceable"]
+        for row in pair_rows(config, adapters, reachability)
+        if row["label"] in customer
+    }
+
+    assert customer == {"GRC -> LTC": False, "LTC -> GRC": False}
+    assert operator == customer, (
+        "/admin and / must reach the same verdict for the same pair from the same inputs; "
+        "a difference here is the two-surface disagreement pair_serviceability() was "
+        "extracted to make impossible"
+    )
+
+    unreachable_states = {
+        row["label"]: (row["state"], row["short_detail"])
+        for row in pair_rows(config, adapters, reachability)
+        if row["label"] in customer
+    }
+    for label, (state, short_detail) in sorted(unreachable_states.items()):
+        assert state == "unreachable", f"{label} should be in the unreachable state, not {state!r}"
+        # AND IT MUST NOT SAY "no adapter". The two ways to be unreachable are different
+        # work -- export a variable and restart, versus go and start a daemon -- and the
+        # pill naming the wrong one sends the operator to the wrong place.
+        assert "did not answer" in short_detail, short_detail
+        assert "unreachable here" not in short_detail, (
+            f"{label} has adapters for both legs; the pill must not claim a missing one"
+        )

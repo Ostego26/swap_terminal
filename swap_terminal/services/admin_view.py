@@ -78,13 +78,20 @@ from network_target import solana_cluster
 from services.deadline import MINIMUM_USEFUL_CALL_SECONDS, call_timeout
 from supervisor import DEFAULT_RUN_DIR, worker_commands, worker_status
 
+from .chain_reachability import reachability_rows
+
 # THE PAIR VERDICT COMES FROM pair_view AND IS NOT COMPUTED IN THIS FILE.
 # pair_rows()'s docstring records what the second copy cost: /admin said ENABLED
 # for a pair / said DISABLED about, in one process at one moment, because this
 # module knew one of the three conditions pair_view has had since 2026-10-01.
 from .custody_separation import wallet_label
 from .helpers import parse_iso, utc_now_iso
-from .pair_view import ASSET_ROLLUP_STATES, asset_rollups, pair_serviceability
+from .pair_view import (
+    ASSET_ROLLUP_STATES,
+    REFUSAL_KEYS,
+    asset_rollups,
+    pair_serviceability,
+)
 from .swap_service import TAG_ATTRIBUTION, why_cannot_take_deposits
 from .swap_view import (
     ADDRESS_DERIVATIONS,
@@ -616,7 +623,7 @@ def recent_transitions(db, limit: int = 25) -> list[dict]:
     ).fetchall()
 
 
-def pair_rows(config, adapters: dict) -> list[dict]:
+def pair_rows(config, adapters: dict, reachability: dict | None = None) -> list[dict]:
     """Every pair this application could name, and whether it may be swapped.
 
     THREE STATES, NOT TWO, SINCE 2026-09-26. "In Config.ALLOWED_PAIRS" was the
@@ -744,19 +751,43 @@ def pair_rows(config, adapters: dict) -> list[dict]:
             # a pair that is not in ALLOWED_PAIRS, because the reason it is refused
             # is the pair list: naming a missing adapter instead would send the
             # operator to configure a chain that would change nothing.
+            # `reachability` IS PASSED THROUGH, AND NOT PASSING IT WAS THIS PAGE'S
+            # OLDEST DEFECT RETURNING THROUGH A NEW ARGUMENT. From 2026-10-11, when
+            # pair_serviceability() gained the sixth condition, until 2026-10-12 this
+            # call omitted it while routes/atm.py passed it -- so with GRC and LTC
+            # refusing connections on the operator's host, the customer page refused
+            # fourteen pairs and THIS page called them ENABLED, in the same process,
+            # from the same config. That is verbatim the disagreement this module's
+            # header records from 2026-10-02 and that pair_serviceability() was
+            # extracted to make impossible; sharing the FUNCTION is not enough if the
+            # two callers hand it different arguments.
+            #
+            # It defaults to None so operator_panel.py, which has no database open,
+            # keeps its exact behavior: None means "do not consider it", never
+            # "unreachable" (see pair_serviceability()'s own note).
+            #
+            # THE FALLBACK DICT IS DERIVED FROM REFUSAL_KEYS rather than spelled, for
+            # the reason services/pair_view.allowed_pair_rows() now derives its row:
+            # this dict omitted `unreachable` too, so a pair NOT in ALLOWED_PAIRS would
+            # have raised KeyError the moment anything below read that key. A hand-
+            # written list of the conditions has now been wrong in three separate files.
             verdict = (
-                pair_serviceability(config, adapters, from_asset, to_asset)
+                pair_serviceability(config, adapters, from_asset, to_asset, reachability)
                 if enabled
-                else {"missing": [], "cannot_pay": "", "cannot_take": "", "cannot_quote": "",
-                      "cannot_establish": "", "serviceable": False, "reason": ""}
+                else {
+                    **{key: [] if key == "missing" else "" for key in REFUSAL_KEYS},
+                    "serviceable": False,
+                    "reason": "",
+                }
             )
             missing = verdict["missing"]
+            unreachable = verdict["unreachable"]
             if not enabled:
                 state, detail = "disabled", (
                     "NOT in Config.ALLOWED_PAIRS -- a quote for this pair is refused before anything else happens"
                 )
                 short_detail = "not in ALLOWED_PAIRS"
-            elif missing:
+            elif missing or unreachable:
                 state, detail = "unreachable", (
                     "in Config.ALLOWED_PAIRS, but not reachable from this process: "
                     + verdict["reason"]
@@ -767,7 +798,19 @@ def pair_rows(config, adapters: dict) -> list[dict]:
                 # costs ("a quote WILL price; create_swap() refuses") is in that
                 # panel's own note, once per page. `missing` is already on the
                 # row, so this is a rendering of it and not a second derivation.
-                short_detail = f"{_and_list(missing)} unreachable here"
+                #
+                # TWO WAYS TO BE UNREACHABLE AND THE PILL MUST NOT MERGE THEM, because
+                # they are different work: no adapter means export a variable and
+                # restart, and a daemon that did not answer means go and start it.
+                # `missing` is checked first for pair_serviceability()'s own reason --
+                # a chain with no adapter was never asked, so it cannot have a
+                # reachability row, and reporting both would print two causes for one
+                # pair.
+                short_detail = (
+                    f"{_and_list(missing)} unreachable here"
+                    if missing
+                    else "a chain did not answer when a worker last asked"
+                )
             elif not verdict["serviceable"]:
                 # THE STATE THAT WAS MISSING. Both chains reachable and the pair
                 # still cannot complete, which is the case that read ENABLED on this
@@ -835,10 +878,14 @@ def pair_rows(config, adapters: dict) -> list[dict]:
                     # to cross-check its own Chains table, and
                     # tests/test_customer_page_layout.py asserts the two surfaces
                     # report every pair the same way.
-                    "cannot_pay": verdict["cannot_pay"],
-                    "cannot_take": verdict["cannot_take"],
-                    "cannot_quote": verdict["cannot_quote"],
-                    "cannot_establish": verdict["cannot_establish"],
+                    # DERIVED FROM REFUSAL_KEYS, 2026-10-12. `missing` is set above and
+                    # is re-stated by this expansion with the identical value, which is
+                    # deliberate: one source for all six beats five derived and one
+                    # special-cased. The four that were spelled here omitted
+                    # `unreachable`, so templates/admin.html's cross-check against its
+                    # own Chains table could not see the condition that was refusing
+                    # fourteen pairs.
+                    **{key: verdict[key] for key in REFUSAL_KEYS},
                     "serviceable": enabled and verdict["serviceable"],
                     "detail": detail,
                     "short_detail": short_detail,
@@ -1399,7 +1446,19 @@ def overview(db, config, adapters: dict, now_iso: str | None = None, run_dir=Non
     module and neither is reachable from here.
     """
     now = utc_now_iso() if now_iso is None else now_iso
-    _pairs = pair_rows(config, adapters)
+    # THE REACHABILITY ROWS, READ ONCE AND HANDED DOWN. `db` has been this function's
+    # first argument since it was written; what it had never done was read the table
+    # routes/atm.py reads for the customer page, which is why the two surfaces
+    # disagreed about fourteen pairs on 2026-10-12 (pair_rows()'s own call site has the
+    # measurement). ONE query for up to thirty-six ordered pairs, which is the reason
+    # reachability_rows() returns a dict rather than taking an asset.
+    #
+    # NOT GUARDED, deliberately: /admin is the operator's page, `db` is the app's own
+    # connection, and a database this read cannot make is one every other panel on this
+    # page has already failed on. The silent-on-failure posture belongs where a gate
+    # would otherwise refuse a swap (services/swap_service._unreachable_leg_for_swap),
+    # not where a report would otherwise be honest about being broken.
+    _pairs = pair_rows(config, adapters, reachability_rows(db))
     return {
         "generated_at": now,
         # The tab strip's entries, from the one ordered list above. Passed rather

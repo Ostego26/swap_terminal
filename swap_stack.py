@@ -142,6 +142,7 @@ from swap_terminal.stack_authority import (  # noqa: E402
     down_verdict,
     include_entries,
     listening_inodes,
+    pair_exit_code,
     pids_owning_inodes,
     port_is_free,
     probe_detail,
@@ -2217,13 +2218,52 @@ def cmd_pairs(files: tuple[str, ...]) -> int:
         [sys.executable, str(script)], cwd=REPO_ROOT, check=False,
     )
     say("")
-    if finished.returncode:
-        say(f"  exit {finished.returncode}            at least one allowed pair cannot be quoted -- the")
+    say_pair_exit(finished.returncode)
+    return finished.returncode
+
+
+def say_pair_exit(code: int) -> None:
+    """What the report's exit code MEANS, next to it. A crash is not a verdict.
+
+    THE DEFECT THIS FIXES WAS ON THE OPERATOR'S SCREEN. They ran this with the system
+    interpreter instead of the venv, pair_verdicts.py died at import on a missing
+    `bech32`, CPython exited 1, and this function's predecessor printed "at least one
+    allowed pair cannot be quoted -- the `blocked by` block above says which condition".
+    There was no block above. A launcher reported a specific verdict about thirty pairs
+    nothing had evaluated, which is rule 13's defect with the words swapped: skipped
+    plus FAILURE reads as a measurement where skipped plus success at least reads as
+    noise.
+
+    stack_authority.PAIR_EXIT_CODES IS THE VOCABULARY and this function knows nothing
+    the report does not declare. Every code OUTSIDE it is "the report did not run", and
+    the sentence says what that does and does not establish -- the posture cmd_chains()
+    already takes for a container that is not serving ("nothing was asked, so this says
+    NOTHING about the chains").
+
+    Its own function so a test can call it with each code without running docker or the
+    report (rule 10: the decision is "what does this number mean", and a decision only
+    reachable by running a subprocess is one nobody has checked).
+    """
+    if code == pair_exit_code("all_quotable"):
+        say(f"  exit {code}            every allowed pair can be quoted right now")
+        return
+    if code == pair_exit_code("some_unavailable"):
+        say(f"  exit {code}            at least one allowed pair cannot be quoted -- the")
         say("                    `blocked by` block above says which condition, for how many pairs,")
         say("                    and what to do about each")
-    else:
-        say(f"  exit {finished.returncode}            every allowed pair can be quoted right now")
-    return finished.returncode
+        return
+    if code == pair_exit_code("no_pairs"):
+        say(f"  exit {code}            Config.ALLOWED_PAIRS is empty, so there was no pair to evaluate.")
+        say("                    Six dark lamps is the CORRECT reading of that, and it is not a")
+        say("                    daemon problem -- nothing is offered because nothing is allowed.")
+        return
+    say(f"  exit {code}            THE REPORT DID NOT RUN, so this says NOTHING about the pairs.")
+    say("                    The verdict codes are 0, 3 and 4 (stack_authority.PAIR_EXIT_CODES);")
+    say("                    1 is CPython's uncaught-exception code and 2 is argparse's, so a")
+    say("                    code outside that set means it died before reaching a verdict.")
+    say(f"                    It ran under {sys.executable} -- a ModuleNotFoundError above means")
+    say("                    that interpreter lacks this project's dependencies. Activate the")
+    say("                    virtualenv and run this again; nothing was measured.")
 
 def build_parser() -> argparse.ArgumentParser:
     """The command line this file accepts. Its own function so a test can ask it.

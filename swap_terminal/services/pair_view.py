@@ -314,8 +314,30 @@ def refusals_by_cause(rows: list[dict]) -> list[str]:
     services/quote_service.why_cannot_quote and why_cannot_establish_payout_floor,
     services/chain_reachability.reachability_refusal), so that module stays the one
     place that knows why. Deduplicated because two pairs can share one cause and
-    printing it twice reads as two problems: on the operator's host 2026-10-11, six
-    pairs shared one "GRC did not answer" and six more shared one for LTC.
+    printing it twice reads as two problems: on the operator's host 2026-10-12, with GRC
+    and LTC both refusing connections, FOURTEEN of thirty pairs had a down leg and there
+    are two down daemons.
+
+    AND THAT SENTENCE WAS FALSE WHEN IT WAS FIRST WRITTEN, hours earlier the same day,
+    which is kept rather than quietly corrected. The dedup is `set()` over strings, and
+    reachability_refusal() NAMES THE AGE in its sentence -- correctly, since "GRC is not
+    answering" and "GRC was not answering nine minutes ago" are different claims. It
+    computed that age per CALL, and this function's caller evaluates one verdict per
+    ordered pair, so one down chain produced a different string for every pair it is a
+    leg of and NOTHING deduplicated. Measured by the test written to confirm the claim:
+
+        assert len(causes) == 1
+        AssertionError: 2 == 1
+          ['... did not answer ... (0.00003µfn ago, via get_balance)',
+           '... did not answer ... (0.0001µfn ago, via get_balance)']
+
+    The fix is not here and is not a normalized dedup key: reachability_rows() now
+    stamps `age_seconds` once per read, from one clock reading, so every pair in one
+    render names the same age for the same chain and identical causes are identical
+    strings. That is the decision services/admin_view.overview() already states for
+    freshness, one layer down. A comment asserting a behavior the code did not have is
+    rule 16's wrong comment, and this one was in the docstring of the function whose
+    whole job is the collapse.
 
     ORDER IS REFUSAL_KEYS' ORDER, which is pair_serviceability()'s evaluation order,
     which is cheapest-refusal-first. So a reader sees the configuration causes before
@@ -443,11 +465,35 @@ def allowed_pair_rows(config, adapters, reachability: dict | None = None) -> lis
                 # without re-asking, and nothing re-derives a verdict that is decided
                 # in exactly one place (modules/htlc_assets.settlement_verdict()).
                 "settlement": settlement_verdict(from_asset, to_asset),
-                "missing": verdict["missing"],
-                "cannot_pay": verdict["cannot_pay"],
-                "cannot_take": verdict["cannot_take"],
-                "cannot_quote": verdict["cannot_quote"],
-                "cannot_establish": verdict["cannot_establish"],
+                # EVERY REFUSAL KEY, DERIVED, AND THIS LINE REPLACED FIVE HAND-WRITTEN
+                # ONES ON 2026-10-12 BECAUSE THE SIXTH WAS MISSING FROM THEM.
+                #
+                # `unreachable` was added to pair_serviceability() on 2026-10-11 and NOT
+                # here, so the verdict computed it, `serviceable` came back False from
+                # it, and the row carried no key saying why. Measured on the operator's
+                # host the next morning, with GRC and LTC both refusing connections:
+                #
+                #     GRC -> LTC   blocked by NOTHING NAMED
+                #     LTC -> GRC   blocked by NOTHING NAMED
+                #     ... 14 of 30 pairs, every one with a GRC or LTC leg
+                #     blocked by      30 of 30 pairs, by condition:
+                #       unreachable    0 of 30      <- FALSE, and it was the actual cause
+                #
+                # The count was the output's whole purpose and it was wrong in the one
+                # direction that matters: it told the operator to go and look at five
+                # conditions that were fine. `reason` was right all along -- it falls
+                # through to `unreachable` -- so /admin's prose column stayed correct
+                # while every consumer reading the KEYS was wrong, which is why this
+                # survived a day.
+                #
+                # THAT IS THE SAME DEFECT I HAD FIXED SIX HOURS EARLIER, one layer out.
+                # open_swap.blocked_by() held a second list of the conditions and I
+                # replaced it with refusals_by_cause() iterating REFUSAL_KEYS. This was
+                # the THIRD list, and merging one of three is why the fix produced
+                # nothing: refusals_by_cause() asked each row for a key the row builder
+                # had never put there. Rule 8 is about copies, and the count of copies is
+                # the thing to establish before claiming a merge.
+                **{key: verdict[key] for key in REFUSAL_KEYS},
                 # `(none)` is never right here: a row is either enabled, in which
                 # case the reason says all three tests passed, or it names what
                 # refused. A blank reason beside DISABLED would be rule 14's empty

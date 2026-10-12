@@ -4,7 +4,10 @@
 Role: file (entry point; the operator runs this, or `swap_stack.py pairs` runs it
       inside the container)
 Reads: the process environment through config.Config, chains/registry.build_adapters(),
-      and the `chain_reachability` table in Config.DB_PATH (read-only, one SELECT).
+      and the `chain_reachability` table in Config.DB_PATH (read-only, one SELECT,
+      through services/chain_reachability.reachability_from_path() -- which lived here
+      as reachability_or_empty() for six hours on 2026-10-12 and moved to the module
+      that owns the table the moment open_swap.py needed the same read).
       ONE NETWORK READ IS POSSIBLE and it is the page's own: a pair paying out in SOL
       that has passed every other condition reaches
       services/quote_service.why_cannot_establish_payout_floor(), which asks the
@@ -71,7 +74,6 @@ already exists to keep.
 from __future__ import annotations
 
 import argparse
-import sqlite3
 import sys
 import textwrap
 import time
@@ -80,12 +82,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "swap_terminal"))
 
 from config import Config
-from db import connect_db
 from microfortnights import format_duration
 from network_target import startup_lines
 from report_block import CONTINUATION, labeled, wrapped
-from services.chain_reachability import reachability_rows, row_age_seconds
+from services.chain_reachability import reachability_from_path, row_age_seconds
 from services.pair_view import REFUSAL_KEYS, allowed_pair_rows, refusals_by_cause
+from stack_authority import pair_exit_code
 from workers.common import build_adapters_from_config, get_config_dict
 
 #: What each condition means for the PERSON READING, in one clause. Keyed by the same
@@ -106,42 +108,6 @@ WHAT_TO_DO = {
     "cannot_quote": "record what a payout on that chain costs this desk",
     "cannot_establish": "that chain could not be asked for its own payout minimum",
 }
-
-
-def reachability_or_empty(db_path: str) -> tuple[dict, str, str]:
-    """The stored readings, a one-line verdict, and the detail behind it. Never raises.
-
-    ({}, ...) ON ANY FAILURE, which is the same posture
-    services/swap_service._unreachable_leg_for_swap() takes and for the same reason:
-    this gate's own failure must not become a refusal. An unreadable table means
-    "reachability was not considered", which is what reachability=None means to
-    pair_serviceability() -- not "every chain is down".
-
-    THREE RETURN VALUES AND NOT ONE, because a report that silently drops the sixth
-    condition is rule 14's blank gap: the reader cannot tell a database with no rows
-    from a database it could not open, and those are different problems with different
-    fixes. The HEADLINE is one line so the label column stays readable; the DETAIL is
-    whatever the authority said, in full, and db.connect_db()'s refusal in particular
-    is a five-clause remedy worth keeping whole.
-    """
-    try:
-        db = connect_db(db_path)
-    except (sqlite3.Error, OSError, RuntimeError, ValueError) as error:
-        return {}, f"NOT CONSIDERED -- {db_path} could not be opened", str(error)
-    try:
-        rows = reachability_rows(db)
-    except sqlite3.Error as error:
-        return {}, "NOT CONSIDERED -- the chain_reachability table could not be read", str(error)
-    finally:
-        db.close()
-    if not rows:
-        return {}, f"NOT CONSIDERED -- {db_path} has no chain_reachability rows yet", (
-            "The payout and reconcile workers write a row every cycle, from a call they "
-            "were already making, so an empty table means neither worker has run against "
-            "this database. Until one does, the sixth condition refuses nothing and every "
-            "pair below is judged on configuration alone."
-        )
-    return rows, f"{len(rows)} chain(s) recorded in {db_path}", ""
 
 
 def reachability_lines(rows: dict) -> list[str]:
@@ -237,7 +203,7 @@ def run(args) -> int:
     for line in wrapped("adapters here", built):
         print(line, flush=True)
 
-    reachability, headline, detail = reachability_or_empty(db_path)
+    reachability, headline, detail = reachability_from_path(db_path)
     print(labeled("reachability", headline), flush=True)
     # THE DETAIL IS NOT FOLDED INTO THE LABEL LINE. db.connect_db()'s refusal is a
     # whole remedy block -- five `check` clauses and the 2026-10-10 measurement behind
@@ -259,7 +225,7 @@ def run(args) -> int:
                                "evaluate and six dark lamps would be correct"),
             flush=True,
         )
-        return 1
+        return pair_exit_code("no_pairs")
 
     available = [row for row in rows if row["serviceable"]]
     unavailable = [row for row in rows if not row["serviceable"]]
@@ -299,7 +265,14 @@ def run(args) -> int:
     # allowed pair can be quoted, so `swap_stack.py pairs` can be read by a script
     # and a report that printed thirty refusals cannot exit 0 (rule 13: "skipped"
     # plus "success" in one output is a defect in the output).
-    return 0 if not unavailable else 1
+    #
+    # AND THE FAILURE CODE IS 3 RATHER THAN 1, which is not cosmetic: this file died at
+    # IMPORT on the operator's host (the system interpreter had no `bech32`), CPython
+    # exited 1, and swap_stack's cmd_pairs() reported "at least one allowed pair cannot
+    # be quoted" about thirty pairs nothing had evaluated. stack_authority.
+    # PAIR_EXIT_CODES has the measurement and the reason 1 and 2 are left to CPython
+    # and argparse.
+    return pair_exit_code("all_quotable" if not unavailable else "some_unavailable")
 
 
 def build_parser() -> argparse.ArgumentParser:

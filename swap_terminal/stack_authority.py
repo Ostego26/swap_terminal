@@ -1499,6 +1499,50 @@ def chain_exit_code(status: str) -> int:
     return CHAIN_EXIT_CODES[status]
 
 
+#: THE PAIR REPORT'S EXIT CODES, AND WHY NONE OF THEM IS 1.
+#:
+#: Measured on the operator's host 2026-10-12. They ran `swap_stack.py pairs` with the
+#: system interpreter instead of the venv, pair_verdicts.py died at IMPORT with
+#: `ModuleNotFoundError: No module named 'bech32'` -- before main() could run, so
+#: nothing inside it could catch this -- CPython exited 1, and cmd_pairs() printed:
+#:
+#:     exit 1            at least one allowed pair cannot be quoted -- the
+#:                       `blocked by` block above says which condition
+#:
+#: There was no block. The report had not run at all, and the launcher reported a
+#: VERDICT about thirty pairs it had never evaluated. That is rule 13's "skipped plus
+#: success in the same output is a defect in the output", with the two words swapped:
+#: skipped plus FAILURE, which is worse, because it is a specific false claim rather
+#: than a vague one.
+#:
+#: CPython exits 1 for an uncaught exception and argparse exits 2 for a bad flag, so a
+#: verdict that uses either is indistinguishable from the report not running. These
+#: start at 3 for that reason alone, and cmd_pairs() treats every OTHER code as "the
+#: report did not run, so this says NOTHING about the pairs" -- the posture cmd_chains()
+#: already takes for a container that is not serving.
+#:
+#: `no_pairs` IS SEPARATE FROM `some_unavailable` because it is the one reading where
+#: the page is not lying: nothing is offered because nothing is allowed. Collapsing it
+#: into the verdict would send an operator looking for a down daemon over an empty
+#: Config.ALLOWED_PAIRS.
+PAIR_EXIT_CODES = {"all_quotable": 0, "some_unavailable": 3, "no_pairs": 4}
+
+
+def pair_exit_code(status: str) -> int:
+    """The exit code for a pair-verdict run. Raises on an unknown one.
+
+    RAISES RATHER THAN DEFAULTING, for chain_exit_code()'s reason one screen above: a
+    verdict this does not know about is a bug in whoever added it, and `.get(status, 1)`
+    would hide it behind the one code that means "the report crashed".
+    """
+    if status not in PAIR_EXIT_CODES:
+        raise KeyError(
+            f"no exit code for pair verdict {status!r}; PAIR_EXIT_CODES knows "
+            f"{sorted(PAIR_EXIT_CODES)}"
+        )
+    return PAIR_EXIT_CODES[status]
+
+
 #: How much of a chain probe's failure text survives into the report, per end.
 #:
 #: TWO ENDS, NOT THE FIRST N CHARACTERS, and that is the whole point of this

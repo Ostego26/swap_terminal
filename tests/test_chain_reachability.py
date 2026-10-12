@@ -69,12 +69,14 @@ sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 from chains.icp import ICPCallFailed  # noqa: E402
 from chains.solana import SolanaRPCError  # noqa: E402
 from chains.xrp import XRPRPCError  # noqa: E402
+from conftest import root_entry_point  # noqa: E402
 from db import SCHEMA, connect_db  # noqa: E402
 from prose import code_without_prose  # noqa: E402
 from services import pair_view, payout_service  # noqa: E402
 from services.chain_reachability import (  # noqa: E402
     STALE_AFTER_SECONDS,
     is_transport_failure,
+    reachability_from_path,
     reachability_refusal,
     reachability_rows,
     record_reachability,
@@ -738,3 +740,115 @@ def test_a_transport_failure_still_writes_its_row(db):
     payout_service._REPORTED_INVENTORY_FAILURES.clear()
     payout_service.refresh_wallet_inventory(db, {"LTC": RealOutage()})
     assert reachability_rows(db)["LTC"]["reachable"] is False
+
+
+# --- reachability_from_path(), which arrived here from pair_verdicts.py ---------
+#
+# IT WAS pair_verdicts.reachability_or_empty() FOR SIX HOURS on 2026-10-12, and moved
+# the moment open_swap.py needed the same read -- the operator's decision that day on
+# its catalog calling a pair available whose chain had not answered in ten minutes. Two
+# callers of one idea is rule 8's shape and the survivor belongs with the table it
+# reads, so these four gates came with it rather than staying in a test file about a
+# report. The lines-for-a-report helper stayed behind in pair_verdicts.py, which is why
+# the age and detail assertions below call its own small wrapper.
+
+
+def _path_with(tmp_path, rows=()):
+    """A real database at a path, carrying exactly these chain_reachability rows.
+
+    THE REAL SCHEMA via db.SCHEMA, for the reason the `db` fixture above uses it: the
+    column set is what reachability_rows() reads with `SELECT *`, so a table invented
+    here would measure the invention (BEHAVIORAL_VERIFICATION_PRINCIPLE).
+    """
+    path = tmp_path / "swap_terminal.db"
+    conn = connect_db(str(path), create=True)
+    conn.executescript(SCHEMA)
+    with conn:
+        for asset, reachable, asked, detail, checked_at in rows:
+            conn.execute(
+                "INSERT INTO chain_reachability (asset, reachable, asked, detail, checked_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (asset, reachable, asked, detail, checked_at),
+            )
+    conn.close()
+    return str(path)
+
+
+def report_reachability_lines(rows):
+    """pair_verdicts.reachability_lines(), loaded by path because it is an entry point.
+
+    Rule 10 puts entry points at the root where no import graph reaches them, and
+    conftest.root_entry_point() is the one copy of the loader (see
+    tests/test_root_entry_point.py). The two assertions that need it are about what an
+    OPERATOR reads, which is the report's job rather than this module's.
+    """
+    return root_entry_point("pair_verdicts.py", "pair_verdicts_for_reach").reachability_lines(rows)
+
+
+def test_a_database_that_cannot_be_opened_is_NOT_CONSIDERED_and_not_an_outage(tmp_path):
+    """The gate's own failure must not become a refusal.
+
+    An unreadable table means reachability was not considered -- which is what
+    `reachability=None` means to pair_serviceability() -- and emphatically not "every
+    chain is down". Returning {} is what makes every pair get judged on configuration
+    alone instead of all thirty being blamed on a missing file.
+    """
+    rows, headline, detail = reachability_from_path(str(tmp_path / "nope.db"))
+
+    assert rows == {}
+    assert headline.startswith("NOT CONSIDERED")
+    # db.connect_db()'s whole remedy survives into the detail rather than being
+    # truncated into the headline: a mistyped SWAP_DB_PATH is exactly what it is for.
+    assert "SWAP_DB" in detail
+
+
+def test_an_empty_table_says_no_worker_has_run_rather_than_printing_nothing(tmp_path):
+    """Rule 14: `(none)` is a result, and a blank gap is ambiguous between two causes.
+
+    An empty chain_reachability table and an unopenable database are different
+    problems with different fixes, so they do not share a sentence.
+    """
+    rows, headline, detail = reachability_from_path(_path_with(tmp_path))
+
+    assert rows == {}
+    assert "no chain_reachability rows yet" in headline
+    assert "payout and reconcile workers" in detail
+
+
+def test_a_recorded_reading_is_reported_with_its_age_and_what_it_said(tmp_path):
+    """Age is printed because STALENESS IS NOT A REFUSAL.
+
+    reachability_refusal() goes silent on a row older than STALE_AFTER_SECONDS, so a
+    chain that is genuinely down but whose reading has aged out appears as a cause
+    NOWHERE in the report. A reader who cannot see the age cannot notice that.
+    """
+    path = _path_with(tmp_path, rows=[
+        ("LTC", 0, "getblockchaininfo", "Connection refused", "2026-10-12T00:00:00+00:00"),
+        ("SOL", 1, "getVersion", "", "2026-10-12T00:00:01+00:00"),
+    ])
+    rows, headline, detail = reachability_from_path(path)
+
+    assert set(rows) == {"LTC", "SOL"}
+    assert "2 chain(s) recorded" in headline
+    assert detail == ""
+
+    lines = report_reachability_lines(rows)
+    assert any("LTC: did NOT answer" in line and "Connection refused" in line for line in lines)
+    assert any("SOL: ANSWERED" in line for line in lines)
+    assert all("ago" in line for line in lines), "every row states its age (rule 14)"
+
+
+def test_an_unreadable_timestamp_says_so_rather_than_reading_as_fresh(tmp_path):
+    """A row of unknown age refuses nothing, and the line says that.
+
+    row_age_seconds() returns None rather than 0.0 precisely so a corrupt timestamp
+    cannot look like the freshest possible reading; this is the half of that decision
+    the operator can see.
+    """
+    rows, _, _ = reachability_from_path(
+        _path_with(tmp_path, rows=[("GRC", 0, "getblockchaininfo", "", "not a timestamp")])
+    )
+
+    line, = report_reachability_lines(rows)
+    assert "age UNKNOWN" in line
+    assert "refuses nothing" in line

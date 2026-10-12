@@ -162,6 +162,7 @@ from modules.address_authority import check_address
 from modules.htlc_assets import settlement_line
 from report_block import CONTINUATION, labeled, wrapped
 from requests.exceptions import RequestException
+from services.chain_reachability import reachability_from_path
 from services.pair_view import allowed_pair_rows, refusals_by_cause
 from services.payout_capacity import as_amount, largest_fundable_payout
 from services.pricing import fetch_usd_prices
@@ -321,7 +322,7 @@ def swappable_amount(raw: str) -> float:
     return value
 
 
-def pair_catalog(config: dict, adapters: dict | None = None) -> str:
+def pair_catalog(config: dict, adapters: dict | None = None, reachability: dict | None = None) -> str:
     """Every allowed direction, marked with whether it can actually complete.
 
     Printed in the header of every run so that the terse refusal validate_pair()
@@ -342,6 +343,27 @@ def pair_catalog(config: dict, adapters: dict | None = None) -> str:
     that a caller with nothing constructed still gets the allowed list rather than a
     crash; when it is omitted the line says the reachability half was not checked
     rather than implying it passed.
+
+    AND IT NOW PASSES THE REACHABILITY ROWS, 2026-10-12, at the operator's instruction
+    after it was surfaced to them as a fund-path change (rule 16). THE ARGUMENT THAT
+    SETTLED IT, in the order it decides:
+
+      1. create_swap() ALREADY REFUSES AN UNREACHABLE LEG --
+         services/swap_service._unreachable_leg_for_swap() has since 2026-10-11. So this
+         line printed AVAILABLE for a pair the function called twenty lines below would
+         refuse, which is not a conservative omission but a self-contradicting report.
+      2. IT CAN ONLY EVER REFUSE MORE. Passing the rows removes pairs from the offered
+         list and adds none, so no reachable path is closed and no wrong address, amount
+         or fee becomes possible. The fund-path risk of the change is in the direction
+         of declining to offer, which is the safe one.
+      3. THE PAGE PASSES THEM (routes/atm.py) AND SO DOES /admin. Leaving this out kept
+         the overclaim alive in exactly the tool whose docstring above says it exists to
+         stop handing an operator an overclaim the page had stopped making.
+
+    reachability=None KEEPS THE OLD BEHAVIOR EXACTLY, for check_pair()'s call at the
+    refusal site: that one is building a sentence about a pair outside ALLOWED_PAIRS and
+    has no database open, and reachability_refusal() is silent for a missing or stale
+    row anyway, so the catalog there degrades to what it always printed.
     """
     if adapters is None:
         pairs = sorted(f"{source}->{destination}" for source, destination in config["ALLOWED_PAIRS"])
@@ -351,7 +373,7 @@ def pair_catalog(config: dict, adapters: dict | None = None) -> str:
             if pairs
             else "(none) -- Config.ALLOWED_PAIRS is empty, so no swap of any kind can be priced"
         )
-    rows = allowed_pair_rows(config, adapters)
+    rows = allowed_pair_rows(config, adapters, reachability)
     if not rows:
         return "(none) -- Config.ALLOWED_PAIRS is empty, so no swap of any kind can be priced"
     marked = ", ".join(
@@ -1219,11 +1241,20 @@ def run(args) -> int:
     print(labeled("amount", f"{args.amount} {from_asset}  <- what you will deposit"), flush=True)
     print(labeled("payout address", f"{args.payout_address}  <- where {to_asset} is sent; FINAL once the "
                                     f"swap exists"), flush=True)
+    # THE ROWS THE CONTAINER'S OWN WORKERS WROTE, read from the database this run is
+    # about to write to. Never raises and is silent on a database with no rows, so a
+    # first run against a fresh --db prints exactly what it printed before.
+    reachability, reachability_note, _ = reachability_from_path(db_path)
     print(
-        labeled("pairs allowed", f"{pair_catalog(config, adapters)}  <- ALLOWED_PAIRS, and whether this "
-                                 f"process can reach and pay out each"),
+        labeled("pairs allowed", f"{pair_catalog(config, adapters, reachability)}  <- ALLOWED_PAIRS, and "
+                                 f"whether this process can reach and pay out each"),
         flush=True,
     )
+    # ECHO WHAT DECIDED THE LINE ABOVE (rule 14). "NOT CONSIDERED" and "4 chain(s)
+    # recorded" produce different catalogs from the same configuration, and a reader
+    # who cannot tell which they are holding cannot act on either.
+    for line in wrapped("reachability", reachability_note):
+        print(line, flush=True)
     print(labeled("adapters here", ", ".join(sorted(adapters))
                   or "(none) -- no chain is configured in this process"), flush=True)
 

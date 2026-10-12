@@ -27,6 +27,11 @@ THE TWO THINGS THAT MUST NOT DRIFT, and they are what this file pins:
                  Asserting the coverage here turns that into a red test instead.
                  This is the same gap that let `unreachable` ship unnamed through
                  open_swap.blocked_by(); see tests/test_pair_refusal_causes.py.
+  the exit code  a verdict and a CRASH must not read alike. The operator ran this with
+                 the system interpreter on 2026-10-12, it died at import on a missing
+                 `bech32`, CPython exited 1, and swap_stack printed "at least one allowed
+                 pair cannot be quoted" about thirty pairs nothing had evaluated. The
+                 verdict codes start at 3 for that reason.
   the partition  pair_serviceability() short-circuits, so AT MOST ONE condition is
                  non-empty per row and the six counts partition the unavailable
                  pairs. That is what makes them addable, and a reader adding them is
@@ -51,6 +56,7 @@ from config import Config
 from conftest import root_entry_point
 from db import init_db
 from services.pair_view import REFUSAL_KEYS
+from stack_authority import PAIR_EXIT_CODES, pair_exit_code
 
 verdicts = root_entry_point("pair_verdicts.py", "pair_verdicts_entry")
 
@@ -118,75 +124,6 @@ def test_the_counts_partition_the_unavailable_pairs_rather_than_overlapping():
     assert len(counts) == len(REFUSAL_KEYS), "every condition is listed, zeroes included (rule 14)"
 
 
-def test_a_database_that_cannot_be_opened_is_NOT_CONSIDERED_and_not_an_outage(tmp_path):
-    """The gate's own failure must not become a refusal.
-
-    An unreadable table means reachability was not considered -- which is what
-    `reachability=None` means to pair_serviceability() -- and emphatically not "every
-    chain is down". Returning {} is what makes every pair get judged on configuration
-    alone instead of all thirty being blamed on a missing file.
-    """
-    rows, headline, detail = verdicts.reachability_or_empty(str(tmp_path / "nope.db"))
-
-    assert rows == {}
-    assert headline.startswith("NOT CONSIDERED")
-    # db.connect_db()'s whole remedy survives into the detail rather than being
-    # truncated into the headline: a mistyped SWAP_DB_PATH is exactly what it is for.
-    assert "SWAP_DB" in detail
-
-
-def test_an_empty_table_says_no_worker_has_run_rather_than_printing_nothing(tmp_path):
-    """Rule 14: `(none)` is a result, and a blank gap is ambiguous between two causes.
-
-    An empty chain_reachability table and an unopenable database are different
-    problems with different fixes, so they do not share a sentence.
-    """
-    rows, headline, detail = verdicts.reachability_or_empty(_db(tmp_path))
-
-    assert rows == {}
-    assert "no chain_reachability rows yet" in headline
-    assert "payout and reconcile workers" in detail
-
-
-def test_a_recorded_reading_is_reported_with_its_age_and_what_it_said(tmp_path):
-    """Age is printed because STALENESS IS NOT A REFUSAL.
-
-    reachability_refusal() goes silent on a row older than STALE_AFTER_SECONDS, so a
-    chain that is genuinely down but whose reading has aged out appears as a cause
-    NOWHERE in the report. A reader who cannot see the age cannot notice that.
-    """
-    path = _db(tmp_path, rows=[
-        ("LTC", 0, "getblockchaininfo", "Connection refused", "2026-10-12T00:00:00+00:00"),
-        ("SOL", 1, "getVersion", "", "2026-10-12T00:00:01+00:00"),
-    ])
-    rows, headline, detail = verdicts.reachability_or_empty(path)
-
-    assert set(rows) == {"LTC", "SOL"}
-    assert "2 chain(s) recorded" in headline
-    assert detail == ""
-
-    lines = verdicts.reachability_lines(rows)
-    assert any("LTC: did NOT answer" in line and "Connection refused" in line for line in lines)
-    assert any("SOL: ANSWERED" in line for line in lines)
-    assert all("ago" in line for line in lines), "every row states its age (rule 14)"
-
-
-def test_an_unreadable_timestamp_says_so_rather_than_reading_as_fresh(tmp_path):
-    """A row of unknown age refuses nothing, and the line says that.
-
-    row_age_seconds() returns None rather than 0.0 precisely so a corrupt timestamp
-    cannot look like the freshest possible reading; this is the half of that decision
-    the operator can see.
-    """
-    rows, _, _ = verdicts.reachability_or_empty(
-        _db(tmp_path, rows=[("GRC", 0, "getblockchaininfo", "", "not a timestamp")])
-    )
-
-    line, = verdicts.reachability_lines(rows)
-    assert "age UNKNOWN" in line
-    assert "refuses nothing" in line
-
-
 def test_the_report_exits_on_the_verdict_and_not_on_having_printed(tmp_path, capsys):
     """Rule 13: "skipped" plus "success" in one output is a defect in the output.
 
@@ -198,7 +135,11 @@ def test_the_report_exits_on_the_verdict_and_not_on_having_printed(tmp_path, cap
     code = verdicts.main(["--db", _db(tmp_path)])
     printed = capsys.readouterr().out
 
-    assert code == 1, "pairs are unavailable, so the exit code is a failure"
+    assert code == pair_exit_code("some_unavailable"), (
+        "pairs are unavailable, so the exit code is the VERDICT code and not 1 -- 1 is "
+        "what CPython exits on an uncaught exception, and the two read alike on the "
+        "operator's screen until 2026-10-12 (stack_authority.PAIR_EXIT_CODES)"
+    )
     assert "allowed pairs can be quoted right now" in printed
     assert "blocked by" in printed
     # THE DENOMINATOR BESIDE THE NUMERATOR (rule 3), for every condition including the
@@ -237,5 +178,29 @@ def test_no_pair_at_all_is_a_failure_rather_than_a_clean_run(tmp_path, capsys, m
     """
     monkeypatch.setattr(verdicts, "allowed_pair_rows", lambda *args, **kwargs: [])
 
-    assert verdicts.main(["--db", _db(tmp_path)]) == 1
+    assert verdicts.main(["--db", _db(tmp_path)]) == pair_exit_code("no_pairs")
     assert "ALLOWED_PAIRS is empty" in capsys.readouterr().out
+
+
+def test_the_verdict_codes_leave_1_and_2_to_cpython_and_argparse():
+    """A crash must not be reportable as a verdict, and 1 is what a crash exits with.
+
+    THE MEASUREMENT IS THE OPERATOR'S OWN RUN. `swap_stack.py pairs` under the system
+    interpreter: pair_verdicts.py died at IMPORT (`No module named 'bech32'`), before
+    main() could run, so nothing inside this file could catch it; CPython exited 1; and
+    cmd_pairs() printed "exit 1  at least one allowed pair cannot be quoted -- the
+    `blocked by` block above says which condition". There was no block.
+
+    So no verdict may use 1 (CPython's uncaught-exception code) or 2 (argparse's). That
+    is a property of the SET, which is why it is asserted over the set rather than over
+    the three call sites: a fourth verdict added at 1 would pass three per-code tests.
+    """
+    assert 1 not in PAIR_EXIT_CODES.values(), (
+        "1 is CPython's exit code for an uncaught exception, so a verdict using it is "
+        "indistinguishable from the report having crashed"
+    )
+    assert 2 not in PAIR_EXIT_CODES.values(), "2 is argparse's code for a bad flag"
+    assert pair_exit_code("all_quotable") == 0, "success is still 0, as every tool's is"
+    assert len(set(PAIR_EXIT_CODES.values())) == len(PAIR_EXIT_CODES), (
+        "two verdicts sharing a code cannot be told apart by a script"
+    )

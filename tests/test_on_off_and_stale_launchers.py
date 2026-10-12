@@ -51,6 +51,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
 import chain_daemons  # noqa: E402
+from stack_authority import PAIR_EXIT_CODES, pair_exit_code  # noqa: E402
 
 import install_desktop_icon as installer_module  # noqa: E402
 import swap_stack  # noqa: E402
@@ -515,7 +516,10 @@ def test_pairs_returns_the_reports_own_verdict_rather_than_a_second_opinion(monk
         lambda argv, **kwargs: subprocess.CompletedProcess(argv, 7),
     )
 
-    assert swap_stack.cmd_pairs(()) == 7
+    assert swap_stack.cmd_pairs(()) == 7, (
+        "7 is not in PAIR_EXIT_CODES, so cmd_pairs() must pass it through unchanged "
+        "rather than translating it into a verdict of its own"
+    )
 
 
 def test_a_missing_report_says_NOTHING_WAS_ASKED_rather_than_passing(monkeypatch, capsys):
@@ -536,3 +540,55 @@ def test_a_missing_report_says_NOTHING_WAS_ASKED_rather_than_passing(monkeypatch
     printed = capsys.readouterr().out
     assert "MISSING" in printed
     assert "says NOTHING" in printed
+
+
+def test_a_crash_is_reported_as_NOTHING_ESTABLISHED_and_not_as_a_verdict(capsys):
+    """THE DEFECT WAS ON THE OPERATOR'S SCREEN, in the output of the tool that reports.
+
+    2026-10-12: they ran `pairs` with the system interpreter, pair_verdicts.py died at
+    import on a missing `bech32`, CPython exited 1, and cmd_pairs() printed
+
+        exit 1            at least one allowed pair cannot be quoted -- the
+                          `blocked by` block above says which condition
+
+    with no block above it. A specific false claim about thirty pairs nothing had
+    evaluated, which is worse than rule 13's "skipped plus success" because it is
+    actionable in the wrong direction: it sends the operator to look at daemons.
+
+    EVERY CODE OUTSIDE THE VOCABULARY, not just 1, because the point is the set. The
+    parametrised sweep below covers the three verdicts; this covers everything else.
+    """
+    for code in (1, 2, 127, -9):
+        swap_stack.say_pair_exit(code)
+        printed = capsys.readouterr().out
+        assert "THE REPORT DID NOT RUN" in printed, code
+        assert "says NOTHING about the pairs" in printed, code
+        assert "cannot be quoted" not in printed, (
+            f"exit {code} is not a verdict and must not be reported as one"
+        )
+        assert sys.executable in printed, (
+            "the interpreter is the thing to change when a dependency is missing, so it "
+            "is echoed (rule 14)"
+        )
+
+
+@pytest.mark.parametrize("status", sorted(PAIR_EXIT_CODES))
+def test_each_verdict_code_gets_its_own_sentence(status, capsys):
+    """Three verdicts, three distinct sentences, and none of them the crash sentence.
+
+    `no_pairs` is separate from `some_unavailable` on purpose: an empty
+    Config.ALLOWED_PAIRS is the one reading where six dark lamps is CORRECT, and
+    collapsing it into the verdict would send an operator hunting a down daemon.
+    """
+    swap_stack.say_pair_exit(pair_exit_code(status))
+    printed = capsys.readouterr().out
+
+    assert "THE REPORT DID NOT RUN" not in printed
+    expected = {
+        "all_quotable": "every allowed pair can be quoted",
+        "some_unavailable": "at least one allowed pair cannot be quoted",
+        "no_pairs": "ALLOWED_PAIRS is empty",
+    }
+    assert expected[status] in printed, (
+        f"{status} must say what it means next to the number (rule 14); got {printed!r}"
+    )

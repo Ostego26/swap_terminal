@@ -660,7 +660,20 @@ class ICPAdapter:
     # operator had to say so -- and ICP was the third. Derived here, and
     # tests/test_every_payable_adapter_derives_can_spend.py is what stops a fourth.
     can_spend = False
-    payout_refusal = f"ICP {missing_identity_refusal()}"
+    # NO `ICP ` PREFIX, AND IT WAS HERE UNTIL 2026-10-12. chains/registry.
+    # why_cannot_pay_out() returns `f"{asset} {detail}"` -- it is the one place that
+    # names the chain, which is what lets SOL and XRP return bare sentences -- so this
+    # adapter's prefix was the second one and the operator's own `swap_stack.py pairs`
+    # run printed the result:
+    #
+    #     ICP ICP cannot pay out from this process: the ledger's `transfer` debits ...
+    #
+    # on /admin and in the pair report, beside SOL's and XRP's single-named causes.
+    # Rule 8 in four characters: one concept, two implementations, and the one that was
+    # added later is the one that was wrong.
+    # tests/test_every_payable_adapter_derives_can_spend.py now fails any adapter whose
+    # payout_refusal begins with its own ticker.
+    payout_refusal = missing_identity_refusal()
 
     def __init__(self, ledger_canister_id: str, owner_principal: str, call):
         # `call` IS REQUIRED AND THE TRANSPORT SETTINGS ARE GONE FROM HERE.
@@ -725,7 +738,9 @@ class ICPAdapter:
         # reason for a chain that can pay -- which is the wrong-comment bug (rule 16)
         # with a page render behind it.
         self.can_spend = payout_identity_is_present()
-        self.payout_refusal = "" if self.can_spend else f"ICP {missing_identity_refusal()}"
+        # Bare, for the reason on the class attribute above: why_cannot_pay_out() is the
+        # one place that prefixes the asset, and prefixing here printed "ICP ICP".
+        self.payout_refusal = "" if self.can_spend else missing_identity_refusal()
 
     # -- derivation, no I/O -------------------------------------------------
 

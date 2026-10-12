@@ -212,3 +212,74 @@ def test_the_fail_closed_class_level_default_is_still_there():
             f"is {class_level_can_spend(node)!r}. Anything reading the class without constructing "
             f"an adapter would be told this chain can pay out"
         )
+
+
+# --- the SENTENCE, not just the boolean ----------------------------------------
+
+
+#: The ticker each payable adapter module speaks for. Written out because the gate
+#: below needs the pairing of (class, asset) that chains/registry.build_adapters()
+#: makes at runtime, and this file deliberately does not import the adapters -- see
+#: adapter_classes(). tests/test_every_adapter_names_its_own_asset.py is what keeps
+#: this honest: it asserts each adapter declares its own `asset`, so a mismatch here
+#: is caught there rather than guessed at.
+PAYABLE_ASSETS = {"icp.py": "ICP", "solana.py": "SOL", "xrp.py": "XRP"}
+
+
+def test_no_adapter_prefixes_its_own_ticker_onto_its_payout_refusal():
+    """ONE place names the chain, and for three days ICP named it twice.
+
+    chains/registry.why_cannot_pay_out() returns `f"{asset} {detail}"`. That is the one
+    place that names the chain, which is exactly why chains/solana.py and chains/xrp.py
+    return BARE sentences ("cannot pay out: SOL_PAYOUT_KEYPAIR_PATH is not set ..."). 
+    chains/icp.py prefixed its own, so the rendered cause read, on the operator's
+    2026-10-12 `swap_stack.py pairs` run and on /admin before it:
+
+        ICP ICP cannot pay out from this process: the ledger's `transfer` debits ...
+
+    beside SOL's and XRP's correctly single-named causes in the same list.
+
+    BEHAVIORAL, NOT A SOURCE SCAN: it calls the real why_cannot_pay_out() with the real
+    adapter CLASS and asserts on the string an operator would read. The class attribute
+    is the fail-closed default every one of these declares, so no instance is built, no
+    socket opens and no environment is needed -- and getattr() on the class is the same
+    read the function makes on an instance.
+
+    IMPORTED INSIDE THE TEST, unlike the rest of this file: the structural gates above
+    parse source precisely so they do not depend on base58 and bech32 being installed,
+    and that reasoning is theirs rather than this file's. This one needs the real
+    function, so it pays for the imports, and it pays for them here so a missing
+    dependency fails this test alone instead of dropping every gate in the module.
+    """
+    from chains.registry import why_cannot_pay_out  # noqa: PLC0415 -- see the docstring
+
+    modules = {}
+    for name, _node in adapter_classes():
+        modules.setdefault(name, True)
+    assert set(PAYABLE_ASSETS) <= set(modules), (
+        f"PAYABLE_ASSETS names {sorted(PAYABLE_ASSETS)} and the sweep found "
+        f"{sorted(modules)}; a renamed module makes this gate measure nothing"
+    )
+
+    import importlib  # noqa: PLC0415 -- see the docstring
+
+    for module_name, asset in sorted(PAYABLE_ASSETS.items()):
+        module = importlib.import_module(f"chains.{module_name[:-3]}")
+        adapters = {
+            asset: next(
+                value for value in vars(module).values()
+                if isinstance(value, type) and hasattr(value, PAYOUT_METHOD)
+                and hasattr(value, "payout_refusal")
+            )
+        }
+        rendered = why_cannot_pay_out(adapters, asset)
+        assert rendered, f"{asset}'s class-level default must refuse; it is the fail-closed one"
+        assert rendered.startswith(f"{asset} "), (
+            f"why_cannot_pay_out() is the one place that names the chain, so {asset}'s "
+            f"rendered cause must begin with it exactly once"
+        )
+        assert not rendered.startswith(f"{asset} {asset} "), (
+            f"{module_name} prefixes {asset!r} onto its own payout_refusal and "
+            f"why_cannot_pay_out() prefixes it again, so an operator reads "
+            f"{rendered[:len(asset) * 2 + 2]!r}. Return the sentence bare."
+        )
