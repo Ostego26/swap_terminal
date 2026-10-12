@@ -2557,12 +2557,28 @@ def test_restart_starts_once_the_stop_is_proven_and_returns_ups_code(monkeypatch
 def test_restart_says_up_front_that_it_leaves_the_chain_daemons_running(monkeypatch, capsys):
     """Before the wait, not after it (rule 14), and before anything is stopped.
 
-    "everything stops safely" is what was asked for, and the honest answer is
-    that the wallet daemons are deliberately NOT part of everything:
-    stack_authority.py's header refuses to mark them stoppable "ever, under any
-    flag" because nothing here holds their passphrase, so a stop it performed
-    could not be undone by the `up` that follows. An operator reading
-    `swapterm restart` must not have to discover that from the absence of a line.
+    "everything stops safely" is what was asked for, and the banner has to say what
+    happens to the wallet daemons BEFORE it acts, not leave an operator to infer it
+    from the absence of a line.
+
+    WHAT IT ASSERTS CHANGED ON 2026-10-12 AND THE REQUIREMENT DID NOT. This read
+    `"passphrase" in header` and nothing else, which encoded the reason as it stood
+    when the daemons were never stopped at all: stack_authority.py's header refuses to
+    mark them stoppable "ever, under any flag", and nothing here holds a passphrase to
+    undo one.
+
+    Then `off` learned to stop them -- the operator asked three times -- and it closed
+    their Litecoin GUI wallet, because it stops by the configured RPC port and that
+    port was served by `litecoin-qt`. The invariant that came out of it is SYMMETRY: a
+    daemon is stopped only where <ASSET>_DAEMON_COMMAND says `on` can start it again.
+    So the banner now names that variable, which is the part an operator can ACT on,
+    and this asserts it.
+
+    THE PASSPHRASE CLAUSE IS KEPT RATHER THAN DROPPED, because it is still true and
+    still a cost nobody would otherwise discover: Gridcoin's wallet is left fully
+    unlocked for STAKING (CLAUDE.md names it as the only such chain), a stop ends that,
+    and `up` cannot restore it. Deleting the assertion along with the sentence would
+    have removed a warning that outlived the rule it was written for.
     """
     monkeypatch.setattr(swap_stack, "cmd_down", lambda _files: 1)
     monkeypatch.setattr(swap_stack, "cmd_up", lambda _files: 0)
@@ -2572,7 +2588,14 @@ def test_restart_says_up_front_that_it_leaves_the_chain_daemons_running(monkeypa
     assert "chain daemons" in header, (
         f"the restart banner does not mention the chain daemons before acting: {header}"
     )
-    assert "passphrase" in header, f"and does not say WHY they are left: {header}"
+    assert "DAEMON_COMMAND" in header, (
+        f"the banner does not name the variable that DECIDES whether a daemon is stopped, which "
+        f"is the only part of this an operator can act on: {header}"
+    )
+    assert "passphrase" in header, (
+        f"and does not say what a GRC stop costs -- its wallet is left unlocked for staking and "
+        f"`up` cannot restore that: {header}"
+    )
 
 
 def test_every_action_is_reachable_from_the_command_line_and_dispatchable():

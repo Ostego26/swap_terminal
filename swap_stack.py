@@ -2323,10 +2323,14 @@ def cmd_restart(files: tuple[str, ...]) -> int:
     # exactly the right rule; it was just being applied unconditionally to every chain
     # instead of being checked per chain.
     say("  chain daemons     stopped ONLY where <ASSET>_DAEMON_COMMAND says this can start them")
-    say("                    again. A stop this cannot undo is not one to automate -- on")
-    say("                    2026-10-12 that was learned by closing the operator's Litecoin GUI")
-    say("                    wallet, which was what served the configured port. `down` names each")
-    say("                    one and says which case it is in.")
+    say("                    again. A stop this cannot undo is not one to automate -- learned on")
+    say("                    2026-10-12 by closing the operator's Litecoin GUI wallet, which was")
+    say("                    what served the configured port. `down` names each one and says")
+    say("                    which case it is in.")
+    say("                    AND GRC COSTS MORE THAN A RESTART even when it IS stoppable: its")
+    say("                    wallet is left unlocked for STAKING and nothing here has the")
+    say("                    passphrase, so `up` cannot restore that. Payouts still work -- they")
+    say("                    unlock per send -- and staking waits for you.")
     say("")
     stopped = cmd_down(files)
     say("")
