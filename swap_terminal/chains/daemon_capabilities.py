@@ -962,9 +962,29 @@ _REFUSAL_REMEDIES: dict[str, tuple[tuple[str, str], ...]] = {
     "GRC": (
         ("403", "one config file with [network] sections"),
         ("403", "rpcallowip in CIDR form (172.18.0.0/16)"),
+        # THE SAME ROW ANSWERS 401, AND THAT IS THE POINT RATHER THAN A SHORTCUT. Added
+        # 2026-10-12, when the operator's GRC went from `Connection refused` to 401 the
+        # moment the desk daemon came up on 25779. rpcuser and rpcpassword are `lines in
+        # the net-specific file` exactly as rpcallowip is, and this row's `instead`
+        # already says to put such lines there with the daemon's own "Using data
+        # directory" log as the way to be sure which file that is.
+        #
+        # ON THIS HOST THERE IS A SECOND REASON TO SUSPECT CREDENTIALS, recorded here
+        # because it is a measurement and not a guess: GRC_RPC_PORT was moved from 25715
+        # (the operator's testnet GUI wallet) to 25779 (the desk daemon) earlier the same
+        # day, and GRC_RPC_USER and GRC_RPC_PASS were not changed with it. A port
+        # repointed at a different wallet without its credentials produces exactly this
+        # 401, and no amount of editing rpcallowip changes it.
+        ("401", "one config file with [network] sections"),
     ),
     "BTC": (("refused", "rpcbind"),),
     "LTC": (("refused", "rpcbind"),),
+    # NO 401 ROW FOR BTC OR LTC, and that absence is deliberate rather than an omission
+    # (rule 17). Modern Core reads rpcuser/rpcpassword -- or rpcauth -- from the
+    # `[test]`/`[testnet4]`/`[regtest]` SECTION of one file, which is a different trap
+    # from Gridcoin's split files, and nobody has hit it on this host yet. SHAPE_MEANS
+    # still prints for them, so a BTC or LTC 401 gets told what it proves; what it does
+    # not get is a remedy nobody has measured.
 }
 
 
@@ -1005,11 +1025,77 @@ def refusal_shape(detail: str) -> str | None:
     a renderer that cannot tell "no answer" from "nothing to say" invents one.
     """
     lowered = detail.lower()
+    # 401 IS CHECKED BEFORE 403 AND IS ITS OWN SHAPE, as of 2026-10-12. The two were
+    # lumped together in swap_readiness.explain_grc_failure() and 401 was absent here
+    # entirely, so the operator's
+    #
+    #     GRC: did not answer: 401 Client Error: Authorization Required for url:
+    #     http://host.docker.internal:25779/
+    #
+    # printed verbatim with no remedy -- which is exactly what this function's own
+    # docstring says it exists to stop ("printed the 403 verbatim and stopped"). The
+    # distinction was already WRITTEN in this file, in the comment on
+    # _REFUSAL_REMEDIES: a 403 "is uniquely an rpcallowip rejection -- not a credential
+    # failure, which is 401 with a WWW-Authenticate header and an HTML body." Knowledge
+    # in a row nothing consulted, one shape over from the last time.
+    #
+    # ORDER MATTERS because the strings overlap: a requests HTTPError for 401 reads
+    # "401 Client Error: Authorization Required", and "authorization" does not contain
+    # "forbidden" -- but `detail` is OUR prose wrapped around theirs, so a future wording
+    # that mentions both must resolve to the more specific one. 401 is more specific: it
+    # proves the IP was accepted, which 403 disproves.
+    if "401" in lowered or "authorization required" in lowered:
+        return "401"
     if "403" in lowered or "forbidden" in lowered:
         return "403"
     if "connection refused" in lowered or "errno 111" in lowered:
         return "refused"
     return None
+
+
+#: WHAT EACH SHAPE PROVES, independent of chain. Prepended to the remedy so a reader is
+#: told what they have measured before being told what to change.
+#:
+#: CHAIN-INDEPENDENT, which is why it is a separate table from _REFUSAL_REMEDIES: every
+#: Bitcoin-derived daemon and Gridcoin alike emit these three for the same three reasons,
+#: and the REMEDY is what differs per chain (that table's own comment makes the point in
+#: the other direction).
+#:
+#: WHAT EACH ENTRY DOES NOT SAY IS WHICH FILE TO EDIT, and that is deliberate (rule 8).
+#: The per-chain remedy is _REFUSAL_REMEDIES' job, and for GRC the credential-file
+#: sentence already had a home before this table existed --
+#: regtest/daemons.GRC_CREDENTIALS_ARE_PER_NETWORK, with its own 2026-09-29 measurement,
+#: two callers and a test asserting no credential appears in it. The first draft of the
+#: 401 entry here restated it, which would have made a third copy of the one sentence in
+#: this tree that is already shared properly.
+#:
+#: THE 401/403 DISCRIMINATOR IS THE VALUABLE ONE and it is why this table exists. Both
+#: are "the daemon answered and said no", and they send an operator to two different
+#: files to change two different lines. Getting them the wrong way round means editing
+#: rpcallowip when the credentials are wrong, which produces no change and reads as "the
+#: fix didn't work" -- the shape that cost five rounds on 2026-10-09 with the roles
+#: reversed.
+SHAPE_MEANS: dict[str, str] = {
+    "401": (
+        "401 PROVES TWO THINGS AND RULES OUT A THIRD. The daemon is running and reachable "
+        "-- something answered HTTP -- and your IP was ACCEPTED, because a caller rejected "
+        "by rpcallowip gets 403 instead (on Gridcoin that is the only HTTP_FORBIDDEN "
+        "emission site in the tree). So neither the bind nor rpcallowip nor the firewall is "
+        "what is wrong, and restarting the daemon changes nothing: the RPC USERNAME OR "
+        "PASSWORD does not match what the daemon read."
+    ),
+    "403": (
+        "403 PROVES THE DAEMON IS RUNNING AND DECLINED YOU BY IP. It accepted the "
+        "connection and refused the caller's address, so the bind and the firewall are "
+        "fine and rpcallowip is what is wrong. A credential mismatch would be 401."
+    ),
+    "refused": (
+        "CONNECTION REFUSED MEANS NOTHING WAS ACCEPTING -- the packet reached the host and "
+        "no process answered on that port. That is a bind or a dead daemon, never a "
+        "credential and never rpcallowip. A packet DROPPED by a firewall times out instead; "
+        "a timeout means a filter, a refusal means a bind."
+    ),
+}
 
 
 def refusal_remedy(asset: str, detail: str) -> str:
@@ -1031,11 +1117,21 @@ def refusal_remedy(asset: str, detail: str) -> str:
     shape = refusal_shape(detail)
     if shape is None:
         return ""
+    # WHAT IT PROVES, FIRST, AND EVEN WITH NO REMEDY RECORDED. Added 2026-10-12: the
+    # operator's 401 matched no row, so refusal_remedy() returned "" and the report
+    # printed the raw error alone -- while this file already knew that a 401 rules out
+    # the bind, the firewall and rpcallowip in one stroke. Telling somebody what they
+    # have measured is worth more than silence even when nobody has recorded what to do
+    # about it, and it is the half that cannot be wrong: it is a property of the status
+    # code, not of anyone's host.
+    means = SHAPE_MEANS.get(shape, "")
     matched = [note for note in (
         _remedy_for(asset, name)
         for recorded_shape, name in _REFUSAL_REMEDIES.get(asset, ())
         if recorded_shape == shape
     ) if note]
+    if means:
+        matched = [means, *matched]
     # NUMBERED ONLY WHEN THERE IS MORE THAN ONE, because "1." in front of a lone
     # paragraph implies a second step the reader goes looking for (rule 14: state what
     # the thing means, and do not imply what it does not).

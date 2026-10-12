@@ -588,11 +588,30 @@ LIVENESS_PROBES = ("uptime", "getblockcount")
 #: repository reads that file (see chains/daemon_conf.CONF_FALLBACK_NETWORK for why
 #: GRC is deliberately excluded from conf resolution), and no credential of theirs
 #: is ever read, logged or echoed.
+#: THE DATADIR IS NO LONGER HARDCODED, and it was `~/.GridcoinResearch` until 2026-10-12.
+#: That is the operator's MAINNET GUI wallet. The desk daemon runs with
+#: `-datadir=$HOME/.GridcoinResearch-desk`, so this sentence sent a reader to the testnet
+#: conf of the wrong wallet -- which is verbatim the failure OPEN_FINDINGS finding 2
+#: records as having cost several rounds ("the remedy above pointed at the wrong one's
+#: conf"), reappearing inside the sentence written to prevent it. It now says to read the
+#: daemon's OWN startup log for the directory it chose, which is the only way to be right
+#: about a host running three wallets across three datadirs.
+#:
+#: THE CHECK PRINTS NO VALUE. `grep -cE` gives a COUNT per file, which is enough to find
+#: credentials sitting only in the file the daemon does not read, and CLAUDE.md is
+#: unambiguous that a credential is never read back into a terminal. The egrep form is
+#: used because basic-regex alternation needs a backslash, and `\|` inside a non-raw
+#: Python string is an invalid escape that warns on import.
 GRC_CREDENTIALS_ARE_PER_NETWORK = (
     "GRC_RPC_USER and GRC_RPC_PASS have to come from the TESTNET gridcoinresearch.conf -- the one "
-    "under the `testnet` subdirectory of ~/.GridcoinResearch -- which carries DIFFERENT credentials "
-    "from the mainnet file beside it. Reading them out of the mainnet conf is the cause this project "
-    "has actually measured for this 401 (2026-09-29), so check WHICH FILE before retyping anything."
+    "in the `testnet` subdirectory of WHICHEVER DATADIR THIS DAEMON WAS STARTED WITH, which carries "
+    "DIFFERENT credentials from the mainnet file beside it. Do not assume the datadir: this host runs "
+    "three Gridcoin wallets and the desk daemon's is not the default one, so read the directory out "
+    "of the daemon's own startup log -- it prints `Using data directory <datadir>/testnet` every run. "
+    "Reading them out of the mainnet conf is the cause this project has actually measured for this 401 "
+    "(2026-09-29), so check WHICH FILE before retyping anything. To compare without printing a "
+    "secret: `grep -cE '^(rpcuser|rpcpassword)' <datadir>/gridcoinresearch.conf "
+    "<datadir>/testnet/gridcoinresearch.conf` -- a 0 for the testnet file is the whole answer."
 )
 
 

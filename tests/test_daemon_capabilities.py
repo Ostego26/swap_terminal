@@ -29,6 +29,7 @@ from chains.daemon_capabilities import (
     MEASURED,
     NOT_THIS_DEPLOYMENT,
     RELEASE_HISTORY,
+    SHAPE_MEANS,
     UPSTREAM_SOURCE,
     _capability,
     absence_note,
@@ -576,31 +577,89 @@ def test_a_refused_connection_on_BTC_or_LTC_names_rpcbind_and_not_the_GRC_answer
         assert "172.18.*" not in remedy, f"{asset} must never be told to write a wildcard"
 
 
-def test_the_two_failure_shapes_are_told_apart():
+def test_the_failure_shapes_are_told_apart():
+    """THREE SHAPES NOW, and 401 is the one that was missing.
+
+    The operator's GRC went from `Connection refused` to `401 Client Error:
+    Authorization Required` on 2026-10-12 the moment the desk daemon came up on 25779,
+    and refusal_shape() returned None for it -- so the report printed the raw error with
+    no interpretation, which is what this function exists to stop.
+
+    401 AND 403 MUST NOT COLLAPSE. They send an operator to two different files to
+    change two different lines: 403 is an rpcallowip rejection, 401 is a credential
+    mismatch with the IP already accepted. swap_readiness.explain_grc_failure() lumped
+    them (`if "401" in text or "403" in text`), which is why the distinction had to be
+    asserted somewhere.
+    """
+    assert refusal_shape("401 Client Error: Authorization Required for url: http://h:25779/") == "401"
+    assert refusal_shape("did not answer: Authorization Required") == "401"
     assert refusal_shape(_GRC_403) == "403"
     assert refusal_shape(_REFUSED) == "refused"
     assert refusal_shape("did not answer: ReadTimeout") is None
     assert refusal_shape("") is None
+    assert set(SHAPE_MEANS) == {"401", "403", "refused"}, (
+        "every shape refusal_shape() can return must have a meaning, or refusal_remedy() "
+        "goes silent on a failure it classified"
+    )
 
 
 @pytest.mark.parametrize(
     ("asset", "detail", "why"),
     [
         ("GRC", "did not answer: ReadTimeout", "a shape nobody recorded"),
-        ("XRP", _GRC_403, "a 403 on a chain with no recorded remedies"),
-        ("BTC", _GRC_403, "BTC CAN 403 too, but no remedy is recorded for that shape"),
-        ("GRC", _REFUSED, "GRC refusing a connection is not the 403 case"),
+        ("GRC", "", "no detail at all"),
     ],
 )
-def test_nothing_recorded_says_NOTHING_rather_than_the_nearest_sentence(asset, detail, why):
+def test_an_UNCLASSIFIED_failure_says_NOTHING(asset, detail, why):
     """Silence is right here, and it is the lesson from a defect shipped the same day.
 
     stack_authority's network line printed GRC's "no bech32" sentence for XRP, a
     chain its table had no row for, because it branched on a bare None. The raw
-    failure detail always prints either way, so a chain with no recorded remedy
-    loses nothing by this returning "".
+    failure detail always prints either way, so a failure nobody classified loses
+    nothing by this returning "".
     """
     assert refusal_remedy(asset, detail) == "", why
+
+
+@pytest.mark.parametrize(
+    ("asset", "detail", "why"),
+    [
+        ("XRP", _GRC_403, "a 403 on a chain with no recorded remedies"),
+        ("BTC", _GRC_403, "BTC CAN 403 too, but no remedy is recorded for that shape"),
+        ("GRC", _REFUSED, "GRC refusing a connection is not the 403 case"),
+        ("LTC", "401 Client Error: Authorization Required", "no 401 remedy is recorded for LTC"),
+    ],
+)
+def test_a_CLASSIFIED_failure_with_no_recorded_remedy_says_ONLY_what_it_proves(asset, detail, why):
+    """THE ORIGINAL GUARD, STRENGTHENED RATHER THAN RELAXED, 2026-10-12.
+
+    This used to assert `== ""` for these cases. It now asserts equality with the
+    shape's meaning and nothing else, which is the stricter statement: a return of ""
+    only promised that no sentence was added, while this promises that the EXACT text is
+    the chain-independent one -- so no other chain's remedy can be in it, by
+    construction rather than by substring absence.
+
+    WHY THE BEHAVIOR CHANGED. refusal_remedy() returned "" for a classified failure with
+    no recorded remedy, so the operator's GRC 401 printed bare -- while this file already
+    knew that a 401 rules out the bind, the firewall and rpcallowip in one stroke. What
+    a status code proves is a property of the protocol and the daemon family, not of
+    anyone's host, so it cannot be the "nearest sentence" problem this guard is about:
+    telling a BTC 403 that the daemon is running and declined it by IP is simply true.
+    Inventing a REMEDY is still forbidden, and that is what the equality pins.
+
+    A SECOND ASSERTION HERE WAS WRONG AND IS GONE: `"rpcallowip" not in remedy` for a
+    401. The 401 text mentions rpcallowip on purpose -- to RULE IT OUT ("your IP was
+    ACCEPTED, because a caller rejected by rpcallowip gets 403 instead") -- which is the
+    most useful sentence in the entry. A substring ban was a lazy proxy for "does not
+    tell you to change it", and the equality above already pins the exact text, so the
+    proxy added nothing and forbade the right answer. The discriminator itself is
+    asserted in test_the_401_entry_rules_out_what_it_rules_out below.
+    """
+    remedy = refusal_remedy(asset, detail)
+    shape = refusal_shape(detail)
+
+    assert shape is not None, "this case is about a CLASSIFIED failure"
+    assert remedy == SHAPE_MEANS[shape], why
 
 
 def test_every_capability_named_in_the_remedy_table_actually_exists():
@@ -608,10 +667,20 @@ def test_every_capability_named_in_the_remedy_table_actually_exists():
 
     _capability() raises rather than returning None by design, so this is the test
     that keeps the raise from being the first thing anybody notices.
+
+    THE SHAPE LIST IS DERIVED, 2026-10-12, and it was `("403", "refused")` spelled by
+    hand -- so adding 401 to the classifier and the table failed here on a list of
+    shapes rather than on anything about capabilities. That is the third hand-written
+    list of one thing to go stale in this tree this week (see
+    services/pair_view.REFUSAL_KEYS and network_target.URL_CHAINS); SHAPE_MEANS is the
+    set refusal_shape() can return, so this reads it.
     """
     for asset, entries in _REFUSAL_REMEDIES.items():
         for shape, name in entries:
-            assert shape in ("403", "refused"), f"{asset}: unknown shape {shape!r}"
+            assert shape in SHAPE_MEANS, (
+                f"{asset}: shape {shape!r} is not one refusal_shape() can return, so this "
+                f"entry can never match. SHAPE_MEANS knows {sorted(SHAPE_MEANS)}."
+            )
             assert _capability(name).instead.strip(), f"{asset}/{name}: empty remedy"
 
 
@@ -708,3 +777,33 @@ def test_when_unused_is_empty_on_rows_that_have_only_one_remedy():
                 f"having it, so there is nobody for that sentence to be addressed to. "
                 f"`instead` is the field for a capability a chain lacks."
             )
+
+
+def test_the_401_entry_rules_out_what_it_rules_out():
+    """The 401/403 discriminator is the whole value of the entry, so it is pinned.
+
+    An operator handed a 401 must be told three things are NOT the cause -- the bind,
+    the firewall and rpcallowip -- because each of those is a file they would otherwise
+    go and edit for no change. That is the shape that cost five rounds on 2026-10-09
+    with the roles reversed: the right fix applied repeatedly to the wrong file reads as
+    "the fix didn't work".
+
+    AND IT MUST NOT SAY "RESTART". swap_readiness.explain_grc_failure()'s docstring
+    records why: the version before it appended "is the testnet daemon running?" to every
+    failure, and a needless restart of a staking wallet is a real cost this project has
+    already paid once.
+    """
+    meaning = SHAPE_MEANS["401"]
+
+    assert "403" in meaning, "it must name the shape it is NOT, or the reader cannot tell them apart"
+    assert "rpcallowip" in meaning, "rpcallowip must be named as ruled OUT"
+    assert "ACCEPTED" in meaning, "and the reason it is ruled out is that the IP was accepted"
+    assert "USERNAME OR PASSWORD" in meaning, "and what IS wrong has to be said"
+    assert "restarting the daemon changes nothing" in meaning, (
+        "a 401 proves the daemon is running, so the one thing it must not suggest is a restart"
+    )
+    # NO CREDENTIAL AND NO PLACEHOLDER FOR ONE. The same gate
+    # tests/test_swap_readiness.py puts on GRC_CREDENTIALS_ARE_PER_NETWORK, because this
+    # is a sentence printed into a terminal and pasted back.
+    for forbidden in ("rpcpassword=", "rpcuser=", "GRC_RPC_PASS="):
+        assert forbidden not in meaning, f"{forbidden!r} invites a value into a pasted report"
