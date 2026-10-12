@@ -1328,10 +1328,44 @@ was typed from memory of one of them. `tests/test_suite_baseline.py` asserts the
 collected total can never read as the passed count, that a broken run cannot be quoted
 as clean, and that the broken outcomes are derived from `BROKEN` rather than spelled.
 
-**What remains:** nothing in this repository checks a commit message against the suite.
-A hook could, and none is proposed here — the number now exists in one pasteable line,
-and the next count that is wrong will be wrong because somebody retyped a line they
-could have copied, which is a different problem from the one that was fixed.
+**IT HAPPENED A FOURTH TIME, THREE HOURS LATER, WITH THE MECHANISM IN PLACE.**
+
+| commit | claimed | actual |
+|---|---|---|
+| `b9f8e1b` | `suite 5758 passed ... (5762 collected)` | 5754 passed, 4 skipped (5758 collected) |
+
+And the cause was different, which is the useful part. `commit_line()` printed the right
+line; I never read it, because I ran
+
+    python3 suite_baseline.py record && git commit -F - <<'MSG' ... MSG
+
+as **one shell command** — so the heredoc was composed before `record` produced the line
+it was supposed to quote. The paragraph above predicted "somebody retyped a line they
+could have copied" and was wrong about the mechanism: nothing was retyped, the line was
+never seen. No improvement to the printing can fix that, because the output arrives after
+the message exists.
+
+**So the gate is a test now, and it would have caught all four.**
+`tests/test_commit_message_counts.py` reads HEAD's commit message and compares any
+`(N collected)` claim against the number of rows in the `tests/suite_baseline.tsv` that
+HEAD commits — the two are in the same commit, so they must agree exactly. No git
+archaeology, no network, and it runs on every suite run regardless of what order anybody
+did things in. A second test rejects a count written WITHOUT `(N collected)`, which is the
+shape the first three bad commits had: a passed number with nothing in any file to check
+it against.
+
+It caught `b9f8e1b` on its first run, and its own first version was wrong in the way this
+finding is about — it counted raw lines instead of calling `suite_baseline.read_baseline()`,
+so it read 5765 for a file holding 5758 and would have failed every claim by the size of
+the `#` header. One file format, two readers, and the one written in a hurry was wrong.
+
+**NOT A commit-msg HOOK**, which the paragraph above floated. `.git/hooks` is not
+version-controlled, so a hook protects only a machine somebody remembered to set up — and
+it would have to be installed by the person it is protecting against.
+
+**What remains:** the gate checks HEAD only. A wrong count in an older commit stays wrong
+in the history, which is what this finding is for, and `git log` is not rewritten to fix a
+number (rule 4).
 
 ---
 
