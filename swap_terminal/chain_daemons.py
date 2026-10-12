@@ -269,11 +269,24 @@ def _refuse_cannot_start_it_again(asset: str, _settings, _unconfigured_why: str)
     """
     if start_command(asset):
         return ""
+    # THE SENTENCE NAMES BOTH WAYS OUT, AND IT NAMED ONLY ONE UNTIL 2026-10-12. It
+    # pointed at `capture_daemon_commands.py --apply`, which reads the command line of
+    # whatever is LISTENing on the configured port -- so it needs the daemon already
+    # running, and this refusal is printed precisely when it is NOT. With GRC and LTC
+    # both down, that was a closed loop on the operator: `on`/`off` pointed at the
+    # capture tool and the capture tool said "nothing is LISTENing".
+    #
+    # Run WITHOUT --apply the same tool now also prints what chains/daemon_launch.py has
+    # RECORDED for the chain, for a person to read and run themselves. Nothing about
+    # what this module may START has changed: start_daemon() still runs only
+    # <ASSET>_DAEMON_COMMAND, and a recorded line never becomes that value.
     return (
         f"{asset}_DAEMON_COMMAND is unset, so this cannot START it again and will not STOP "
         f"it. On 2026-10-12 this closed the operator's Litecoin GUI wallet, which was what "
-        f"served the configured port. `python3 capture_daemon_commands.py --apply` captures "
-        f"the real start command from the running process, and then it may be stopped"
+        f"served the configured port. TWO WAYS OUT: with the daemon RUNNING, `python3 "
+        f"capture_daemon_commands.py --apply` stores its real command line and then it may "
+        f"be stopped; with nothing running, `python3 capture_daemon_commands.py` prints the "
+        f"start command this tree has RECORDED for it, which you run yourself"
     )
 
 

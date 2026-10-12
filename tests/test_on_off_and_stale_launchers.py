@@ -592,3 +592,28 @@ def test_each_verdict_code_gets_its_own_sentence(status, capsys):
     assert expected[status] in printed, (
         f"{status} must say what it means next to the number (rule 14); got {printed!r}"
     )
+
+
+def test_the_unset_command_refusal_names_BOTH_ways_out(monkeypatch):
+    """The loop the operator was inside, closed from this end too.
+
+    This refusal pointed only at `capture_daemon_commands.py --apply`, which reads the
+    command line of whatever is LISTENing on the configured port. It is printed exactly
+    when nothing is -- so with GRC and LTC both down on 2026-10-12, `on`/`off` sent the
+    operator to the capture tool and the capture tool said "nothing is LISTENing". A
+    closed loop in the CLI they had asked for two days earlier.
+    """
+    monkeypatch.delenv("LTC_DAEMON_COMMAND", raising=False)
+    refusal = chain_daemons._refuse_cannot_start_it_again(
+        "LTC", {"port": 19332, "host": "127.0.0.1"}, "",
+    )
+
+    assert refusal, "with no DAEMON_COMMAND set, this must refuse"
+    assert "--apply" in refusal, "the running-daemon path is still named"
+    assert "RECORDED" in refusal, (
+        "and so is the nothing-is-running path -- chains/daemon_launch.py -- or the "
+        "refusal sends the operator back into the loop it is printed inside"
+    )
+    assert "you run yourself" in refusal, (
+        "the recorded line is for a person to run; nothing in this tree executes it"
+    )

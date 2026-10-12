@@ -59,6 +59,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import textwrap
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -75,6 +76,7 @@ import env_file  # noqa: E402  -- same sys.path.insert as every root tool
 env_file.load_into_environ()
 
 import chain_daemons  # noqa: E402  -- same sys.path.insert
+from chains import daemon_launch  # noqa: E402  -- same sys.path.insert
 from config import Config  # noqa: E402  -- MUST come after load_into_environ() above
 
 import configure_env  # noqa: E402  -- write_env() is the one .env writer (rule 8)
@@ -263,7 +265,54 @@ def report_assets_without_a_listener(found_assets: set[str], rpc) -> None:
             print(f"  {asset}  configured port {port} is {chain_daemons.MAINNET_RPC_PORTS[port]} -- not looked at")
         else:
             print(f"  {asset}  nothing is LISTENing on its configured port {port}")
+        # AND THEN WHAT THE TREE HAS RECORDED, WHICH IS WHERE THIS TOOL DEAD-ENDED.
+        #
+        # The three lines above are the whole of what this said until 2026-10-12, and on
+        # that day they closed a loop the operator was inside: `swap_stack.py on` can
+        # start a daemon only from <ASSET>_DAEMON_COMMAND, this tool is what fills that
+        # variable, and it can only read a daemon that is already RUNNING. With GRC and
+        # LTC both down -- the reason they were running these commands at all -- the
+        # capture tool said "nothing is LISTENing" and `on` said "run the capture tool".
+        #
+        # chains/daemon_launch.propose() is the other source: what this tree has
+        # recorded, with where it was recorded and what that record does not establish.
+        # It is PRINTED and never run, and it never reaches .env -- --apply still stores
+        # only a command read from a live process, because a command nobody watched
+        # serve the configured port is not a measurement. See that module's header.
+        for line in launch_proposal_lines(asset, port):
+            print(line)
     print()
+
+
+def launch_proposal_lines(asset: str, port: int | None) -> list[str]:
+    """The recorded launch line for `asset`, as report lines. [] when there is nothing.
+
+    Its own function, and not inlined above, for the reason
+    report_assets_without_a_listener() itself was extracted: that one hit ruff C901 at 12
+    with a report inline, and rule 12 says what that code means. This is the half that
+    FORMATS; propose() is the half that decides, and neither re-derives the other.
+
+    THE COMMAND IS LABELED `run it yourself` IN THE OUTPUT, not offered as something the
+    tool will do. Rule 14's "echo the parameters that decide the answer" plus the
+    chain-safety posture for anything that touches a wallet: print it for inspection, and
+    the act is the operator's.
+    """
+    command, why = daemon_launch.propose(asset, port)
+    if not command and not why:
+        return []
+    lines = []
+    if command:
+        lines.append("        RECORDED START COMMAND -- run it yourself, this tool will not:")
+        lines.append(f"          {command}")
+    lines.extend(f"          {chunk}" for chunk in textwrap.wrap(why, width=84))
+    if command:
+        lines.append(
+            "          then re-run this tool with --apply, which stores the command it reads"
+        )
+        lines.append(
+            "          from the RUNNING process -- never this recorded text"
+        )
+    return lines
 
 
 def main() -> int:
