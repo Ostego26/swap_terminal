@@ -614,6 +614,16 @@ def test_the_unset_command_refusal_names_BOTH_ways_out(monkeypatch):
         "and so is the nothing-is-running path -- chains/daemon_launch.py -- or the "
         "refusal sends the operator back into the loop it is printed inside"
     )
-    assert "you run yourself" in refusal, (
-        "the recorded line is for a person to run; nothing in this tree executes it"
+    # THE THIRD WAY OUT, added 2026-10-12 after the operator asked the question that
+    # exposed the gap: "why wasn't the daemon already up from when we hit the stack on or
+    # up python command". Because `on` starts only from this variable, and nothing here
+    # told them how to fill it WITHOUT first starting the daemon by hand -- which is the
+    # thing `on` was supposed to do for them.
+    assert "--accept-recorded" in refusal, (
+        "the refusal must name the one command that teaches `on` to start this daemon; "
+        "without it, `on` tells the operator to go and do `on`'s job by hand"
+    )
+    assert "--wait" in refusal, (
+        "and the capture path must carry --wait, or it races the daemon it just told them "
+        "to start (-daemon returns before the RPC port is bound)"
     )

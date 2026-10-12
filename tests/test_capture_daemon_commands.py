@@ -56,6 +56,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
 import chain_daemons  # noqa: E402
+import pytest  # noqa: E402  -- after the sys.path insert, like every import in this block
 from prose import code_without_prose  # noqa: E402
 
 import capture_daemon_commands as capture  # noqa: E402
@@ -243,3 +244,205 @@ def test_the_programs_it_looks_for_cover_every_chain_with_a_local_daemon():
     and never started, or captured and never stopped.
     """
     assert set(capture.DAEMON_PROGRAMS.values()) == set(chain_daemons.MAINNET_RPC_PORTS_BY_ASSET)
+
+
+# --- `--wait`, which the operator needed on their first try --------------------
+
+
+def test_waiting_is_skipped_when_no_port_is_worth_polling(capsys):
+    """Rule 14: `(none)` is a result. An empty wait must not look like a timeout."""
+    found = capture.wait_for_listeners({}, 60.0)
+
+    assert found == set()
+    assert "(none)" in capsys.readouterr().out
+
+
+def test_a_mainnet_port_is_never_waited_for():
+    """The same exclusion every other verb in this tool makes.
+
+    Waiting for a mainnet port would mean polling until a live staking wallet appeared
+    and then capturing the command that starts it. 15715 is the operator's Gridcoin
+    mainnet wallet, and it was LISTENing on their host while this ran.
+    """
+    rpc = {
+        "GRC": {"port": 15715},
+        "LTC": {"port": 19332},
+        "BTC": {"port": 0},
+    }
+
+    assert capture.assets_to_wait_for(rpc) == [("LTC", 19332)]
+
+
+def test_a_listener_that_appears_LATE_is_found_rather_than_missed(monkeypatch, capsys):
+    """THE RACE, REPRODUCED. `-daemon` returns before the RPC port is bound.
+
+    The operator ran the recorded start command and a capture in the same command line;
+    the capture read /proc before the daemon had bound and reported "nothing is
+    LISTENing" on a port that `ss` showed as `LISTEN *:25779` minutes later.
+
+    Scripted rather than slept through: the scan returns nothing twice and then the
+    daemon, which is the shape of what happened, and the injected clock means this costs
+    no wall time.
+    """
+    answers = [[], [], [("GRC", 25779, 4242, ["gridcoinresearchd", "-daemon"])]]
+    monkeypatch.setattr(capture, "daemons_on_rpc_ports", lambda rpc: answers.pop(0))
+    ticks = iter([0.0, 1.0, 2.0, 3.0, 4.0])
+
+    found = capture.wait_for_listeners(
+        {"GRC": {"port": 25779}}, 60.0, sleep=lambda _s: None, now=lambda: next(ticks),
+    )
+    printed = capsys.readouterr().out
+
+    assert found == {"GRC"}
+    assert "LISTENING" in printed
+    # THE COUNTER, and this assertion replaced one that could not fail. The first draft
+    # read `assert "1/1" not in ... or True`, which is the vacuous-test shape this tree
+    # warns about in four places -- `or True` makes the whole expression true whatever
+    # the left side says, so it asserted nothing and would have passed forever.
+    assert "0/1 up" in printed, "rule 14: a counter, so a reader can see it is progressing"
+    assert "still want GRC" in printed, "rule 14: say what it is still waiting for"
+
+
+def test_giving_up_is_not_reported_as_a_verdict_about_the_daemon(monkeypatch, capsys):
+    """Rule 17: a budget that ran out is not a measurement that the daemon is down.
+
+    It may still be loading a block index. The sentence says so and points at `ss`,
+    rather than printing a conclusion the poll cannot support.
+    """
+    monkeypatch.setattr(capture, "daemons_on_rpc_ports", lambda rpc: [])
+    ticks = iter([0.0, 1.0, 61.0, 61.0])
+
+    found = capture.wait_for_listeners(
+        {"GRC": {"port": 25779}}, 60.0, sleep=lambda _s: None, now=lambda: next(ticks),
+    )
+    printed = capsys.readouterr().out
+
+    assert found == set()
+    assert "GAVE UP" in printed
+    assert "not a verdict about the daemon" in printed
+    assert "ss -ltn" in printed
+
+
+def test_the_recorded_proposal_tells_you_to_use_wait():
+    """The proposal is what the operator runs next, so it carries the flag they need.
+
+    Without it they hit the race the first time, which is exactly what happened: the
+    tool printed a start command and then, in the same breath, told them to re-run a
+    capture that could not possibly see the daemon yet.
+    """
+    lines = capture.launch_proposal_lines("GRC", 25779)
+
+    assert lines
+    joined = " ".join(lines)
+    assert "--wait" in joined
+    assert "-daemon returns before the RPC port" in joined
+
+
+# --- `--accept-recorded`, which is how `on` learns to START a daemon -----------
+
+
+def test_the_accepted_command_has_no_shell_variable_left_in_it(monkeypatch):
+    """THE BUG CAUGHT BEFORE IT WAS WRITTEN, and it would not have crashed.
+
+    chain_daemons.start_daemon() runs <ASSET>_DAEMON_COMMAND through shlex.split and
+    subprocess.run with NO shell, so nothing expands `$HOME`. Measured:
+
+        shlex.split('gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon')
+        -> ['gridcoinresearchd', '-datadir=$HOME/.GridcoinResearch-desk', '-daemon']
+
+    `swap_stack.py on` would have started a Gridcoin daemon against a directory
+    literally named `$HOME`, created it, and come up with an empty wallet on a path
+    nobody meant -- reporting itself as started throughout. That is the quietest kind of
+    wrong, which is why the gate is on the WRITTEN VALUE and not on the function.
+    """
+    monkeypatch.setenv("HOME", "/home/someone")
+    accept, _lines = capture.recorded_to_accept({"GRC": {"port": 25779}}, {})
+
+    assert accept, "GRC has a record at its recorded port, so there is something to accept"
+    for name, command in accept.items():
+        assert "$" not in command, f"{name} still carries a shell variable: {command}"
+        assert "~" not in command, f"{name} still carries a tilde: {command}"
+        assert "/home/someone/" in command, (
+            f"{name} should have been expanded against the real HOME: {command}"
+        )
+
+
+@pytest.mark.parametrize("token,expected", [
+    ("-datadir=$HOME/.x", "/home/someone/.x"),
+    ("-datadir=~/.x", "/home/someone/.x"),
+    ("$HOME/.x", "/home/someone/.x"),
+    ("~/.x", "/home/someone/.x"),
+    ("-daemon", "-daemon"),
+    ("/usr/local/bin/gridcoinresearchd", "/usr/local/bin/gridcoinresearchd"),
+    ("-rpcport=25779", "-rpcport=25779"),
+])
+def test_one_token_at_a_time(token, expected, monkeypatch):
+    """The decision, called with seeded inputs (rule 10).
+
+    `-rpcport=25779` is in the table because the split is on the FIRST `=` only and a
+    value with no `$` or `~` must come back untouched -- a naive expansion that rebuilt
+    every token would be indistinguishable from this on the paths that matter and would
+    quietly mangle the ones that do not.
+    """
+    monkeypatch.setenv("HOME", "/home/someone")
+
+    assert expected in capture.expanded_token(token)
+
+
+def test_a_mainnet_port_is_refused_at_acceptance_too():
+    """Every guard in daemon_launch.propose() applies, because this calls it.
+
+    15715 is the operator's Gridcoin MAINNET wallet and it was LISTENing on their host
+    the whole time. Accepting a command for it would put a line in .env that
+    `swap_stack.py on` then runs on a live staking wallet.
+    """
+    accept, lines = capture.recorded_to_accept({"GRC": {"port": 15715}}, {})
+
+    assert accept == {}
+    assert any("REFUSED" in line and "mainnet" in line.lower() for line in lines), lines
+
+
+def test_a_value_the_operator_already_set_is_never_overwritten():
+    """Their own value beats a table, always.
+
+    env_file.load_into_environ() takes the same posture for the shell -- setdefault, so
+    the shell wins -- and this is the same rule one layer out.
+    """
+    accept, lines = capture.recorded_to_accept(
+        {"GRC": {"port": 25779}}, {"GRC_DAEMON_COMMAND": "what the operator typed"},
+    )
+
+    assert accept == {}
+    assert any("already set" in line for line in lines)
+
+
+def test_accepting_is_a_dry_run_without_apply(monkeypatch, capsys):
+    """Two flags because they are two decisions: WHICH source, and WHETHER to write.
+
+    Collapsing them would give the weaker source -- a table rather than a live process
+    -- the one path with no dry run.
+    """
+    def refuse(*args, **kwargs):
+        raise AssertionError("nothing may be written without --apply")
+
+    monkeypatch.setattr(capture.configure_env, "write_env", refuse)
+    monkeypatch.setattr(capture.configure_env, "existing_assignments", dict)
+
+    assert capture.say_accept_recorded({"GRC": {"port": 25779}}, applying=False) == 0
+    printed = capsys.readouterr().out
+    assert "DRY RUN" in printed
+    assert "GRC_DAEMON_COMMAND" in printed
+
+
+def test_applying_writes_through_the_one_env_writer(monkeypatch, capsys):
+    """configure_env.write_env() is the only thing in this tree that edits .env (rule 8)."""
+    written = {}
+    monkeypatch.setattr(capture.configure_env, "write_env", written.update)
+    monkeypatch.setattr(capture.configure_env, "existing_assignments", dict)
+
+    assert capture.say_accept_recorded({"GRC": {"port": 25779}}, applying=True) == 0
+    assert list(written) == ["GRC_DAEMON_COMMAND"]
+    assert "$" not in written["GRC_DAEMON_COMMAND"]
+    printed = capsys.readouterr().out
+    assert "will now START these daemons" in printed
+    assert "off" in printed, "the symmetry is the point and the output says so"

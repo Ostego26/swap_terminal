@@ -57,9 +57,11 @@ cmdline, not environ, and still refuses to show it.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -78,6 +80,7 @@ env_file.load_into_environ()
 import chain_daemons  # noqa: E402  -- same sys.path.insert
 from chains import daemon_launch  # noqa: E402  -- same sys.path.insert
 from config import Config  # noqa: E402  -- MUST come after load_into_environ() above
+from microfortnights import format_duration  # noqa: E402  -- rule 6, same sys.path insert
 
 import configure_env  # noqa: E402  -- write_env() is the one .env writer (rule 8)
 from swap_terminal import stack_authority  # noqa: E402  -- port -> pid, already argued there
@@ -307,17 +310,276 @@ def launch_proposal_lines(asset: str, port: int | None) -> list[str]:
     lines.extend(f"          {chunk}" for chunk in textwrap.wrap(why, width=84))
     if command:
         lines.append(
-            "          then re-run this tool with --apply, which stores the command it reads"
+            "          then re-run as `capture_daemon_commands.py --wait --apply`, which stores"
         )
         lines.append(
-            "          from the RUNNING process -- never this recorded text"
+            "          the command it reads from the RUNNING process -- never this recorded"
+        )
+        lines.append(
+            "          text. --wait is not optional advice: -daemon returns before the RPC port"
+        )
+        lines.append(
+            "          is bound, so a capture in the same command line finds nothing"
         )
     return lines
+
+
+#: How long `--wait` polls for, when it is given with no number. Chosen from the one
+#: measurement available rather than for roundness: chain_daemons.STOP_PROOF_SECONDS is
+#: 30.0 and is what `off` allows a daemon to FLUSH AND CLOSE. Coming up is the slower
+#: half -- a Gridcoin or Bitcoin-derived daemon loads a wallet and a block index before
+#: it binds -- so this is twice that, and the flag takes a number for a host where it is
+#: not enough.
+DEFAULT_WAIT_SECONDS = 60.0
+
+#: How often to re-scan while waiting. One second, because the scan is two /proc reads
+#: and a listener that appeared is the thing being waited for -- a longer interval only
+#: adds latency to the answer.
+WAIT_POLL_SECONDS = 1.0
+
+
+def assets_to_wait_for(rpc) -> list[tuple[str, int]]:
+    """[(asset, port)] worth polling: configured, local, and NOT a mainnet port.
+
+    THE MAINNET EXCLUSION IS THE DECISION HERE, and it is the same one every other verb
+    in this tool makes: a configured 8332, 9332 or 15715 is not looked at, not waited
+    for, and not stored. Waiting for one would mean polling until a live staking wallet
+    appeared, and then capturing the command that starts it.
+    """
+    return [
+        (asset, port)
+        for asset in LOCAL_DAEMON_ASSETS
+        for port in [(rpc.get(asset) or {}).get("port")]
+        if port and port not in chain_daemons.MAINNET_RPC_PORTS
+    ]
+
+
+def wait_for_listeners(rpc, budget_seconds: float, *, sleep=time.sleep, now=time.monotonic) -> set[str]:
+    """Poll until every waited-for asset has a listener, or the budget runs out.
+
+    Returns the assets that turned up. Announces before, counts while it waits, and says
+    which it is still waiting for -- rule 14, and specifically its "emit progress on
+    anything that can exceed a couple of seconds, with a counter and elapsed time".
+
+    =========================================================================
+    WHY THIS EXISTS: THE OPERATOR HIT THE RACE ON THEIR FIRST TRY
+    =========================================================================
+
+    2026-10-12. They ran the recorded command this tool had just printed:
+
+        $ gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon
+        Gridcoin starting
+        $ python3 capture_daemon_commands.py --apply && python3 swap_stack.py pairs
+          GRC  nothing is LISTENing on its configured port 25779
+
+    and minutes later, `ss -ltn` showed `LISTEN *:25779`. The daemon was fine. `-daemon`
+    FORKS AND RETURNS IMMEDIATELY -- it prints "Gridcoin starting" and then loads a
+    wallet and a block index before it binds its RPC port -- so a capture run in the same
+    command line reads /proc before there is anything to read. The tool then printed the
+    recorded start command again, at somebody who had just run it, and told them nothing
+    was listening on a port that was about to be.
+
+    THE SCAN IS daemons_on_rpc_ports() AND NOT A BIND ATTEMPT, which matters here.
+    chain_daemons.port_is_free() binds 127.0.0.1 to prove absence, and a daemon bound to
+    one non-loopback address would read as free. This reads /proc/net/tcp AND tcp6, so it
+    is address-agnostic -- which is the whole point on Gridcoin, whose socket is `::` with
+    IPV6_V6ONLY off and appears only in tcp6 (stack_authority.proc_net_tcp_tables has
+    that measurement from 2026-10-07).
+
+    `sleep` and `now` ARE INJECTED so a test can exercise the timeout and the
+    appeared-late path without spending a minute on either (rule 10: the decision is the
+    smallest testable piece).
+    """
+    expected = assets_to_wait_for(rpc)
+    if not expected:
+        print("  waiting         (none) -- no configured non-mainnet port to wait for")
+        return set()
+
+    names = ", ".join(f"{asset}:{port}" for asset, port in expected)
+    print(f"  waiting         up to {format_duration(budget_seconds)} for {names}")
+    print("                  a Bitcoin-derived or Gridcoin daemon returns from -daemon")
+    print("                  immediately and binds its RPC port seconds later, so a capture")
+    print("                  run in the same command line reads /proc too early")
+    started = now()
+    found: set[str] = set()
+    while True:
+        found = {asset for asset, _port, _pid, _argv in daemons_on_rpc_ports(rpc)}
+        waited = now() - started
+        missing = [asset for asset, _ in expected if asset not in found]
+        if not missing:
+            print(f"  LISTENING       all {len(expected)} after {format_duration(waited)}")
+            return found
+        if waited >= budget_seconds:
+            print(f"  GAVE UP         after {format_duration(waited)}; still nothing on "
+                  f"{', '.join(missing)}")
+            print("                  that is not a verdict about the daemon -- it may still be")
+            print("                  loading. Re-run, or check `ss -ltn` yourself.")
+            return found
+        print(f"  waiting         {len(found)}/{len(expected)} up, {format_duration(waited)} "
+              f"elapsed, still want {', '.join(missing)}", flush=True)
+        sleep(WAIT_POLL_SECONDS)
+
+
+def expanded_token(token: str) -> str:
+    """One argv token with `$VAR` and `~` resolved. The decision, callable alone.
+
+    SPLIT ON THE FIRST `=` ONLY, because a daemon flag is `-datadir=<path>` and the path
+    may itself contain one. The flag NAME is never expanded -- `-datadir` has no `$` in
+    it and a token with no `=` is expanded whole, which covers a bare path argument.
+    """
+    if "=" in token:
+        flag, value = token.split("=", 1)
+        return f"{flag}={expanded_token(value)}"
+    if not token.startswith(("~", "$")):
+        return token
+    return str(Path(os.path.expandvars(token)).expanduser())
+
+
+def expanded_for_no_shell(command: str) -> str:
+    """`$HOME` and `~` resolved in every token, because what runs this has NO SHELL.
+
+    A BUG CAUGHT BEFORE IT WAS WRITTEN, 2026-10-12. The recorded GRC line is
+
+        gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon
+
+    which is how a person types it and how OPEN_FINDINGS recorded it. But
+    chain_daemons.start_daemon() runs `<ASSET>_DAEMON_COMMAND` through shlex.split and
+    subprocess.run with NO shell -- deliberately, so a stray `;` in a datadir path cannot
+    become a second command -- and shlex.split expands nothing. Measured:
+
+        ['gridcoinresearchd', '-datadir=$HOME/.GridcoinResearch-desk', '-daemon']
+
+    So `on` would have started a Gridcoin daemon against a directory literally named
+    `$HOME`, created it, and come up with an empty wallet on a path nobody meant. Nothing
+    would have crashed; the daemon would have reported itself starting.
+
+    EXPANDED HERE RATHER THAN AT RUN TIME. start_daemon() expanding its own argument
+    would be a second place that decides what a command means, and the expansion belongs
+    with the act of writing a value into .env -- where the human is, and where the
+    expanded path is printed before anything runs. The CAPTURE path needs none of it:
+    /proc/<pid>/cmdline holds the argv the kernel actually got, already expanded by
+    whatever shell started it.
+
+    NAIVE ON WHITESPACE, and that is sound for exactly this input: every entry in
+    chains/daemon_launch.RECORDED is a flag list with no quoted argument, and a recorded
+    command carrying a single quote is refused by the caller before it gets here. A
+    general shell-quoting round trip would be more code for a case the table cannot hold.
+    """
+    return " ".join(expanded_token(token) for token in command.split())
+
+
+def recorded_to_accept(rpc, already: dict) -> tuple[dict[str, str], list[str]]:
+    """({NAME: command}, lines) for every chain whose RECORDED line may be accepted.
+
+    =========================================================================
+    WHY `swap_stack.py on` DID NOT START THE DAEMON, WHICH IS THE OPERATOR'S
+    QUESTION AND A FAIR ONE
+    =========================================================================
+
+    2026-10-12: "why wasn't the daemon already up from when we hit the stack on or up
+    python command". Because `on` starts a chain daemon ONLY from
+    `<ASSET>_DAEMON_COMMAND` (chain_daemons.start_command(), which refuses to guess),
+    both were unset, and step 3 therefore printed NOT TOUCHED and went on to the
+    containers. It was honest and it was not "on": the operator ran the command that is
+    supposed to bring the terminal up, and then started the daemon by hand anyway.
+
+    THE FIX IS NOT TO MAKE `on` RUN THE RECORD. A recorded line is a measurement about
+    ONE host, stored in a shared repository; running it automatically on any checkout is
+    the guessing that chain_daemons.start_command()'s docstring refuses, and GRC's own
+    entry says in its `unestablished` field that where the testnet selection comes from
+    was inferred from a port rather than read out of the conf. Automating past that
+    sentence is how a desk daemon starts on mainnet.
+
+    SO THE RECORD IS ACCEPTED ONCE, BY AN EXPLICIT ACT, INTO .env. After that
+    `<ASSET>_DAEMON_COMMAND` is set and `on`, `off` and `restart` own the daemon
+    completely -- which is the end state the operator asked for two days earlier ("have
+    a cli to control the entire automatic swap terminal") and is also what restores the
+    SYMMETRY chain_daemons._refuse_cannot_start_it_again is about: a daemon `off` may
+    stop is one `on` can start again.
+
+    EVERY GUARD IN chains/daemon_launch.propose() STILL APPLIES, because this calls it
+    rather than reading RECORDED itself -- mainnet port, mainnet datadir, port mismatch,
+    nothing recorded, no configured port. And a name already set in .env is left alone,
+    for the reason the capture path leaves it alone: an operator's own value is not
+    something a tool overwrites from a table.
+    """
+    accept: dict[str, str] = {}
+    lines: list[str] = []
+    for asset in LOCAL_DAEMON_ASSETS:
+        port = (rpc.get(asset) or {}).get("port")
+        command, why = daemon_launch.propose(asset, port)
+        name = f"{asset}_DAEMON_COMMAND"
+        if not command:
+            lines.append(f"  {asset}  no record to accept")
+            lines.extend(f"          {chunk}" for chunk in textwrap.wrap(why, width=84))
+            continue
+        if already.get(name):
+            lines.append(f"  {asset}  {name} is already set; this does not overwrite it")
+            continue
+        if "'" in command:
+            lines.append(f"  {asset}  REFUSED: the recorded command contains a single quote, "
+                         f"which .env cannot carry")
+            continue
+        command = expanded_for_no_shell(command)
+        accept[name] = command
+        lines.append(f"  {asset}  would set {name} from the record:")
+        lines.append(f"          {command}")
+        lines.append("          CHECK THE RECORD'S OWN CAVEAT FIRST -- it is printed in full by a "
+                     "plain run of this tool")
+    return accept, lines
+
+
+def say_accept_recorded(rpc, *, applying: bool) -> int:
+    """Print the acceptance plan and, with `applying`, write it. Returns an exit code.
+
+    DRY RUN WITHOUT --apply, which is this tool's existing contract and not a second
+    one: `--accept-recorded` says WHICH source to take the command from, and `--apply`
+    says whether anything is written. Two flags because they are two decisions, and
+    collapsing them would make the riskier source the one with no dry run.
+    """
+    print("  source          chains/daemon_launch.RECORDED -- a measurement about THIS host,")
+    print("                  with its evidence and its gaps. Not a guess, and not a capture:")
+    print("                  a capture is a command read off a process that was observed")
+    print("                  serving the configured port. This is weaker, which is why it")
+    print("                  takes an explicit flag.")
+    print()
+    accept, lines = recorded_to_accept(rpc, configure_env.existing_assignments())
+    for line in lines:
+        print(line)
+    print()
+    if not accept:
+        print("  nothing to accept.")
+        return 0
+    if not applying:
+        print(f"  DRY RUN -- nothing was written. Re-run with --apply to set "
+              f"{', '.join(sorted(accept))}.")
+        return 0
+    configure_env.write_env(accept)
+    print(f"  wrote {', '.join(sorted(accept))} into {configure_env.ENV_FILE}")
+    print("  `python3 swap_stack.py on` will now START these daemons, and `off` will stop")
+    print("  them -- which is the symmetry: a daemon off may stop is one on can start again.")
+    return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--apply", action="store_true", help="write the captured commands into .env")
+    parser.add_argument(
+        "--accept-recorded", action="store_true",
+        help="take the command from chains/daemon_launch.RECORDED instead of from a running "
+             "process, for a chain that has one. This is how `swap_stack.py on` learns to START "
+             "a daemon without you having started it first. Still a dry run unless --apply is "
+             "also given, and every guard in daemon_launch.propose() applies -- a mainnet port "
+             "or a mainnet datadir is refused by name.",
+    )
+    parser.add_argument(
+        "--wait", nargs="?", type=float, const=DEFAULT_WAIT_SECONDS, default=0.0, metavar="SECONDS",
+        help=f"poll for the configured ports to come up before scanning, for this many seconds "
+             f"(default when the flag is given with no number: {DEFAULT_WAIT_SECONDS:.0f}). A "
+             f"daemon started with -daemon forks and binds its RPC port seconds later, so a "
+             f"capture in the same command line reads /proc too early. Mainnet ports are never "
+             f"waited for.",
+    )
     args = parser.parse_args()
 
     print("capture daemon commands")
@@ -326,6 +588,15 @@ def main() -> int:
     print("                  value from one is ever echoed -- it is written to .env or not at all.")
     print()
 
+    if args.accept_recorded:
+        # A DIFFERENT SOURCE, SO A DIFFERENT PATH, and it returns before the scan: there
+        # is nothing to capture and no port to wait for. Mixing the two in one report
+        # would make "would set GRC_DAEMON_COMMAND" ambiguous between a command read off
+        # a live process and one read out of a table, and those carry different weight.
+        return say_accept_recorded(Config.RPC, applying=args.apply)
+    if args.wait > 0:
+        wait_for_listeners(Config.RPC, args.wait)
+        print()
     rows = plan(Config.RPC)
     report_assets_without_a_listener({row[0] for row in rows}, Config.RPC)
     if not rows:

@@ -225,10 +225,16 @@ def test_the_recorded_command_is_never_what_apply_would_store():
     lines = capture.launch_proposal_lines("GRC", 25779)
     assert lines, "GRC has a recorded command, so there is something to print"
     assert all(isinstance(line, str) for line in lines)
-    assert any("run it yourself, this tool will not" in line for line in lines), (
+    # JOINED, NOT PER-LINE, and this gate caught its own brittleness. It asserted
+    # `any(... in line for line in lines)` and fired on 2026-10-12 when `--wait` was
+    # added to the proposal: the sentence was unchanged in substance and the WRAP moved
+    # "text" onto the next line. The claim being gated is about what the output SAYS, so
+    # the text is what it reads -- a per-line check was asserting the line breaks too.
+    joined = " ".join(lines)
+    assert "run it yourself, this tool will not" in joined, (
         "the output must say the tool will not run it"
     )
-    assert any("never this recorded text" in line for line in lines), (
+    assert "never this recorded" in joined, (
         "and must say that --apply stores the captured command, not this one"
     )
 

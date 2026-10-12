@@ -281,12 +281,15 @@ def _refuse_cannot_start_it_again(asset: str, _settings, _unconfigured_why: str)
     # what this module may START has changed: start_daemon() still runs only
     # <ASSET>_DAEMON_COMMAND, and a recorded line never becomes that value.
     return (
-        f"{asset}_DAEMON_COMMAND is unset, so this cannot START it again and will not STOP "
-        f"it. On 2026-10-12 this closed the operator's Litecoin GUI wallet, which was what "
-        f"served the configured port. TWO WAYS OUT: with the daemon RUNNING, `python3 "
-        f"capture_daemon_commands.py --apply` stores its real command line and then it may "
-        f"be stopped; with nothing running, `python3 capture_daemon_commands.py` prints the "
-        f"start command this tree has RECORDED for it, which you run yourself"
+        f"{asset}_DAEMON_COMMAND is unset, so this cannot START it again and will not STOP it. On "
+        f"2026-10-12 this closed the operator's Litecoin GUI wallet, which was what served "
+        f"the configured port. THREE WAYS OUT, cheapest first: `python3 "
+        f"capture_daemon_commands.py --accept-recorded --apply` takes the start command this "
+        f"tree has RECORDED for this chain, after which `on` starts it and `off` stops it; "
+        f"with the daemon ALREADY RUNNING, `python3 capture_daemon_commands.py --wait --apply` "
+        f"stores its real command line instead, which is the stronger source; and a plain "
+        f"`python3 capture_daemon_commands.py` prints the record in full with what it does "
+        f"NOT establish, to read before you accept it"
     )
 
 
