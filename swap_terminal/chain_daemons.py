@@ -174,60 +174,141 @@ class DaemonRefusal(NamedTuple):
         return bool(self.why)
 
 
+def _refuse_no_settings(asset: str, settings, _unconfigured_why: str) -> str:
+    """Nothing configured, so there is no daemon this terminal uses."""
+    if settings:
+        return ""
+    return f"{asset} is not configured in this process, so there is no daemon to stop"
+
+
+def _refuse_mainnet_port(asset: str, settings, _unconfigured_why: str) -> str:
+    """A configured MAINNET RPC port. CHECKED FIRST OF THE REAL GUARDS.
+
+    config.py's header records what the absence of this already cost once: an unset
+    GRC_RPC_PORT fell through to 15715 and the inventory poller READ the operator's
+    live staking wallet on a loop. This verb would be asking it to shut down.
+    """
+    del asset
+    port = settings.get("port")
+    if port not in MAINNET_RPC_PORTS:
+        return ""
+    return (
+        f"its configured RPC port is {port}, which is {MAINNET_RPC_PORTS[port]}. REFUSED BY "
+        f"NAME: this command will not ask a mainnet wallet to shut down. If that port is "
+        f"deliberate, stop that daemon yourself"
+    )
+
+
+def _refuse_unconfigured(_asset: str, _settings, unconfigured_why: str) -> str:
+    """The CALLER's sentence for a chain with no adapter, never one spelled here.
+
+    The first version spelled `f"{asset}_RPC_PASSWORD is unset"` and this tree reads
+    `<ASSET>_RPC_PASS`, so the message named a variable nothing consumes.
+    chains/registry.why_unconfigured() owns those names and records the same mistake
+    from 2026-09-26.
+    """
+    return unconfigured_why
+
+
+def _refuse_no_port(asset: str, settings, _unconfigured_why: str) -> str:
+    if settings.get("port"):
+        return ""
+    return f"{asset} has no configured RPC port, so this process builds no adapter for it"
+
+
+def _refuse_remote_host(_asset: str, settings, _unconfigured_why: str) -> str:
+    """Not loopback. Shutting down a node on another machine is not `off`'s business."""
+    host = str(settings.get("host") or "")
+    if host in LOCAL_HOSTS:
+        return ""
+    return (
+        f"its configured RPC host is {host!r}, not loopback. A daemon on another machine is "
+        f"not this command's to stop"
+    )
+
+
+def _refuse_cannot_start_it_again(asset: str, _settings, _unconfigured_why: str) -> str:
+    """NEVER STOP WHAT THIS CANNOT START. Added 2026-10-12, after it closed a GUI wallet.
+
+    WHAT HAPPENED. `off` stops a daemon by the RPC port the terminal is CONFIGURED to
+    use and sends it the `stop` verb. It does not care which program holds that port --
+    and on the operator's host the thing serving 19332 was `litecoin-qt`, their
+    interactive GUI wallet, not a headless `litecoind`. Asked to stop, it closed. Their
+    words: "why'd my external litecoin gui wallet just close".
+
+    The same hour, capture_daemon_commands.py printed "(none)" while scanning for a
+    program named `litecoind` -- so the evidence that something else served the port
+    was on screen and was read past.
+
+    WHY THE PORT-ADDRESSING ARGUMENT DID NOT COVER IT. This module's header argues
+    that addressing by the configured endpoint "cannot hit a daemon this terminal does
+    not talk to". True, and not the risk: the terminal DOES talk to that wallet. What
+    it cannot do is bring it back -- `on` launches from <ASSET>_DAEMON_COMMAND, and
+    nothing relaunches a GUI application with the windows and prompts the operator had
+    open in it.
+
+    SO THE INVARIANT IS SYMMETRY, AND THIS TREE HAD ALREADY WRITTEN IT DOWN. From
+    regtest/operator_panel.DAEMON_CONTROL:
+
+        "regtest":  {"start": True,  "stop": True},
+        "operator": {"start": False, "stop": True},
+        "foreign":  {"start": False, "stop": False},
+
+    with ("foreign", "stop", False) mapped to _refuse_stop_no_handle(), whose own
+    docstring says "A STOP NEEDS A HANDLE, AND THERE IS NONE." That policy existed and
+    this module did not consult it -- the third time in one session the answer was
+    already in the repository.
+
+    <ASSET>_DAEMON_COMMAND IS THE HANDLE: the operator's own statement that this is a
+    process the terminal may launch, which makes it one the terminal may close.
+    capture_daemon_commands.py writes it from the running process, so opting in costs
+    one command.
+
+    REFUSING TO STOP IS THE SAFE DIRECTION -- it leaves a chain reachable, which is
+    what keeps payouts working.
+    """
+    if start_command(asset):
+        return ""
+    return (
+        f"{asset}_DAEMON_COMMAND is unset, so this cannot START it again and will not STOP "
+        f"it. On 2026-10-12 this closed the operator's Litecoin GUI wallet, which was what "
+        f"served the configured port. `python3 capture_daemon_commands.py --apply` captures "
+        f"the real start command from the running process, and then it may be stopped"
+    )
+
+
+#: THE GUARDS, IN ORDER, AND THE ORDER IS THE POLICY. A list rather than a chain of
+#: returns because refuse_to_touch() hit ruff PLR0911 at seven of them, and rule 12 says
+#: that code means a decision to extract rather than a ceiling to raise. Each entry is
+#: now callable with seeded inputs on its own (rule 10), and the sequence is data a
+#: reader can check against the docstring instead of tracing branches.
+#:
+#: MAINNET IS SECOND, AFTER ONLY "is anything configured at all", deliberately: it is the
+#: one refusal that must not be reachable past another guard changing.
+_REFUSAL_GUARDS = (
+    _refuse_no_settings,
+    _refuse_mainnet_port,
+    _refuse_unconfigured,
+    _refuse_no_port,
+    _refuse_remote_host,
+    _refuse_cannot_start_it_again,
+)
+
+
 def refuse_to_touch(asset: str, settings, unconfigured_why: str = "") -> DaemonRefusal:
     """Whether this module may address `asset`'s daemon at all. THE SAFETY DECISION.
 
-    A pure function of its arguments, so a test can seed a mainnet port and assert the
-    refusal rather than arranging a daemon (rule 10).
+    Pure, so a test can seed a mainnet port and assert the refusal without arranging a
+    daemon (rule 10). Each guard in _REFUSAL_GUARDS is separately pure for the same
+    reason, and that list is the order.
 
-    THREE REFUSALS, cheapest first, with the most dangerous checked before the merely
-    impossible:
-
-      mainnet port     refused BY NAME, before anything else. See MAINNET_RPC_PORTS.
-      not configured   `unconfigured_why` -- the caller's sentence, not ours. See below.
-      remote host      not loopback. See LOCAL_HOSTS.
-
-    `unconfigured_why` IS PASSED IN RATHER THAN DERIVED, AND THE FIRST VERSION SPELLED
-    IT HERE AND GOT IT WRONG. It read `f"{asset}_RPC_PASSWORD is unset"`, and the
-    variable this tree actually reads is `<ASSET>_RPC_PASS` -- so the message would have
-    sent an operator to set a name nothing consumes. chains/registry.why_unconfigured()
-    owns those names, and its own docstring records the SAME mistake from 2026-09-26:
-    "the operator's GRC_RPC_PORT WAS set to 25715, and what was missing was GRC_RPC_PASS
-    ... A message that said 'GRC_RPC_PORT is unset' would have sent them to check the one
-    variable that was already correct."
-
-    So this asks the caller for that sentence and spells no variable name of its own.
-    The bespoke port and password checks are gone with it: missing_settings() already
-    tests the port, the user AND the password for a Bitcoin-derived chain -- three
-    variables, which is the count registry's header records being wrong about for a week.
-
-    AN EMPTY `unconfigured_why` MEANS CONFIGURED, which is the contract
-    why_unconfigured() already has ("" for a chain that has an adapter). A caller that
-    cannot supply it gets the no-settings guard below and nothing finer.
+    AN EMPTY `unconfigured_why` MEANS CONFIGURED, which is why_unconfigured()'s own
+    contract. It is passed in rather than derived: see _refuse_unconfigured().
     """
-    if not settings:
-        return DaemonRefusal(asset, f"{asset} is not configured in this process, so there is no daemon to stop")
-
-    port = settings.get("port")
-    if port in MAINNET_RPC_PORTS:
-        return DaemonRefusal(
-            asset,
-            f"its configured RPC port is {port}, which is {MAINNET_RPC_PORTS[port]}. REFUSED BY "
-            f"NAME: this command will not ask a mainnet wallet to shut down. If that port is "
-            f"deliberate, stop that daemon yourself",
-        )
-    if unconfigured_why:
-        return DaemonRefusal(asset, unconfigured_why)
-    if not port:
-        return DaemonRefusal(asset, f"{asset} has no configured RPC port, so this process builds no adapter for it")
-
-    host = str(settings.get("host") or "")
-    if host not in LOCAL_HOSTS:
-        return DaemonRefusal(
-            asset,
-            f"its configured RPC host is {host!r}, not loopback. A daemon on another machine is "
-            f"not this command's to stop",
-        )
+    for guard in _REFUSAL_GUARDS:
+        why = guard(asset, settings, unconfigured_why)
+        if why:
+            return DaemonRefusal(asset, why)
     return DaemonRefusal(asset, "")
 
 

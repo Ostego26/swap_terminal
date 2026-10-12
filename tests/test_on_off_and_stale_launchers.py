@@ -127,11 +127,99 @@ def test_an_unconfigured_chain_is_refused_without_drama():
     assert chain_daemons.refuse_to_touch("BTC", {"host": "127.0.0.1", "password": "x"}).refuses
 
 
-def test_a_configured_testnet_daemon_on_loopback_is_NOT_refused():
+def test_a_configured_testnet_daemon_on_loopback_is_NOT_refused(monkeypatch):
+    """AND IT NEEDS LTC_DAEMON_COMMAND, since 2026-10-12. See the symmetry test below.
+
+    This test passed without the variable until that day, which is the hole: a daemon
+    with no start command was stoppable, and on the operator's host the thing on that
+    port was their GUI wallet.
+    """
+    monkeypatch.setenv("LTC_DAEMON_COMMAND", "/usr/local/bin/litecoind -testnet -daemon")
     refusal = chain_daemons.refuse_to_touch(
         "LTC", {"port": 19332, "host": "127.0.0.1", "password": "x"}
     )
     assert not refusal.refuses, refusal.why
+
+
+# --- never stop what you cannot start -------------------------------------------
+#
+# THE REGRESSION THAT CLOSED THE OPERATOR'S WALLET, 2026-10-12. Their words: "hey what
+# the fuck did you do? why'd my 'external' litecoin gui wallet just close".
+#
+# `off` stops by the configured RPC port and sends `stop`. The program holding 19332
+# was `litecoin-qt`, an interactive GUI wallet, not a headless litecoind -- and
+# capture_daemon_commands.py had printed "(none)" scanning for `litecoind` in the same
+# hour, which was the evidence, on screen, read past.
+#
+# regtest/operator_panel.DAEMON_CONTROL already encoded the invariant:
+# ("foreign", "stop", False) -> _refuse_stop_no_handle, whose docstring is "A STOP
+# NEEDS A HANDLE, AND THERE IS NONE." chain_daemons did not consult it.
+
+
+def test_a_daemon_with_NO_start_command_is_NOT_stoppable(monkeypatch):
+    """THE ASSERTION THE OPERATOR'S CLOSED WALLET EARNED.
+
+    MUTATION: remove _refuse_cannot_start_it_again from _REFUSAL_GUARDS. This fails.
+    """
+    monkeypatch.delenv("LTC_DAEMON_COMMAND", raising=False)
+    refusal = chain_daemons.refuse_to_touch(
+        "LTC", {"port": 19332, "host": "127.0.0.1", "password": "x"}
+    )
+    assert refusal.refuses
+    assert "LTC_DAEMON_COMMAND is unset" in refusal.why
+    assert "cannot START it again" in refusal.why
+
+
+def test_the_refusal_says_how_to_opt_in(monkeypatch):
+    """A refusal that does not say what to do instead is rule 14's ambiguous silence."""
+    monkeypatch.delenv("GRC_DAEMON_COMMAND", raising=False)
+    why = chain_daemons.refuse_to_touch(
+        "GRC", {"port": 25779, "host": "127.0.0.1", "password": "x"}
+    ).why
+    assert "capture_daemon_commands.py" in why
+
+
+def test_the_symmetry_holds_for_every_chain_with_a_local_daemon(monkeypatch):
+    """Not just LTC. Every one of them, or the next GUI wallet closes instead."""
+    for asset in chain_daemons.MAINNET_RPC_PORTS_BY_ASSET:
+        monkeypatch.delenv(f"{asset}_DAEMON_COMMAND", raising=False)
+        refusal = chain_daemons.refuse_to_touch(
+            asset, {"port": 19332, "host": "127.0.0.1", "password": "x"}
+        )
+        assert refusal.refuses, f"{asset} is stoppable with no start command"
+
+
+def test_MAINNET_is_still_refused_even_WITH_a_start_command(monkeypatch):
+    """The guards are ordered and mainnet comes first. A start command must not unlock it.
+
+    Otherwise `capture_daemon_commands.py --apply` on a mainnet daemon would hand `off`
+    permission to shut down a live staking wallet -- which is why that tool refuses to
+    capture a mainnet command in the first place, and why this is belt to that braces.
+    """
+    monkeypatch.setenv("GRC_DAEMON_COMMAND", "/usr/local/bin/gridcoinresearchd -daemon")
+    refusal = chain_daemons.refuse_to_touch(
+        "GRC", {"port": 15715, "host": "127.0.0.1", "password": "x"}
+    )
+    assert refusal.refuses
+    assert "REFUSED BY NAME" in refusal.why
+
+
+def test_every_guard_is_callable_on_its_own(monkeypatch):
+    """rule 10: the extraction has to actually make each decision seedable.
+
+    A list of guards that can only be exercised through refuse_to_touch() would be the
+    same function with extra steps.
+    """
+    monkeypatch.delenv("LTC_DAEMON_COMMAND", raising=False)
+    settings = {"port": 19332, "host": "127.0.0.1", "password": "x"}
+    assert chain_daemons._refuse_no_settings("LTC", {}, "")
+    assert chain_daemons._refuse_no_settings("LTC", settings, "") == ""
+    assert chain_daemons._refuse_mainnet_port("LTC", {"port": 9332}, "")
+    assert chain_daemons._refuse_mainnet_port("LTC", settings, "") == ""
+    assert chain_daemons._refuse_unconfigured("LTC", settings, "a reason") == "a reason"
+    assert chain_daemons._refuse_no_port("LTC", {"host": "127.0.0.1"}, "")
+    assert chain_daemons._refuse_remote_host("LTC", {"port": 1, "host": "10.0.0.5"}, "")
+    assert chain_daemons._refuse_cannot_start_it_again("LTC", settings, "")
 
 
 # --- the stop verdict -----------------------------------------------------------

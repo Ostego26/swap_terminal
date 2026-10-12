@@ -65,56 +65,102 @@ REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
-import chain_daemons  # noqa: E402  -- same sys.path.insert as every root tool
+# .env FIRST, BEFORE config, for the reason swap_stack.py spells out at its own call
+# site: config.Config is a class body evaluated once at import, so a load afterwards
+# changes nothing while looking like it worked. This tool reads Config.RPC to learn
+# WHICH PORTS to look at, so without this it would look at none of them -- the same
+# inert shape measured on the operator's host 2026-10-12.
+import env_file  # noqa: E402  -- same sys.path.insert as every root tool
+
+env_file.load_into_environ()
+
+import chain_daemons  # noqa: E402  -- same sys.path.insert
+from config import Config  # noqa: E402  -- MUST come after load_into_environ() above
 
 import configure_env  # noqa: E402  -- write_env() is the one .env writer (rule 8)
+from swap_terminal import stack_authority  # noqa: E402  -- port -> pid, already argued there
 
-#: The process name each chain's daemon runs under, and the asset it serves.
+#: A `-rpcport=NNNNN` on the command line, which OVERRIDES any conf file. A daemon
+#: started this way against a mainnet port must not have that command stored.
+_RPCPORT = re.compile(r"^--?rpcport=(\d+)$")
+
+#: The process name each chain's daemon runs under. KEPT AS A LABEL ONLY, since
+#: 2026-10-12 -- it is no longer how a daemon is FOUND. See daemons_on_rpc_ports().
 #:
-#: MATCHED ON THE EXECUTABLE'S BASENAME, not on a pattern over the whole command
-#: line. Rule 13 prefers a pid file to a `pgrep -f` pattern, and no pid file exists
-#: for a daemon this tree did not start -- so the narrowest available identity is
-#: the program name, and the DATADIR in the captured command is what distinguishes
-#: the operator's three Gridcoin wallets from each other.
+#: THE NAME SCAN WAS THE FIRST DESIGN AND IT FOUND NOTHING ON THE OPERATOR'S HOST.
+#: Something was LISTENing on 19332 and this tool printed "(none)", because it
+#: matched `Path(argv[0]).name` against this table and the operator runs GUI wallets
+#: -- `litecoin-qt`, not `litecoind`. OPEN_FINDINGS finding 2 lists three Gridcoin
+#: wallets and two of them are GUI binaries; assuming the daemon spelling was the
+#: same class of guess that put this session an hour behind on which GRC port to use.
 DAEMON_PROGRAMS = {
     "bitcoind": "BTC",
     "litecoind": "LTC",
     "gridcoinresearchd": "GRC",
 }
 
-#: Flags whose VALUE is a secret. Their names are reported; their values never are.
-_SECRET_FLAG = re.compile(r"^--?(rpcpassword|rpcauth|rpcuser)=", re.IGNORECASE)
-
-#: A `-rpcport=NNNNN` on the command line, which OVERRIDES any conf file. A daemon
-#: started this way against a mainnet port must not have that command stored.
-_RPCPORT = re.compile(r"^--?rpcport=(\d+)$")
+#: The assets with a local daemon, from the stop side's own table so the two verbs
+#: cannot disagree about which chains have one (rule 8).
+LOCAL_DAEMON_ASSETS = tuple(sorted(chain_daemons.MAINNET_RPC_PORTS_BY_ASSET))
 
 
-def running_daemons() -> list[tuple[str, int, list[str]]]:
-    """[(asset, pid, argv)] for every chain daemon running as this user.
+def daemons_on_rpc_ports(rpc) -> list[tuple[str, int, int, list[str]]]:
+    """[(asset, port, pid, argv)] for whatever is LISTENing on each configured RPC port.
 
-    /proc AND NOT `ps` or `pgrep`, for the reason swap_stack.py gives for the same
-    read: a parse of another tool's output is a second thing that can change under
-    us, where /proc is the kernel's own answer.
+    IDENTIFIED BY THE PORT, NOT BY THE PROGRAM NAME, and stack_authority.py's header
+    already argued exactly this: "for a SERVER there is something better than both
+    [a pid file and a pgrep pattern]: the port. A process holding 127.0.0.1:5102 is
+    the thing answering that URL whatever it calls itself, which is the actual
+    question an operator has."
 
-    A PROCESS THIS USER CANNOT READ IS SKIPPED SILENTLY, which is correct rather
-    than lazy: another user's daemon is not this terminal's to restart, and an
-    unreadable /proc entry is exactly that case.
+    It is the actual question here too. What this tool needs is the command line of
+    whatever serves the RPC the terminal talks to -- `litecoin-qt` serves it exactly
+    as `litecoind` does, and a name scan found neither on the operator's host because
+    it was looking for the wrong spelling.
+
+    REUSES stack_authority's THREE EXISTING PIECES rather than reading /proc/net/tcp
+    again: listening_inodes() for port -> inode, pids_owning_inodes() for inode ->
+    pid, and proc_net_tcp_tables() for the text of BOTH tables -- tcp AND tcp6,
+    which that function exists because of: an IPv6-only listener was invisible to a
+    tcp-only read on 2026-10-07.
+
+    A PORT WITH NO LISTENER IS SIMPLY ABSENT from the result, which is the honest
+    answer: there is no command to capture for a daemon that is not running, and
+    main() says so per asset rather than printing one "(none)" for all of them --
+    which is what hid this bug for a round.
     """
-    found: list[tuple[str, int, list[str]]] = []
-    for entry in sorted(Path("/proc").iterdir()):
-        if not entry.name.isdigit():
+    wanted: dict[int, str] = {}
+    for asset in LOCAL_DAEMON_ASSETS:
+        settings = rpc.get(asset) or {}
+        port = settings.get("port")
+        if port and port not in chain_daemons.MAINNET_RPC_PORTS:
+            wanted[int(port)] = asset
+
+    if not wanted:
+        return []
+
+    text, _missing = stack_authority.proc_net_tcp_tables(Path("/proc/net"))
+    inodes = stack_authority.listening_inodes(text, set(wanted))
+    pids = stack_authority.pids_owning_inodes(set(inodes.values()), Path("/proc"))
+
+    found: list[tuple[str, int, int, list[str]]] = []
+    for port, asset in sorted(wanted.items()):
+        inode = inodes.get(port)
+        if inode is None:
+            continue
+        pid = pids.get(inode)
+        if pid is None:
+            # A LISTENER WHOSE OWNER THIS USER CANNOT SEE. Another user's process, or
+            # one in a different namespace. Not ours to restart, and reported by its
+            # absence rather than guessed at.
             continue
         try:
-            raw = (entry / "cmdline").read_bytes()
+            raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
         except OSError:
             continue
         argv = [part for part in raw.decode("utf-8", "replace").split("\0") if part]
-        if not argv:
-            continue
-        asset = DAEMON_PROGRAMS.get(Path(argv[0]).name)
-        if asset:
-            found.append((asset, int(entry.name), argv))
+        if argv:
+            found.append((asset, port, pid, argv))
     return found
 
 
@@ -181,16 +227,43 @@ def command_for(argv: list[str], cwd: str) -> str:
     return " ".join([program, *argv[1:]])
 
 
-def plan() -> list[tuple[str, int, str, str, list[str]]]:
-    """[(asset, pid, command, refusal, flag_names)] for every daemon found."""
+def plan(rpc) -> list[tuple[str, int, int, str, str, list[str]]]:
+    """[(asset, port, pid, command, refusal, flag_names)] for every daemon found."""
     rows = []
-    for asset, pid, argv in running_daemons():
+    for asset, port, pid, argv in daemons_on_rpc_ports(rpc):
         try:
             cwd = str(Path(f"/proc/{pid}/cwd").readlink())
         except OSError:
             cwd = "/"
-        rows.append((asset, pid, command_for(argv, cwd), mainnet_refusal(asset, argv), redacted_flags(argv)))
+        rows.append(
+            (asset, port, pid, command_for(argv, cwd), mainnet_refusal(asset, argv), redacted_flags(argv))
+        )
     return rows
+
+
+def report_assets_without_a_listener(found_assets: set[str], rpc) -> None:
+    """Say, per asset, why nothing was captured for it. Extracted; it decides nothing.
+
+    PER ASSET, NOT ONE "(none)" FOR ALL OF THEM -- and that single line is what hid the
+    real bug for a round. It read as "no daemons are running" when the truth was "this
+    was scanning for a program named litecoind while litecoin-qt served 19332". Rule 14:
+    make "did nothing" look different from "did work", and echo the parameter that
+    decided.
+
+    main() hit ruff C901 at 12 with this inline. Rule 12 says that code means
+    orchestration swallowed something; here what it had swallowed was a report.
+    """
+    for asset in LOCAL_DAEMON_ASSETS:
+        if asset in found_assets:
+            continue
+        port = (rpc.get(asset) or {}).get("port")
+        if not port:
+            print(f"  {asset}  no configured RPC port, so there is nothing to look for")
+        elif port in chain_daemons.MAINNET_RPC_PORTS:
+            print(f"  {asset}  configured port {port} is {chain_daemons.MAINNET_RPC_PORTS[port]} -- not looked at")
+        else:
+            print(f"  {asset}  nothing is LISTENing on its configured port {port}")
+    print()
 
 
 def main() -> int:
@@ -204,17 +277,18 @@ def main() -> int:
     print("                  value from one is ever echoed -- it is written to .env or not at all.")
     print()
 
-    rows = plan()
+    rows = plan(Config.RPC)
+    report_assets_without_a_listener({row[0] for row in rows}, Config.RPC)
     if not rows:
-        print("  (none)  <- no bitcoind, litecoind or gridcoinresearchd is running as this user.")
-        print("            Start the daemon first; its own command line is what this captures.")
+        print("  nothing to capture. Start whatever serves the port named above; its own")
+        print("  command line is what this reads -- GUI wallet or headless daemon alike.")
         return 0
 
     already = configure_env.existing_assignments()
     to_write: dict[str, str] = {}
-    for asset, pid, command, refusal, flags in rows:
+    for asset, port, pid, command, refusal, flags in rows:
         name = f"{asset}_DAEMON_COMMAND"
-        print(f"  {asset}  pid {pid}")
+        print(f"  {asset}  pid {pid} on port {port}  ({Path(command.split()[0]).name})")
         print(f"      flags       {' '.join(flags) or '(none)'}")
         if refusal:
             print(f"      REFUSED     {refusal}")
