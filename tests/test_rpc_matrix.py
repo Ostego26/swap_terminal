@@ -216,3 +216,94 @@ def test_the_printer_contacts_nothing_and_always_exits_zero(capsys):
     # chain missing from the table is indistinguishable from one nobody mapped.
     for asset in ASSETS:
         assert asset in printed
+
+
+# --- the matrix is LOAD-BEARING, not documentation ------------------------------
+
+
+def test_GRC_fee_measurement_refuses_before_making_a_single_call():
+    """It made TWO doomed RPCs per quote and blamed the method. Now it blames the chain.
+
+    chains/base.measure_send_fee() calls createrawtransaction and then
+    fundrawtransaction. Gridcoin 5.5.1.0 does not dispatch the second and has NO
+    equivalent, so GRC fee measurement could never succeed -- and what it returned was
+    "fundrawtransaction refused, so no fee was measured", which names the METHOD and
+    reads as a wallet or a daemon problem rather than as a property of the chain.
+
+    THE FEE IS UNCHANGED, which is why this is not a fund-path change (rule 16). Every
+    None here lands in services/quote_service._fallback() and uses the configured
+    <ASSET>_NETWORK_FEE_RESERVE: GRC got the constant before and gets the same constant
+    now. What changes is the sentence and two round trips that on an unreachable daemon
+    cost a timeout each.
+
+    THE ADAPTER IS BUILT AGAINST PORT 1 AND NOTHING CAN CONNECT TO IT, which is the
+    assertion: a GRC refusal arrives with no transport error in it at all, where LTC's
+    arrives with one, so the refusal provably happened BEFORE the call rather than after.
+    """
+    from chains.gridcoin import GridcoinAdapter  # noqa: PLC0415 -- one use, in this test
+    from chains.litecoin import LitecoinAdapter  # noqa: PLC0415 -- one use, in this test
+
+    # PORT 1 AND A ONE-CHARACTER CREDENTIAL, because nothing may connect: the assertion
+    # below is that a GRC refusal contains NO transport error, which only means anything
+    # if a call would have failed loudly. S106 is suppressed on the two constructor lines
+    # -- "p" authenticates nothing, reaches no daemon, and a realistic-looking value here
+    # would be a worse thing to have in the tree (rule 19: a noqa is a claim, and this is
+    # the claim).
+    grc = GridcoinAdapter(host="127.0.0.1", port=1, user="u", password="p")  # noqa: S106
+    fee, how = grc.measure_send_fee("some-address", 1.0)
+
+    assert fee is None
+    assert "no fee can be measured on this chain" in how
+    assert "GRC_NETWORK_FEE_RESERVE" in how, "it must name what WILL be used instead"
+    for transport in ("ConnectionError", "HTTPConnectionPool", "Max retries"):
+        assert transport not in how, (
+            f"{transport} in the refusal means a call was attempted; the point is that none is"
+        )
+
+    # AND A CORE-STYLE CHAIN IS UNTOUCHED: LTC still makes the real call and reports the
+    # real transport failure, so this did not become a blanket refusal.
+    ltc = LitecoinAdapter(host="127.0.0.1", port=1, user="u", password="p")  # noqa: S106 -- see above
+    _ltc_fee, ltc_how = ltc.measure_send_fee("some-address", 1.0)
+    assert "createrawtransaction refused" in ltc_how
+    assert "no fee can be measured on this chain" not in ltc_how
+
+
+def test_the_address_read_asks_for_the_name_THIS_chain_has():
+    """`getaddressesbylabel` is Core 0.17's rename; Gridcoin never took it.
+
+    On GRC the call could only raise "Method not found", the broad except swallowed it,
+    and the caller reported "no address could be read" -- true, for a reason that had
+    nothing to do with the wallet. The matrix supplies `getaddressesbyaccount`, so the
+    right name is asked; and a chain with no equivalent is not asked at all, because a
+    round trip spent discovering an absence costs a timeout on a slow daemon.
+    """
+    assert cell("GRC", "getaddressesbylabel").equivalent == "getaddressesbyaccount"
+    assert cell("BTC", "getaddressesbylabel").equivalent == "getaddressesbylabel"
+    assert cell("XRP", "getaddressesbylabel").equivalent == "", (
+        "a chain with no equivalent must supply no name, so the caller skips the call"
+    )
+
+
+def test_a_chain_with_no_multiwallet_RPC_is_not_told_to_run_createwallet():
+    """THE WRONG ADVICE, which is worse than a missing hint.
+
+    chains/wallet_hint.py's fallback named `createwallet` -- a method Gridcoin does not
+    have either -- in a line an operator pastes. Rule 16 treats a wrong sentence with
+    the same seriousness as wrong code.
+
+    The adapter RAISES if called, which is the assertion: the refusal is reached from the
+    matrix before any RPC, so a GRC reader cannot be handed advice derived from a failed
+    call.
+    """
+    from chains.wallet_hint import which_wallets_are_on_disk  # noqa: PLC0415 -- one use
+
+    class Dead:
+        def call(self, *args, **kwargs):
+            raise AssertionError("no RPC may be attempted for a chain with no multi-wallet API")
+
+    said = which_wallets_are_on_disk(Dead(), "GRC")
+
+    assert "no multi-wallet RPC" in said
+    assert "createwallet" not in said, "it must not name a command this daemon lacks"
+    assert "loadwallet" not in said
+    assert "one datadir is one wallet" in said.lower(), "it must say what to do INSTEAD"

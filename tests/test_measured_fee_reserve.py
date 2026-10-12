@@ -272,6 +272,21 @@ class WalletWithAddresses:
 
     own_address: Callable[[], str]
 
+    #: THE REAL ADAPTERS ALL DECLARE THIS and this stub did not, which broke all four of
+    #: these tests on 2026-10-12 the moment chains/base.py started asking
+    #: chains/rpc_matrix.cell(self.asset, ...) for the name THIS chain has. The stub was
+    #: lying about the shape of the thing it stands in for --
+    #: tests/test_every_adapter_names_its_own_asset.py exists precisely because every
+    #: adapter must carry it -- so the fix is here and not a getattr() in base.py, which
+    #: would be defensive code tolerating a shape no real adapter has.
+    #:
+    #: BTC SPECIFICALLY, because these four tests are about the two-read fallback where
+    #: `getaddressesbylabel` IS the second name. On GRC the matrix supplies
+    #: getaddressesbyaccount instead, which is a different behavior and has its own test
+    #: below rather than being folded in here -- a fixture switched to GRC would leave
+    #: three test NAMES describing something that no longer happens.
+    asset = "BTC"
+
     def __init__(self, received=None, labeled=None, fail=()):
         self._received = received if received is not None else [{"address": BTC_REGTEST_DEPOSIT}]
         self._labeled = labeled if labeled is not None else {}
@@ -284,7 +299,11 @@ class WalletWithAddresses:
             raise RuntimeError(f"{method} not available")
         if method == "listreceivedbyaddress":
             return self._received
-        if method == "getaddressesbylabel":
+        if method in ("getaddressesbylabel", "getaddressesbyaccount"):
+            # BOTH NAMES, because which one own_address() asks for now depends on the
+            # chain: chains/rpc_matrix.cell() supplies Core's spelling for BTC and
+            # Gridcoin's for GRC. Stubbing one would make the GRC test below assert on
+            # this fixture's assumption rather than on the adapter's choice.
             return self._labeled
         raise AssertionError(f"own_address asked for {method!r}, which this fixture does not stub")
 
@@ -556,4 +575,47 @@ def test_the_receipt_the_operator_READS_says_which_source_the_reserve_came_from(
     )
     assert "not recorded" in reserve_provenance({"network_fee_reserve": swap["network_fee_reserve"]}), (
         "a quote with no provenance key must say so, not fall back to claiming a measurement"
+    )
+
+
+def test_on_GRC_the_second_read_asks_for_GRIDCOINS_name_and_not_cores():
+    """`getaddressesbylabel` is Core 0.17's rename and Gridcoin never took it.
+
+    Measured 2026-10-12 from Gridcoin 5.5.1.0's own dispatch table: it has
+    getaddressesbyaccount, the pre-0.17 name, and nothing in this tree was asking for
+    it. So on GRC the second read could only ever raise "Method not found", the broad
+    except swallowed it, and the caller reported "no address could be read" -- true, and
+    for a reason that had nothing to do with the wallet.
+
+    ASSERTED ON THE METHOD NAME ASKED, not on the address returned, because the address
+    is the same either way and would pass against the wrong call.
+    """
+    wallet = WalletWithAddresses(received=[], labeled={GRC_PAYOUT: []})
+    wallet.asset = "GRC"
+    wallet.own_address = RPCAdapter.own_address.__get__(wallet)
+
+    assert wallet.own_address() == GRC_PAYOUT
+    assert "getaddressesbyaccount" in wallet.calls, (
+        f"on GRC the fallback must ask for Gridcoin's name; it asked {wallet.calls}"
+    )
+    assert "getaddressesbylabel" not in wallet.calls, (
+        "Core's 0.17 spelling must not be sent to a daemon that does not dispatch it"
+    )
+
+
+def test_a_chain_with_no_equivalent_is_not_asked_a_second_time_at_all():
+    """A round trip spent discovering an absence costs a timeout on a slow daemon.
+
+    XRP has no equivalent for either read, so the matrix supplies no name and
+    own_address() returns "" after the first attempt rather than making a second call
+    that cannot succeed. The fixture RAISES on any unexpected method, which is the
+    assertion.
+    """
+    wallet = WalletWithAddresses(received=[], labeled={})
+    wallet.asset = "XRP"
+    wallet.own_address = RPCAdapter.own_address.__get__(wallet)
+
+    assert wallet.own_address() == ""
+    assert wallet.calls == ["listreceivedbyaddress"], (
+        f"only the first read should have been attempted; it made {wallet.calls}"
     )

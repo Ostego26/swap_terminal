@@ -67,6 +67,11 @@ import requests
 # key-holding system.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# WHAT EACH CHAIN ACTUALLY HAS, so this shared adapter stops assuming its own API is
+# Bitcoin Core's. Operator, 2026-10-12: "it's similar but DIFFERENT. stop assuming."
+# No cycle: rpc_matrix imports only table modules (gridcoin_rpc_commands, the two
+# rpc_maps, daemon_capabilities) and none of them imports this file.
+from chains import rpc_matrix
 from chains.coin_amounts import fit_to_chain_precision
 
 # SUSPECT_VOUT is the vout a fabricated deposit event is stamped with, and it
@@ -1075,8 +1080,22 @@ class RPCAdapter:
             address = (entry or {}).get("address") or ""
             if address:
                 return str(address)
+        # THE NAME THIS CHAIN ACTUALLY HAS, asked of chains/rpc_matrix.py rather than
+        # assumed. `getaddressesbylabel` is Bitcoin Core 0.17's rename of the account
+        # vocabulary, and Gridcoin 5.5.1.0 never took it: it has getaddressesbyaccount.
+        # So on GRC this call could only ever raise "Method not found", the broad except
+        # below swallowed it, and the caller reported "no address could be read" -- true,
+        # and for a reason that had nothing to do with the wallet (measured 2026-10-12).
+        #
+        # ABSENT MEANS DO NOT ASK AT ALL, which is why the state is checked rather than
+        # the name substituted blindly: a chain with no equivalent should not spend a
+        # round trip discovering that, and on a slow or unreachable daemon that round
+        # trip costs a timeout rather than an error.
+        fallback = rpc_matrix.cell(self.asset, "getaddressesbylabel")
+        if not fallback.equivalent:
+            return ""
         try:
-            labeled_addresses = self.call("getaddressesbylabel", "") or {}
+            labeled_addresses = self.call(fallback.equivalent, "") or {}
         except Exception:  # noqa: BLE001 -- checked: as above. Two reads are tried because daemons differ on which they expose, and neither existing is a legitimate answer.
             return ""
         for address in labeled_addresses:
@@ -1124,6 +1143,28 @@ class RPCAdapter:
         if fitted <= 0:
             return None, (f"{fitted!r} {self.asset} is not a sendable amount, so no fee could be "
                           f"measured for it")
+        # REFUSED BEFORE THE FIRST CALL ON A CHAIN THAT CANNOT ANSWER, added 2026-10-12
+        # when chains/rpc_matrix.py was built and immediately found this.
+        #
+        # fundrawtransaction is Bitcoin Core 0.10+ and Gridcoin 5.5.1.0 does not dispatch
+        # it -- it is absent from that tag's command table and Gridcoin has no equivalent
+        # at all, so GRC fee measurement could never succeed. What it did instead was
+        # make TWO RPC calls per quote, have the second answer "Method not found", and
+        # return "fundrawtransaction refused, so no fee was measured" -- which names the
+        # METHOD and reads as a wallet or a daemon problem rather than as a property of
+        # the chain. config.py's own comment already said "FALLBACK: the configured
+        # GRC_NETWORK_FEE_RESERVE" without saying why.
+        #
+        # THE FEE THIS PRODUCES IS UNCHANGED, which is why this is not a fund-path change
+        # (rule 16). Every return of None here lands in
+        # services/quote_service._fallback(), which uses the configured
+        # <ASSET>_NETWORK_FEE_RESERVE -- so GRC got the constant before and gets the same
+        # constant now. What changes is the SENTENCE, which was wrong, and two doomed
+        # round trips per quote, which on an unreachable daemon cost a timeout each.
+        unavailable = rpc_matrix.cell(self.asset, "fundrawtransaction")
+        if unavailable.state != rpc_matrix.PRESENT:
+            return None, (f"no fee can be measured on this chain: {unavailable.why} The configured "
+                          f"{self.asset}_NETWORK_FEE_RESERVE is what will be used.")
         try:
             raw = self.call("createrawtransaction", [], {address: fitted})
         except Exception as error:  # noqa: BLE001 -- checked: returns None with the type and message, so no caller can mistake a failed measurement for a cheap fee. Every failure mode here (no such method, bad address, parser refusal) means the same thing to the caller: not established.

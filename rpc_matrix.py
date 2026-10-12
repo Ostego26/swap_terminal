@@ -47,7 +47,25 @@ LIVE_DIRS = ("chains", "modules", "services", "workers", "routes")
 #: names chains/solana.py sends, not Bitcoin-style names to be mapped. Filtering them out
 #: here rather than listing them keeps the rule in one place: if it has a capital, it is
 #: already a native name and this matrix has nothing to say about it.
-_CALL = re.compile(r'\.call\(\s*"([a-z][a-z0-9_]*)"')
+#: WHERE A METHOD NAME CAN APPEAR, and there are TWO shapes because making this matrix
+#: load-bearing created the second one.
+#:
+#: MEASURED THE MOMENT IT HAPPENED, 2026-10-12. chains/base._any_wallet_address() used to
+#: read `.call("getaddressesbylabel")`; it now asks rpc_matrix.cell() for the name THIS
+#: chain has and calls `.call(fallback.equivalent, ...)`. So the literal vanished from the
+#: scan, `getaddressesbylabel` dropped out of the row set, and
+#: tests/test_rpc_matrix.py::test_the_disagreement_list_is_SHORT_and_holds_the_real_hazards
+#: failed -- because FIXING a hazard had removed it from the hazard list.
+#:
+#: That is the worst available direction for a report to move in, and it is the shape
+#: rule 19's "does it stop the symptom being reported, or stop the cause existing" is
+#: about: the symptom had stopped being reported and the method is still absent from
+#: Gridcoin. So a `cell(asset, "method")` lookup IS a call site in the sense that matters
+#: -- it is where the code names the method -- and the scan reads both.
+_CALL = re.compile(
+    r'\.call\(\s*"([a-z][a-z0-9_]*)"'
+    r'|\bcell\(\s*[^,]+,\s*"([a-z][a-z0-9_]*)"'
+)
 
 
 def called_methods(dirs: tuple[str, ...] = LIVE_DIRS) -> list[str]:
@@ -58,7 +76,11 @@ def called_methods(dirs: tuple[str, ...] = LIVE_DIRS) -> list[str]:
         if not root.is_dir():
             continue
         for path in sorted(root.rglob("*.py")):
-            found.update(_CALL.findall(path.read_text(encoding="utf-8")))
+            # findall returns a TUPLE per match because the pattern has two groups, one
+            # per shape, and only one of them is ever set. Filtering the empties is what
+            # turns that into method names.
+            for groups in _CALL.findall(path.read_text(encoding="utf-8")):
+                found.update(name for name in groups if name)
     return sorted(found)
 
 

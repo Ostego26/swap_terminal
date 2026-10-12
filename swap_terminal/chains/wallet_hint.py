@@ -31,6 +31,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# WHAT THIS CHAIN ACTUALLY HAS. See the listing_rpc check below for the wrong
+# advice this removed (a `createwallet` suggestion on a daemon with no such method).
+from chains import rpc_matrix
 from chains.daemon_conf import CONF_FALLBACK_NETWORK
 from regtest.daemons import CHAIN_DEFAULTS
 
@@ -71,6 +74,25 @@ def which_wallets_are_on_disk(adapter, chain: str) -> str:
     datadir = CHAIN_DEFAULTS.get(chain, {}).get("datadir", "")
     network = CONF_FALLBACK_NETWORK.get(chain, "")
     prefix = (f"{cli} -datadir={Path(datadir).expanduser()} -{network} " if cli and network else "")
+    # A CHAIN WITH NO MULTI-WALLET RPC GETS NO MULTI-WALLET ADVICE, checked before the
+    # call rather than after it fails. Added 2026-10-12, when chains/rpc_matrix.py found
+    # that listwalletdir, createwallet and loadwallet are ALL absent from Gridcoin
+    # 5.5.1.0 -- it has one wallet per datadir and no /wallet/<name> endpoint, which is
+    # why three Gridcoin wallets on this host means three DATADIRS.
+    #
+    # THE OLD FALLBACK TOLD A GRC READER TO RUN `createwallet`, which that daemon does
+    # not have either. That is the worst available version of this: not a missing hint
+    # but a WRONG one, in a line an operator pastes, naming a command that answers
+    # "Method not found". Rule 16 treats a wrong sentence with the same seriousness as
+    # wrong code, and this one was reached by exactly the route the operator named --
+    # the shared adapter assuming its own API is Bitcoin Core's.
+    listing_rpc = rpc_matrix.cell(chain, "listwalletdir")
+    if listing_rpc.state != rpc_matrix.PRESENT:
+        return (
+            f"{chain} has no multi-wallet RPC at all, so there is no wallet to load and nothing "
+            f"to list: {listing_rpc.why} One datadir is one wallet here -- to use a different "
+            f"one, point this chain's datadir elsewhere and restart that daemon."
+        )
     try:
         listing = adapter.call("listwalletdir") or {}
         names = [entry.get("name", "") for entry in (listing.get("wallets") or [])]
