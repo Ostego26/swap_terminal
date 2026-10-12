@@ -174,25 +174,36 @@ class DaemonRefusal(NamedTuple):
         return bool(self.why)
 
 
-def refuse_to_touch(asset: str, settings) -> DaemonRefusal:
+def refuse_to_touch(asset: str, settings, unconfigured_why: str = "") -> DaemonRefusal:
     """Whether this module may address `asset`'s daemon at all. THE SAFETY DECISION.
 
-    A pure function of the asset and its configured settings, so a test can seed a
-    mainnet port and assert the refusal rather than arranging a daemon (rule 10).
+    A pure function of its arguments, so a test can seed a mainnet port and assert the
+    refusal rather than arranging a daemon (rule 10).
 
-    FIVE REFUSALS, and the order is cheapest-first with the most dangerous checked
-    before the merely-impossible:
+    THREE REFUSALS, cheapest first, with the most dangerous checked before the merely
+    impossible:
 
-      no settings      the chain is not configured here, so there is no daemon this
-                       terminal uses and nothing to stop.
-      mainnet port     refused BY NAME. See MAINNET_RPC_PORTS.
-      no port          a chain whose port is unset has no adapter either
-                       (chains/registry.build_adapters), so the terminal never
-                       talks to it.
+      mainnet port     refused BY NAME, before anything else. See MAINNET_RPC_PORTS.
+      not configured   `unconfigured_why` -- the caller's sentence, not ours. See below.
       remote host      not loopback. See LOCAL_HOSTS.
-      no credentials   without a password the `stop` call would 401, and reporting
-                       "could not stop it" for a missing setting is less useful than
-                       saying which setting.
+
+    `unconfigured_why` IS PASSED IN RATHER THAN DERIVED, AND THE FIRST VERSION SPELLED
+    IT HERE AND GOT IT WRONG. It read `f"{asset}_RPC_PASSWORD is unset"`, and the
+    variable this tree actually reads is `<ASSET>_RPC_PASS` -- so the message would have
+    sent an operator to set a name nothing consumes. chains/registry.why_unconfigured()
+    owns those names, and its own docstring records the SAME mistake from 2026-09-26:
+    "the operator's GRC_RPC_PORT WAS set to 25715, and what was missing was GRC_RPC_PASS
+    ... A message that said 'GRC_RPC_PORT is unset' would have sent them to check the one
+    variable that was already correct."
+
+    So this asks the caller for that sentence and spells no variable name of its own.
+    The bespoke port and password checks are gone with it: missing_settings() already
+    tests the port, the user AND the password for a Bitcoin-derived chain -- three
+    variables, which is the count registry's header records being wrong about for a week.
+
+    AN EMPTY `unconfigured_why` MEANS CONFIGURED, which is the contract
+    why_unconfigured() already has ("" for a chain that has an adapter). A caller that
+    cannot supply it gets the no-settings guard below and nothing finer.
     """
     if not settings:
         return DaemonRefusal(asset, f"{asset} is not configured in this process, so there is no daemon to stop")
@@ -201,22 +212,22 @@ def refuse_to_touch(asset: str, settings) -> DaemonRefusal:
     if port in MAINNET_RPC_PORTS:
         return DaemonRefusal(
             asset,
-            f"{asset}_RPC_PORT is {port}, which is {MAINNET_RPC_PORTS[port]}. REFUSED BY NAME: this "
-            f"command will not ask a mainnet wallet to shut down. If that port is deliberate, stop "
-            f"that daemon yourself",
+            f"its configured RPC port is {port}, which is {MAINNET_RPC_PORTS[port]}. REFUSED BY "
+            f"NAME: this command will not ask a mainnet wallet to shut down. If that port is "
+            f"deliberate, stop that daemon yourself",
         )
+    if unconfigured_why:
+        return DaemonRefusal(asset, unconfigured_why)
     if not port:
-        return DaemonRefusal(asset, f"{asset}_RPC_PORT is unset, so this process builds no {asset} adapter")
+        return DaemonRefusal(asset, f"{asset} has no configured RPC port, so this process builds no adapter for it")
 
     host = str(settings.get("host") or "")
     if host not in LOCAL_HOSTS:
         return DaemonRefusal(
             asset,
-            f"{asset}_RPC_HOST is {host!r}, not loopback. A daemon on another machine is not this "
-            f"command's to stop",
+            f"its configured RPC host is {host!r}, not loopback. A daemon on another machine is "
+            f"not this command's to stop",
         )
-    if not settings.get("password"):
-        return DaemonRefusal(asset, f"{asset}_RPC_PASSWORD is unset, so a stop request would be rejected")
     return DaemonRefusal(asset, "")
 
 

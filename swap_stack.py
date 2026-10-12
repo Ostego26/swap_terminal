@@ -76,10 +76,41 @@ REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
+# ======================================================================
+# .env IS LOADED HERE, BEFORE `from config import Config`, AND THE ORDER IS THE
+# WHOLE POINT. Measured on the operator's host 2026-10-12.
+#
+# `off` had just learned to stop the chain daemons, and their first run printed:
+#
+#     BTC  NOT TOUCHED  BTC_RPC_PORT is unset, so this process builds no BTC adapter
+#     GRC  NOT TOUCHED  GRC_RPC_PORT is unset ...
+#     LTC  NOT TOUCHED  LTC_RPC_PORT is unset ...
+#
+# while the container was talking to 19332 and 25715 in the same minute. The ports
+# were unset IN THE SHELL: `docker compose` reads `.env` by itself and a bare
+# `python3 swap_stack.py` does not. So the feature shipped, passed its tests, and did
+# nothing on the host -- the third inert fix of that session.
+#
+# assets/swap-terminal.desktop had already recorded the identical defect on
+# 2026-10-09, about a host gunicorn reporting all five chains NOT CONFIGURED.
+#
+# config.Config IS A CLASS BODY, evaluated once at import. A load after that import
+# mutates os.environ and changes nothing else, and LOOKS like it worked -- which is
+# exactly the shape being fixed. tests/test_env_file.py asserts this ordering over
+# this file's own source rather than trusting the comment.
+#
+# WHY NOT IN config.py: its own header refuses, correctly -- "adding load_dotenv() to
+# a module read at import is the import-time side effect rule 12 names as a measured
+# past defect." An entry point has one import order and owns it; a library does not.
+# ======================================================================
+import env_file  # noqa: E402  -- same sys.path.insert
+
+_LOADED_FROM_ENV_FILE = env_file.load_into_environ()
+
 import chain_daemons  # noqa: E402  -- same sys.path.insert
 import supervisor  # noqa: E402  -- after the sys.path.insert above, same as every root tool
 from chains import registry as chain_registry  # noqa: E402  -- same sys.path.insert
-from config import Config  # noqa: E402
+from config import Config  # noqa: E402  -- MUST come after load_into_environ() above
 from microfortnights import format_duration  # noqa: E402  -- same sys.path.insert
 
 # HOST-SIDE ON PURPOSE. The markers that identify a cloud-sync share live above the
@@ -745,6 +776,28 @@ def down_banner() -> None:
     say("                    passed over in silence")
 
 
+def env_file_note() -> str:
+    """One line saying where this process got its chain settings. Rule 14.
+
+    "Echo the parameters that decide the answer" -- and the parameter deciding
+    whether anything is touched at all is whether `.env` was read. Without this line,
+    `BTC_RPC_PORT is unset` is indistinguishable from a deployment that genuinely
+    does not use BTC, which is what made the 2026-10-12 run read as correct.
+
+    THE COUNT AND NEVER THE NAMES, let alone the values: `.env` holds rpcpassword,
+    SECRET_KEY and payout seeds.
+    """
+    if not _LOADED_FROM_ENV_FILE:
+        return (
+            f"settings    nothing loaded from {env_file.ENV_FILE.name} -- absent, empty, or every "
+            f"name in it was already exported. This shell decides."
+        )
+    return (
+        f"settings    {len(_LOADED_FROM_ENV_FILE)} name(s) loaded from {env_file.ENV_FILE.name}; "
+        f"anything already exported in this shell wins, as it does for docker compose"
+    )
+
+
 def configured_chain_daemons():
     """[(asset, settings, adapter_or_None)] for every chain this process is configured for.
 
@@ -777,7 +830,22 @@ def stop_the_chain_daemons() -> None:
     the output.
     """
     for asset, settings, adapter in configured_chain_daemons():
-        refusal = chain_daemons.refuse_to_touch(asset, settings)
+        # THE PREDICATE IS WHETHER build_adapters() MADE ONE, and why_unconfigured() is
+        # only asked for the SENTENCE. Measured 2026-10-12: passing its return value
+        # as the predicate refused a correctly configured GRC, because it answers
+        # unconditionally -- its own docstring says "for a chain with NO adapter", so
+        # it is a message generator and not a test. missing_settings(Config.RPC, "GRC")
+        # returned [] in the same breath as why_unconfigured() returning a paragraph
+        # about GRC_RPC_PORT being unset while it was 25779.
+        #
+        # The adapter's existence is the right question anyway: it is exactly what
+        # decides whether the terminal talks to that chain at all, and it is registry's
+        # own answer rather than a second reading of the same variables.
+        refusal = chain_daemons.refuse_to_touch(
+            asset,
+            settings,
+            chain_registry.why_unconfigured(asset, Config.RPC) if adapter is None else "",
+        )
         if refusal.refuses:
             say(f"     {asset:4s} NOT TOUCHED  {refusal.why}")
             continue
@@ -817,8 +885,23 @@ def start_the_chain_daemons() -> None:
     A DAEMON ALREADY LISTENING IS LEFT ALONE and said so, because starting a second
     copy against one datadir is how a wallet gets two writers.
     """
-    for asset, settings, _ in configured_chain_daemons():
-        refusal = chain_daemons.refuse_to_touch(asset, settings)
+    for asset, settings, adapter in configured_chain_daemons():
+        # THE PREDICATE IS WHETHER build_adapters() MADE ONE, and why_unconfigured() is
+        # only asked for the SENTENCE. Measured 2026-10-12: passing its return value
+        # as the predicate refused a correctly configured GRC, because it answers
+        # unconditionally -- its own docstring says "for a chain with NO adapter", so
+        # it is a message generator and not a test. missing_settings(Config.RPC, "GRC")
+        # returned [] in the same breath as why_unconfigured() returning a paragraph
+        # about GRC_RPC_PORT being unset while it was 25779.
+        #
+        # The adapter's existence is the right question anyway: it is exactly what
+        # decides whether the terminal talks to that chain at all, and it is registry's
+        # own answer rather than a second reading of the same variables.
+        refusal = chain_daemons.refuse_to_touch(
+            asset,
+            settings,
+            chain_registry.why_unconfigured(asset, Config.RPC) if adapter is None else "",
+        )
         if refusal.refuses:
             say(f"     {asset:4s} NOT TOUCHED  {refusal.why}")
             continue
@@ -922,6 +1005,7 @@ def cmd_down(files: tuple[str, ...]) -> int:
         say(f"  FAILED            docker compose stop exited {done.returncode}")
     say("")
     say("  3. chain daemons -- the operator asked for this twice")
+    say(f"     {env_file_note()}")
     stop_the_chain_daemons()
     say("")
     say("  4. proof -- absence is the assertion, not an exit code (rule 13)")
@@ -1897,6 +1981,7 @@ def cmd_up(files: tuple[str, ...]) -> int:
     say("")
 
     say("  3. chain daemons -- BEFORE the containers, mirroring `off`")
+    say(f"     {env_file_note()}")
     # DAEMONS FIRST ON THE WAY UP, which is cmd_down's order reversed and for its
     # reason. That function's docstring: "a worker mid-payout gets its SIGTERM and
     # its grace period while the chain daemons and the ICP replica are still
