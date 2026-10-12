@@ -2437,6 +2437,32 @@ def cmd_restart(files: tuple[str, ...]) -> int:
     say("                    if `down` cannot prove the stop, NOTHING IS STARTED and this")
     say("                    exits non-zero. Starting over a survivor is how a stale process")
     say("                    ends up holding a lock while every cycle reports success (rule 13).")
+    # WHAT THE GATE COVERS, AND IT IS NOT EVERYTHING -- which the three lines above
+    # claimed until 2026-10-12. Measured on the operator's own restart that day:
+    #
+    #   3. chain daemons
+    #      GRC  UNREACHABLE  could not be asked to stop and its port is still bound: 401
+    #   ...
+    #   STOP PROVEN       every listener this project owns is gone ... Starting now.
+    #
+    # GRC's stop could NOT be proven -- the daemon refused the stop RPC and kept its
+    # port -- and `up` ran anyway. The banner had just promised NOTHING IS STARTED in
+    # that case, so it was false on the run that produced it, which is rule 16's wrong
+    # comment in the most prominent place this file has.
+    #
+    # THE BEHAVIOR IS RIGHT AND THE SENTENCE WAS WRONG, which is why this is a new line
+    # rather than a new gate. The proof covers what a double-start would corrupt: the
+    # workers, which take a lock on one SQLite database, and the containers and their
+    # ports. A chain daemon that survives is not that: `up` step 3 checks the port and
+    # reports "already up; not starting a second copy", so there is no second copy to
+    # fear -- and gating the whole terminal on one chain's credentials would take the
+    # web container down over a wrong rpcpassword, which is worse than the thing it
+    # would be protecting against.
+    say("  what it covers    THE WORKERS AND THE CONTAINERS, and their ports. A CHAIN DAEMON")
+    say("                    that could not be stopped does NOT hold the gate shut: `up` sees")
+    say("                    the port is still bound and declines to start a second copy, and")
+    say("                    refusing to bring the terminal up over one chain's credentials")
+    say("                    would be worse than the survivor. Step 3 names each verdict.")
     # THIS SAID "not stopped -- the chain daemons, deliberately" UNTIL 2026-10-12 AND
     # THEN THAT WAS HALF TRUE, which is the worst state for a line an operator reads at
     # every restart. `off` learned to stop them that day, and the old sentence kept

@@ -105,6 +105,13 @@ import subprocess
 import time
 from typing import NamedTuple
 
+# THE RECORDED REMEDIES, read rather than restated (rule 8). This module asks a
+# daemon to stop and reports why it could not; what to DO about a 401 or a refused
+# connection is chains/daemon_capabilities.py's, and it already serves the same
+# sentences to services/admin_view.probe_chain(). No cycle: that module imports only
+# dataclasses and .coin_amounts.
+from chains.daemon_capabilities import refusal_remedy
+
 #: RPC ports that belong to a MAINNET chain. A configured port matching one of
 #: these is REFUSED by name rather than acted on.
 #:
@@ -392,6 +399,31 @@ def stop_daemon(asset: str, adapter, port: int, *, budget_seconds: float = STOP_
         time.sleep(STOP_POLL_SECONDS)
     waited = time.monotonic() - started
     state, sentence = stop_verdict(accepted, detail, port_is_free(port), waited)
+    # THE RECORDED REMEDY, AT THE SECOND SITE THE SAME FAILURE APPEARS. Added
+    # 2026-10-12 from the operator's own `restart`: step 3 printed
+    #
+    #     GRC  UNREACHABLE  could not be asked to stop and its port is still bound:
+    #                       HTTPError: 401 Client Error: Authorization Required
+    #
+    # with no remedy, while step 8 -- the container's probe of the same daemon, for the
+    # same reason -- printed the full 401 explanation two screens later. One failure,
+    # two surfaces, and only one of them had been taught. chains/daemon_capabilities.
+    # refusal_remedy()'s own docstring is about exactly this ("a capability map that no
+    # report reads is documentation"), so the fix is to read it here too rather than to
+    # write a second sentence.
+    #
+    # ATTACHED HERE AND NOT IN stop_verdict(), which is pure and takes no asset: the
+    # four outcomes are a decision about accepted/freed and nothing else, and threading
+    # an asset through it to look up prose would put a lookup inside the one function in
+    # this module that a test can exercise with four booleans.
+    #
+    # ONLY WHEN SOMETHING IS RECORDED. refusal_remedy() returns "" for a failure it
+    # cannot classify, and appending an empty string would leave a trailing separator --
+    # rule 14's dangling-tail defect, which this tree has already shipped once in
+    # cmd_chains()'s exit line.
+    remedy = refusal_remedy(asset, detail)
+    if remedy:
+        sentence = f"{sentence}  REMEDY: {remedy}"
     return state, sentence, waited
 
 
