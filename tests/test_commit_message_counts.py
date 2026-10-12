@@ -81,6 +81,36 @@ _CLAIM = re.compile(
 _LOOSE_CLAIM = re.compile(r"suite\s+(?P<passed>\d+)\s+passed", re.IGNORECASE)
 
 
+#: Inline code spans and fenced blocks, stripped before any scan. See
+#: message_claims() for the occurrence this is.
+_CODE_SPAN = re.compile(r"```.*?```|`[^`]*`", re.DOTALL)
+
+
+def message_claims(message: str) -> str:
+    """The commit message with QUOTED text removed, so a scan sees assertions only.
+
+    PROSE-AS-CODE, OCCURRENCE 13 IN THIS TREE, and this time in the gate rather than in
+    what it guards. tests/prose.py exists because a text scan over source matches
+    identifiers QUOTED in comments; the same thing happens to a scan over a commit
+    message, and it happened immediately:
+
+    The commit introducing this file discusses the wrong count it is correcting --
+    "b9f8e1b claims `suite 5758 passed ... (5762 collected)`" -- and the loose-claim
+    test rejected the message for CONTAINING a bad count rather than for MAKING one. A
+    correction commit must be able to quote what it is correcting. CLAUDE.md records the
+    identical case for rule 18: "the rule's own examples, which quote the British
+    spelling in order to name it, and are left alone."
+
+    BACKTICKS ARE THE BOUNDARY, and that is a convention this repository's own messages
+    already follow: suite_baseline.py's `for the commit` line gets pasted as a plain
+    line of prose, while a quotation of somebody else's number is written in code
+    markers. So an ASSERTED count is still fully checked, and a DISCUSSED one is not --
+    which is the distinction the gate was always about and the first version could not
+    draw.
+    """
+    return _CODE_SPAN.sub(" ", message)
+
+
 def head_message() -> str:
     """HEAD's commit message, or "" when git cannot be asked.
 
@@ -132,7 +162,7 @@ def test_a_suite_count_in_HEADs_message_matches_the_baseline_HEAD_COMMITTED():
     if not message.strip():
         pytest.skip("git history is not available here, so HEAD's message cannot be read")
 
-    claims = list(_CLAIM.finditer(message))
+    claims = list(_CLAIM.finditer(message_claims(message)))
     if not claims:
         return  # covered by the next test, which is about the shape rather than the value
 
@@ -165,8 +195,9 @@ def test_a_count_written_WITHOUT_the_collected_total_is_rejected():
     if not message.strip():
         pytest.skip("git history is not available here, so HEAD's message cannot be read")
 
-    loose = [match.group(0) for match in _LOOSE_CLAIM.finditer(message)]
-    checkable = [match.group(0) for match in _CLAIM.finditer(message)]
+    asserted = message_claims(message)
+    loose = [match.group(0) for match in _LOOSE_CLAIM.finditer(asserted)]
+    checkable = [match.group(0) for match in _CLAIM.finditer(asserted)]
 
     unverifiable = [claim for claim in loose if not any(claim in whole for whole in checkable)]
     assert not unverifiable, (
@@ -175,3 +206,27 @@ def test_a_count_written_WITHOUT_the_collected_total_is_rejected():
         f"skipped, errored, failed AND collected, and the collected total is the one this "
         f"suite can verify."
     )
+
+
+def test_a_QUOTED_count_is_discussion_and_not_a_claim():
+    """A correction commit must be able to quote the number it is correcting.
+
+    This is the case that broke the gate on its first run: the commit introducing it
+    discusses b9f8e1b's wrong count, and the loose-claim test rejected the message for
+    CONTAINING a bad count rather than for MAKING one. Prose-as-code, occurrence 13 --
+    see message_claims().
+    """
+    quoted = "b9f8e1b claims `suite 5758 passed ... (5762 collected)` and the real line was"
+    assert "suite 5758 passed" not in message_claims(quoted)
+    assert _LOOSE_CLAIM.search(message_claims(quoted)) is None
+
+    fenced = "```\nsuite 9999 passed, 0 skipped (9999 collected)\n```\nwhich was wrong"
+    assert _CLAIM.search(message_claims(fenced)) is None
+
+    # AND AN ASSERTED ONE IS STILL FULLY CHECKED, which is the half that must not be
+    # weakened: suite_baseline.py's line is pasted as plain prose, not in backticks.
+    asserted = "suite 5754 passed, 4 skipped, 0 errored, 0 failed (5758 collected). ruff clean."
+    found = _CLAIM.search(message_claims(asserted))
+    assert found is not None
+    assert found.group("collected") == "5758"
+    assert found.group("passed") == "5754"
