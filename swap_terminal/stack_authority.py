@@ -49,6 +49,34 @@ and for a SERVER there is something better than both: the port. A process holdin
 the actual question an operator has. So listeners are found through /proc/net/tcp
 and matched to pids by socket inode.
 
+AND THE REFUSAL ABOVE IS ABOUT *THIS FILE'S* MECHANISM, which is worth stating
+since 2026-10-12, when swap_stack.py started stopping the chain daemons after the
+operator asked three times ("why doesn't docker compose down stop that
+motherfucker? how many more times"). The paragraph above still holds, unchanged,
+and the two are not in conflict because they identify and stop a daemon in
+different ways:
+
+  THIS FILE          finds a process by the PORT it holds and would stop it with a
+                     SIGNAL. A port is "strong enough to report and NOT strong
+                     enough to kill" -- something else may legitimately hold one --
+                     and a signal to a Bitcoin-derived daemon mid-write can damage
+                     wallet.dat. Both reasons still forbid it here, so NEVER_STOPPED
+                     is unchanged and chain_daemons.py is not wired into it.
+  chain_daemons.py   addresses the daemon by the RPC ENDPOINT THE TERMINAL IS
+                     CONFIGURED TO USE and sends it the `stop` verb, which is a
+                     flush-and-close the daemon performs on itself. It cannot hit a
+                     daemon this terminal does not talk to -- which matters because
+                     the operator runs THREE Gridcoin wallets (OPEN_FINDINGS
+                     finding 2) -- and it refuses a configured MAINNET port by name.
+
+WHAT IT STILL COSTS, AND THE PASSPHRASE SENTENCE ABOVE IS WHY. Gridcoin's wallet is
+left FULLY UNLOCKED for staking (CLAUDE.md names it as the only such chain, and the
+operator's instruction is that the system unlocks it "on it's own not the user").
+A stop ends that unlock and `on` cannot restore it, having no passphrase. So
+swap_stack prints that cost next to the GRC line rather than discovering it later:
+the mainnet staking wallet is refused outright, and a testnet one being re-unlocked
+is a thing the operator does, not a thing an icon silently undoes.
+
 That identity is strong enough to report and NOT strong enough to kill, which is
 the distinction `stray_verdict()` draws. Something else on this machine may
 legitimately hold a port in our range; killing it because it answered on 5101

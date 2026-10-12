@@ -582,7 +582,13 @@ def test_every_action_is_an_icon_or_explicitly_not_one():
     """
     iconed = {action for action, _name, _comment in install_desktop_icon.ACTION_ENTRIES}
     accounted = iconed | set(install_desktop_icon.NO_ICON)
-    actions = set(swap_stack.ACTIONS)
+    # PRIMARY_ACTIONS AND NOT ACTIONS, since 2026-10-12. `up` and `down` are kept in
+    # ACTIONS as ALIASES for `on` and `off` so the launchers installed before the
+    # rename still work on the next click -- see swap_stack.ACTION_ALIASES -- and an
+    # alias deliberately gets no icon of its own, because the icon it would duplicate
+    # already exists under the new name. Asserting over ACTIONS would demand two icons
+    # for one verb, which is the duplication this gate exists to prevent.
+    actions = set(swap_stack.PRIMARY_ACTIONS)
 
     assert accounted == actions, (
         f"actions with no icon and no stated reason: {sorted(actions - accounted)}; "
@@ -723,11 +729,27 @@ def test_every_action_icon_says_what_it_does_NOT_stop():
     the two destructive-sounding actions must say it.
     """
     comments = {action: comment for action, _name, comment in install_desktop_icon.ACTION_ENTRIES}
-    for action in ("down", "restart"):
-        assert "chain daemon" in comments[action], (
-            f"the {action} icon does not say the chain daemons are left running: {comments[action]}"
+    # INVERTED 2026-10-12, AND THE INVERSION IS THE POINT. This asserted that `down`
+    # and `restart` PROMISE the chain daemons are left running, and that `up` promises
+    # it starts none -- true until swap_stack learned to do both, after the operator
+    # asked three times. The gate is kept and turned around rather than deleted,
+    # because what it was really holding is that a destructive-sounding icon must say
+    # what it reaches: an icon carries no documentation, so the Comment is the only
+    # place a one-click user finds out.
+    assert "chain daemon" in comments["off"].lower(), (
+        f"the off icon does not say it stops the chain daemons: {comments['off']}"
+    )
+    assert "mainnet" in comments["off"].lower(), (
+        "the off icon must say a configured MAINNET port is refused -- it is the one "
+        f"thing a one-click user cannot discover any other way: {comments['off']}"
+    )
+    assert "chain daemon" in comments["on"].lower(), (
+        f"the on icon does not say it starts the chain daemons: {comments['on']}"
+    )
+    for action, comment in comments.items():
+        assert "leaves the chain daemons running" not in comment.lower(), (
+            f"the {action} icon still carries the pre-2026-10-12 promise"
         )
-    assert "no chain daemon" in comments["up"].lower(), comments["up"]
 
 
 def test_the_dry_run_names_exactly_what_the_real_run_writes():

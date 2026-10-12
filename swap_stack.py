@@ -76,7 +76,9 @@ REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
+import chain_daemons  # noqa: E402  -- same sys.path.insert
 import supervisor  # noqa: E402  -- after the sys.path.insert above, same as every root tool
+from chains import registry as chain_registry  # noqa: E402  -- same sys.path.insert
 from config import Config  # noqa: E402
 from microfortnights import format_duration  # noqa: E402  -- same sys.path.insert
 
@@ -703,15 +705,16 @@ def print_bound_but_no_listener(bound: list[int]) -> None:
     say("                    after a minute is the cheaper check -- `free` then means TIME_WAIT.")
 
 
-def cmd_down(files: tuple[str, ...]) -> int:
-    """Stop this terminal's processes and containers, then PROVE it.
+def down_banner() -> None:
+    """The DOWN banner. Text, extracted because it is not a decision.
 
-    ORDER MATTERS AND IS NOT ARBITRARY. Workers first, containers second:
-    a worker mid-payout gets its SIGTERM and its grace period while the chain
-    daemons and the ICP replica are still reachable, so a send in flight can
-    finish or fail cleanly rather than losing its RPC underneath it. Tearing the
-    replica down first would turn an in-flight ICP payout into a dfx timeout of
-    unknown outcome, which is the one failure this system cannot read afterwards.
+    cmd_down() hit ruff PLR0915 at 63 statements when the chain-daemon step landed,
+    and CLAUDE.md rule 12 says what that code means: "orchestration that has
+    swallowed decisions ... The fix is to extract the decision so it can be called
+    with seeded inputs, not to raise the ceiling." Here the honest reading is the
+    other way round -- twenty of those statements are a banner, which is the one
+    part of cmd_down that decides nothing. Moving it out leaves the function at its
+    actual control flow and makes the text assertable on its own.
     """
     say("swap_stack: DOWN")
     say(f"  database          {Config.DB_PATH}")
@@ -726,8 +729,125 @@ def cmd_down(files: tuple[str, ...]) -> int:
     say("                    ESTABLISHED -- the icp-replica-data volume landed three hours AFTER")
     say("                    the measurement that showed the key changing. Prefer this command,")
     say("                    or `docker compose stop`. See docker-compose.yml's hazard 1.")
-    say("  never stopped     chain daemons, and a FOREIGN listener on one of our ports. Both are")
-    say("                    reported below rather than passed over in silence")
+    say("  chain daemons     STOPPED TOO, as of 2026-10-12, which this banner said it never did.")
+    say("                    Operator, twice: \"when i fucking type docker up or docker down this")
+    say("                    should start/stop every subprocess or pid\" and \"why doesn't docker")
+    say("                    compose down stop that motherfucker? how many more times\". The answer")
+    say("                    to the literal question is that `docker compose` CANNOT -- the daemons")
+    say("                    are host processes, which is the whole reason the web container needs")
+    say("                    extra_hosts. This command can, and now does.")
+    say("  asked, not killed Each is sent its own `stop` RPC through the adapter the terminal already")
+    say("                    uses -- a flush-and-close, never a signal. A Bitcoin-derived daemon")
+    say("                    killed mid-write can damage wallet.dat. See chain_daemons.py.")
+    say("  MAINNET REFUSED   by name. A configured port that is 8332, 9332 or 15715 is reported and")
+    say("                    left alone: the Gridcoin mainnet wallet is a live staking wallet.")
+    say("  never stopped     a FOREIGN listener on one of our ports, reported below rather than")
+    say("                    passed over in silence")
+
+
+def configured_chain_daemons():
+    """[(asset, settings, adapter_or_None)] for every chain this process is configured for.
+
+    DERIVED FROM Config.RPC AND chains/registry.build_adapters(), never from a list
+    here. A chain added to config.py gets covered by `up` and `down` without a second
+    place needing the edit, which is rule 8 and is the defect
+    install_desktop_icon.ACTION_ENTRIES was built to avoid for the action list.
+
+    ONLY THE BITCOIN FAMILY HAS A DAEMON THIS COMMAND CAN ADDRESS. SOL and XRP are
+    remote endpoints with no local process; ICP's replica is a CONTAINER and is
+    already covered by step 2. So the filter is "does this adapter speak JSON-RPC to
+    a local daemon", asked by capability (`call`) rather than by asset string.
+    """
+    adapters = chain_registry.build_adapters(Config.RPC)
+    out = []
+    for asset in sorted(chain_daemons.MAINNET_RPC_PORTS_BY_ASSET):
+        settings = Config.RPC.get(asset) or {}
+        adapter = adapters.get(asset)
+        out.append((asset, settings, adapter))
+    return out
+
+
+def stop_the_chain_daemons() -> None:
+    """Ask each configured chain daemon to stop, prove it, and report every one.
+
+    NEVER RAISES AND NEVER SHORT-CIRCUITS. One chain refusing must not stop the
+    others from being asked -- the same reason refresh_wallet_inventory() continues
+    past an unreachable chain -- and every asset gets a line whether it was touched
+    or not, because rule 13 treats a skip that looks like a success as a defect in
+    the output.
+    """
+    for asset, settings, adapter in configured_chain_daemons():
+        refusal = chain_daemons.refuse_to_touch(asset, settings)
+        if refusal.refuses:
+            say(f"     {asset:4s} NOT TOUCHED  {refusal.why}")
+            continue
+        port = int(settings["port"])
+        state, sentence, _ = chain_daemons.stop_daemon(asset, adapter, port)
+        label = {
+            "stopped": "STOPPED     ",
+            "stopping": "STILL UP    ",
+            "already_down": "was not up  ",
+            "unreachable": "UNREACHABLE ",
+        }[state]
+        say(f"     {asset:4s} {label} {sentence}")
+        # THE COST, SAID WHERE IT HAPPENS AND NOT DISCOVERED LATER. stack_authority's
+        # header refused to stop a chain daemon partly because "this file has no
+        # passphrase and could not unlock them again", and for Gridcoin that is
+        # literally true and still is: CLAUDE.md names GRC as the only chain whose
+        # wallet is left FULLY UNLOCKED for staking, and `on` cannot restore that.
+        # A payout re-unlocks for itself (payout_service.payout_unlock_context), so
+        # this does not break paying out -- it stops STAKING until the operator
+        # unlocks it, which is a thing they do and must not be a thing an icon
+        # silently undoes.
+        if asset == "GRC" and state == "stopped":
+            say("          staking   its wallet was unlocked for STAKING and is not any more. `on`")
+            say("                    cannot restore that -- nothing here has the passphrase. Payouts")
+            say("                    still work (they unlock per send); staking waits for you.")
+
+
+def start_the_chain_daemons() -> None:
+    """Start each configured chain daemon from its own <ASSET>_DAEMON_COMMAND.
+
+    AN UNSET VARIABLE IS REPORTED, NOT GUESSED AROUND. chain_daemons.start_command()
+    carries the reasoning and this session is the evidence for it: an hour was spent
+    with GRC_RPC_PORT aimed at the operator's testnet GUI wallet instead of the desk
+    daemon, among three Gridcoin daemons on three ports. A launch command is a fact
+    about the host that no file here can read.
+
+    A DAEMON ALREADY LISTENING IS LEFT ALONE and said so, because starting a second
+    copy against one datadir is how a wallet gets two writers.
+    """
+    for asset, settings, _ in configured_chain_daemons():
+        refusal = chain_daemons.refuse_to_touch(asset, settings)
+        if refusal.refuses:
+            say(f"     {asset:4s} NOT TOUCHED  {refusal.why}")
+            continue
+        port = int(settings["port"])
+        if not chain_daemons.port_is_free(port):
+            say(f"     {asset:4s} already up   something is LISTENing on {port}; not starting a second copy")
+            continue
+        command = chain_daemons.start_command(asset)
+        if not command:
+            say(f"     {asset:4s} NOT STARTED  nothing is on {port} and {asset}_DAEMON_COMMAND is unset.")
+            say(f"          {'':4s}              Set it to the exact command that starts YOUR {asset} daemon and")
+            say(f"          {'':4s}              this will run it. It is not guessed -- see chain_daemons.py.")
+            continue
+        state, sentence, _ = chain_daemons.start_daemon(asset, command, port)
+        label = {"started": "STARTED     ", "failed": "FAILED      ", "not_listening": "NO LISTENER "}[state]
+        say(f"     {asset:4s} {label} {sentence}")
+
+
+def cmd_down(files: tuple[str, ...]) -> int:
+    """Stop this terminal's processes and containers, then PROVE it.
+
+    ORDER MATTERS AND IS NOT ARBITRARY. Workers first, containers second:
+    a worker mid-payout gets its SIGTERM and its grace period while the chain
+    daemons and the ICP replica are still reachable, so a send in flight can
+    finish or fail cleanly rather than losing its RPC underneath it. Tearing the
+    replica down first would turn an in-flight ICP payout into a dfx timeout of
+    unknown outcome, which is the one failure this system cannot read afterwards.
+    """
+    down_banner()
     say("")
     say("  1. workers")
     supervisor.main(["stop", "--run-dir", str(supervisor.DEFAULT_RUN_DIR)])
@@ -801,7 +921,10 @@ def cmd_down(files: tuple[str, ...]) -> int:
     if done.returncode != 0:
         say(f"  FAILED            docker compose stop exited {done.returncode}")
     say("")
-    say("  3. proof -- absence is the assertion, not an exit code (rule 13)")
+    say("  3. chain daemons -- the operator asked for this twice")
+    stop_the_chain_daemons()
+    say("")
+    say("  4. proof -- absence is the assertion, not an exit code (rule 13)")
     remaining = report_listeners(files)
     # A SURVIVING CONTAINER OF OURS IS "NOT DOWN" TOO, and it was not counted here
     # until 2026-10-08. This read `== "ours"` alone, and every containerized
@@ -863,7 +986,8 @@ def cmd_down(files: tuple[str, ...]) -> int:
         return 1
     say("  summary           every process this file owns is gone, proven by bind: every port in")
     say(f"                    {', '.join(str(p) for p in sorted(STACK_PORTS))} was bindable, and nothing is LISTENing on any")
-    say("                    of them. Chain daemons and any FOREIGN listener are untouched, above.")
+    say("                    of them. Chain daemons were asked to stop in step 3 and their verdicts")
+    say("                    are there; a FOREIGN listener is untouched and is named above.")
     return 0
 
 
@@ -1772,7 +1896,16 @@ def cmd_up(files: tuple[str, ...]) -> int:
     _say_replica_state(files)
     say("")
 
-    say("  3. containers")
+    say("  3. chain daemons -- BEFORE the containers, mirroring `off`")
+    # DAEMONS FIRST ON THE WAY UP, which is cmd_down's order reversed and for its
+    # reason. That function's docstring: "a worker mid-payout gets its SIGTERM and
+    # its grace period while the chain daemons and the ICP replica are still
+    # reachable" -- so the daemons go down LAST, and the mirror is that they come up
+    # FIRST. It also makes step 8's reachability check meaningful: asking whether the
+    # container can reach a chain is worth nothing if nothing has been started yet.
+    start_the_chain_daemons()
+    say("")
+    say("  4. containers")
     done = compose(["up", "-d", *UP_SERVICES], files)
     for line in (done.stderr or done.stdout).strip().splitlines():
         say(f"                    {line}")
@@ -1781,11 +1914,11 @@ def cmd_up(files: tuple[str, ...]) -> int:
         return 1
     say("")
 
-    say("  4. what is serving -- asked, not assumed")
+    say("  5. what is serving -- asked, not assumed")
     _say_serving()
     say("")
 
-    say("  5. is the replica ANSWERING? (bound is not ready)")
+    say("  6. is the replica ANSWERING? (bound is not ready)")
     ready, summary, advice, waited = wait_for_http(REPLICA_STATUS_URL, _REPLICA_WAIT_SECONDS)
     detail = probe_detail((ready, summary, advice))
     # format_duration() RATHER THAN A SECOND 1.2096, which is what this line held
@@ -1810,7 +1943,7 @@ def cmd_up(files: tuple[str, ...]) -> int:
     # checked; the thing a customer opens was not; and the two outcomes printed the
     # same way. I had named this gap one round earlier and shipped another `up`
     # without it, which is the part this comment exists to record.
-    say("  6. is the PAGE serving? (the thing a customer opens)")
+    say("  7. is the PAGE serving? (the thing a customer opens)")
     port = _say_page_serving()
     say("")
 
@@ -1825,11 +1958,11 @@ def cmd_up(files: tuple[str, ...]) -> int:
     # IT RUNS EVEN WHEN THE PAGE IS DEAD, deliberately. The map is MORE useful then
     # -- it is the list of what would be reachable, and it is printed as paths
     # rather than links so it cannot be read as a claim that anything serves.
-    say("  7. can the container reach the chain daemons?")
+    say("  8. can the container reach the chain daemons?")
     _say_chain_reachability(port)
     say("")
 
-    say("  8. WHERE EVERYTHING IS")
+    say("  9. WHERE EVERYTHING IS")
     _say_surface_map(files, port)
     say("")
     _say_icp_note()
@@ -1949,7 +2082,9 @@ def build_parser() -> argparse.ArgumentParser:
     # new one (rule 8). `or ""` would NOT do: "".splitlines() is [] and [0] is an IndexError,
     # one line further on. argparse takes description=None and prints no summary.
     parser = argparse.ArgumentParser(description=__doc__ and __doc__.splitlines()[0])
-    parser.add_argument("action", choices=tuple(ACTIONS))
+    # PRIMARY_ACTIONS AND NOT ACTIONS, so --help advertises `on`/`off` while `up`
+    # and `down` keep working for the installed launchers. See ACTIONS above.
+    parser.add_argument("action", choices=tuple(PRIMARY_ACTIONS) + tuple(ACTION_ALIASES))
     # `-f` AS WELL AS `--compose-file`, AND THE HELP TEXT IS WHY THIS IS A FIX
     # RATHER THAN A CONVENIENCE. Until 2026-10-07 this took only the long form
     # while its own help string read "Repeatable, in -f order" -- naming a flag
@@ -2126,19 +2261,49 @@ def cmd_restart(files: tuple[str, ...]) -> int:
 #:
 #: Defined here rather than beside build_parser() because every value has to
 #: exist first, and `chains` is directly above.
-ACTIONS = {
+#: `on` AND `off` ARE THE VERBS, as of 2026-10-12. Operator: "up.down make it
+#: on/off".
+#:
+#: `up` AND `down` STILL WORK, AND THAT IS NOT INDECISION. Three things name them
+#: outside this file -- the installed .desktop launchers in
+#: ~/.local/share/applications, the copies on the operator's Desktop, and whatever
+#: shell history and aliases they have. A rename that broke those would make the
+#: icons dead on the next click, which is the exact failure the StartupNotify
+#: comment in assets/swap-terminal-action.desktop records from 2026-10-09: a click
+#: that registers and does nothing. The aliases cost one dict entry each and cannot
+#: drift, because they are the same function object rather than a second copy of it
+#: -- which is the distinction rule 8 is about.
+#:
+#: ALIASES ARE NOT OFFERED AS CHOICES. build_parser() takes its `choices` from
+#: PRIMARY_ACTIONS, so `--help` advertises on/off and the old words keep working
+#: without being taught. ALIAS_NOTE is printed when one is used, so an operator
+#: learns the new verb from the thing they already typed rather than from a
+#: changelog.
+PRIMARY_ACTIONS = {
     "status": cmd_status,
-    "up": cmd_up,
-    "down": cmd_down,
+    "on": cmd_up,
+    "off": cmd_down,
     "restart": cmd_restart,
     "rebuild": cmd_rebuild,
     "chains": cmd_chains,
 }
 
+#: The old spellings, mapped to the SAME function objects.
+ACTION_ALIASES = {
+    "up": "on",
+    "down": "off",
+}
+
+ACTIONS = {**PRIMARY_ACTIONS, **{old: PRIMARY_ACTIONS[new] for old, new in ACTION_ALIASES.items()}}
+
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     files = tuple(args.compose_file) if args.compose_file else COMPOSE_FILES
+    if args.action in ACTION_ALIASES:
+        say(f"  note              `{args.action}` still works and is now spelled "
+            f"`{ACTION_ALIASES[args.action]}`. Re-run install_desktop_icon.py to relabel the icons.")
+        say("")
     return ACTIONS[args.action](files)
 
 

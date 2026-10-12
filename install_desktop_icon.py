@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -83,23 +84,37 @@ BASH = "/bin/bash"
 
 NO_ICON: tuple[str, ...] = ("status", "chains")
 
+# THE VERBS ARE `on` AND `off` AS OF 2026-10-12. Operator: "up.down make it
+# on/off". swap_stack keeps `up`/`down` as aliases so the launchers installed before
+# this still work on the next click -- see swap_stack.ACTION_ALIASES -- but the
+# labels and the filenames here use the new words, so re-running this installer
+# relabels the menu.
+#
+# AND THE COMMENTS BELOW WERE ALL WRONG AS OF THE SAME DAY. Every one of them said
+# some version of "leaves the chain daemons running", which was true when written
+# and stopped being true the moment swap_stack learned to stop them -- and these
+# sentences are what a one-click user reads INSTEAD of documentation, which makes
+# them rule 16's wrong comment in the worst available place. The operator asked
+# twice ("why doesn't docker compose down stop that motherfucker? how many more
+# times") and the icons were part of the answer they were given.
 ACTION_ENTRIES: tuple[tuple[str, str, str], ...] = (
     (
-        "up",
-        "Swap Terminal: Up",
-        "Start the containers and workers, then report what is reachable. Starts no chain daemon.",
+        "on",
+        "Swap Terminal: On",
+        "Start the chain daemons, the containers and the workers, then report what is reachable. "
+        "A daemon with no <ASSET>_DAEMON_COMMAND set is reported, not guessed at.",
     ),
     (
-        "down",
-        "Swap Terminal: Down",
-        "Stop this terminal's workers and containers and PROVE every port is free. "
-        "Leaves the chain daemons running -- they hold the wallets.",
+        "off",
+        "Swap Terminal: Off",
+        "Stop the workers, the containers AND the chain daemons, and PROVE every port is free. "
+        "Each daemon is asked to stop through its own RPC -- a flush-and-close, never a signal. "
+        "A configured MAINNET port is refused by name and left running.",
     ),
     (
         "restart",
         "Swap Terminal: Restart",
-        "Down, prove the stop, then Up. Refuses to start if the stop cannot be proven. "
-        "Leaves the chain daemons running.",
+        "Off, prove the stop, then On. Refuses to start if the stop cannot be proven.",
     ),
     # REBUILD HAS AN ICON BECAUSE WITHOUT ONE THE ICON SET HAS A TRAP. The
     # application is COPIED INTO the web image (docker/web.Dockerfile:150), so
@@ -111,9 +126,9 @@ ACTION_ENTRIES: tuple[tuple[str, str, str], ...] = (
     (
         "rebuild",
         "Swap Terminal: Rebuild",
-        "Rebuild the web image from this checkout, then Down, prove, Up. Run this after a "
-        "git pull -- the app is baked into the image, so Up alone serves the old code. "
-        "Never rebuilds the ICP replica, and leaves the chain daemons running.",
+        "Rebuild the web image from this checkout, then Off, prove, On. Run this after a "
+        "git pull -- the app is baked into the image, so On alone serves the old code. "
+        "Never rebuilds the ICP replica.",
     ),
 )
 
@@ -236,6 +251,123 @@ def refusals(python: str) -> list[str]:
         if not safe:
             reasons.append(f"{label}: {note}")
     return reasons
+
+
+#: Every swap-terminal launcher filename this installer currently produces. A
+#: swap-terminal*.desktop in one of the install directories that is NOT in this set
+#: was written by an OLDER version of this installer and is stale.
+#:
+#: DERIVED FROM ACTION_ENTRIES, never listed, which is the same reason the action
+#: list is imported from swap_stack rather than retyped: a verb added or renamed
+#: here must not leave a second spelling behind for somebody to maintain.
+def current_launcher_names() -> set[str]:
+    return {"swap-terminal.desktop"} | {
+        f"swap-terminal-{action}.desktop" for action, _name, _comment in ACTION_ENTRIES
+    }
+
+
+def exec_target_missing(path: Path) -> str:
+    """The non-existent path an `Exec=` line points at, or "". Why an icon is DEAD.
+
+    THE SECOND KIND OF STALE, and the one CLAUDE.md rule 2 warns about by name:
+    "Shell scripts, `package.json` scripts, `.desktop` launchers, cron entries and
+    docs all reference files by name in ways an import-based check never sees."
+    atomic_swap_gui.py was deleted on 2026-09-26 after being proven dead, and a
+    launcher pointing at it would still be sitting in a menu, clicking to nothing.
+
+    ONLY ABSOLUTE PATHS ARE CHECKED. An Exec= naming a program on PATH (`/bin/bash`,
+    `gridcoinresearch`) is not evidence of anything, and reporting a missing
+    `firefox` as a dead swap-terminal launcher would be noise. So this looks at the
+    arguments that LOOK like absolute file paths and reports the first one missing.
+
+    FILES THIS INSTALLER CREATES DO NOT COUNT AS MISSING, AND LEAVING THAT OUT WAS A
+    BUG THAT ATE ITS OWN OUTPUT. Caught 2026-10-12 by a test over a synthetic home:
+    on a FIRST install `~/.local/bin/swapterm` does not exist yet, so a correctly
+    named launcher pointing at it was reported stale -- and main() computes the stale
+    list BEFORE apply_all() writes, so the sequence was flag it, write it, DELETE THE
+    FILE JUST WRITTEN. The dry run would have shown "would remove" for the very
+    launcher it also said it would write, two lines apart.
+    """
+    installer_writes = {str(COMMAND_TARGET), str(LAUNCHER), str(ICON_TARGET), str(DESKTOP_TARGET)}
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        return f"could not be read: {exc}"
+    for line in text.splitlines():
+        if not line.startswith("Exec="):
+            continue
+        for token in shlex.split(line[len("Exec="):]):
+            if not token.startswith("/") or token in installer_writes:
+                continue
+            if not Path(token).exists():
+                return token
+    return ""
+
+
+def stale_launchers() -> list[tuple[Path, str]]:
+    """[(path, why)] for every swap-terminal launcher that should not be there.
+
+    TWO REASONS, REPORTED SEPARATELY because they are different mistakes:
+
+      a renamed verb   `swap-terminal-up.desktop` after `up` became `on`. Written by
+                       this installer, superseded by this installer. 2026-10-12
+                       created exactly this, which is why the prune landed with the
+                       rename rather than after somebody noticed two sets of icons.
+      a dead target    its Exec= names a file that no longer exists. Clicking it does
+                       nothing, which is indistinguishable from the desktop being
+                       broken -- rule 14's ambiguous silence, on an icon.
+
+    SCANS ONLY swap-terminal*.desktop, in only the two directories this installer
+    writes to. It is not a general desktop cleaner and must never delete a launcher
+    this tree did not create.
+    """
+    wanted = current_launcher_names()
+    found: list[tuple[Path, str]] = []
+    for directory in (DESKTOP_DIR, Path.home() / "Desktop"):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("swap-terminal*.desktop")):
+            if path.name not in wanted:
+                found.append((path, f"an older verb -- this installer now writes {sorted(wanted)}"))
+                continue
+            missing = exec_target_missing(path)
+            if missing:
+                found.append((path, f"its Exec= points at {missing}, which does not exist"))
+    return found
+
+
+def print_stale(stale: list[tuple[Path, str]], *, applying: bool) -> None:
+    """Report the stale launchers. (none) is a result; a blank gap is not (rule 14)."""
+    print()
+    print("  old launchers to remove:")
+    if not stale:
+        print("      (none)  <- nothing stale in ~/.local/share/applications or ~/Desktop")
+        return
+    for path, why in stale:
+        print(f"      {'removing' if applying else 'would remove'} {path}")
+        print(f"          {why}")
+
+
+def remove_stale(stale: list[tuple[Path, str]]) -> list[str]:
+    """Delete them. Returns what was removed.
+
+    NO BACKUP, DELIBERATELY, and it is the one place in this file that writes
+    destructively without one. A .desktop this installer wrote is REGENERATED by
+    re-running it -- the content is derived from ACTION_ENTRIES and the templates in
+    assets/, both in git -- so a copy would be a copy of something reproducible. That
+    is rule 2's point: "Git history is the archive; a file kept 'for reference' is a
+    file the next person has to read." The guard that matters is the name filter in
+    stale_launchers(), not a backup.
+    """
+    removed = []
+    for path, _why in stale:
+        try:
+            path.unlink()
+        except OSError as exc:
+            removed.append(f"COULD NOT REMOVE {path}: {exc}")
+            continue
+        removed.append(f"removed {path}")
+    return removed
 
 
 def planned_writes(desktop_files: bool) -> list[tuple[Path, str]]:
@@ -505,10 +637,14 @@ def main() -> int:
     command = rendered_command(sys.executable, REPO_ROOT)
 
     print_plan(entry, actions, desktop_files=args.desktop_files)
+    stale = stale_launchers()
+    print_stale(stale, applying=args.apply)
     if not args.apply:
-        print("\nDRY RUN -- nothing was written. Re-run with --apply.", flush=True)
+        print("\nDRY RUN -- nothing was written and nothing was removed. Re-run with --apply.", flush=True)
         return 0
     apply_all(entry, actions, command, desktop_files=args.desktop_files, on_path=on_path)
+    for line in remove_stale(stale):
+        print(f"  {line}")
     return 0
 
 

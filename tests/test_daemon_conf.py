@@ -271,6 +271,26 @@ SERVICE_SIDE = frozenset({
     # node whose progress has no bearing on whether the terminal can see money, which
     # is the quietest wrong answer available: a right number about the wrong thing.
     "chain_sync_rate.py",
+    # swap_stack.py, added 2026-10-12, when `off` learned to STOP the chain daemons
+    # after the operator asked three times. The register caught it the same hour --
+    # it resolves a chain now and had no side.
+    #
+    # SERVICE SIDE, AND IT IS THE CLEAREST CASE IN THIS SET. The whole purpose is to
+    # stop exactly the daemons the brokered terminal talks to, so it builds them the
+    # same way the service does: chains/registry.build_adapters(Config.RPC). A conf
+    # fallback would resolve a DIFFERENT daemon, and this file would then ask that one
+    # to shut down -- which is the register's own warning ("a way to inspect, credit or
+    # clear a DIFFERENT daemon than the one holding customer funds") with the verb
+    # changed from read to stop.
+    #
+    # AND THE HAZARD IS MEASURED, NOT HYPOTHETICAL. The operator runs THREE Gridcoin
+    # wallets (OPEN_FINDINGS finding 2: a mainnet GUI on 15715, a testnet GUI on 25715,
+    # the desk daemon on 25779), and this session spent an hour pointed at the wrong
+    # one of them. A resolver that could land on any of the three, wired to a verb that
+    # shuts one down, is how `off` stops a live staking wallet. chain_daemons.py also
+    # refuses a configured MAINNET port by name, which is the second guard rather than
+    # the first.
+    "swap_stack.py",
     # icp_custody_addresses.py, added 2026-10-06. SERVICE SIDE, and this one is not
     # a judgment call: the file prints two columns, and the right-hand column's
     # entire claim is "this is the address the desk is using RIGHT NOW". It gets it
