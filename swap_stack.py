@@ -2311,9 +2311,22 @@ def cmd_restart(files: tuple[str, ...]) -> int:
     say("                    if `down` cannot prove the stop, NOTHING IS STARTED and this")
     say("                    exits non-zero. Starting over a survivor is how a stale process")
     say("                    ends up holding a lock while every cycle reports success (rule 13).")
-    say("  not stopped       the chain daemons, deliberately. They hold the wallets, nothing")
-    say("                    here has their passphrase, and a stop this cannot undo is not one")
-    say("                    to automate. `down` names them below.")
+    # THIS SAID "not stopped -- the chain daemons, deliberately" UNTIL 2026-10-12 AND
+    # THEN THAT WAS HALF TRUE, which is the worst state for a line an operator reads at
+    # every restart. `off` learned to stop them that day, and the old sentence kept
+    # promising it did not -- rule 16, in operator-facing output, introduced by me.
+    #
+    # The CONDITION is what it depends on now, and it is the invariant that came out of
+    # closing the operator's Litecoin GUI wallet: a daemon is stopped only if
+    # <ASSET>_DAEMON_COMMAND says this can start it again. The old sentence's own
+    # reasoning -- "a stop this cannot undo is not one to automate" -- turned out to be
+    # exactly the right rule; it was just being applied unconditionally to every chain
+    # instead of being checked per chain.
+    say("  chain daemons     stopped ONLY where <ASSET>_DAEMON_COMMAND says this can start them")
+    say("                    again. A stop this cannot undo is not one to automate -- on")
+    say("                    2026-10-12 that was learned by closing the operator's Litecoin GUI")
+    say("                    wallet, which was what served the configured port. `down` names each")
+    say("                    one and says which case it is in.")
     say("")
     stopped = cmd_down(files)
     say("")
