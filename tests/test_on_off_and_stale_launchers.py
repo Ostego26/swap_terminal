@@ -47,6 +47,18 @@ import network_target
 import pytest
 import requests
 
+
+class _DoneStub:
+    """What subprocess.run returns, as narrow as the callers actually read it.
+
+    A STUB MUST ACCEPT THE SIGNATURE IT STANDS IN FOR -- this suite has paid for a
+    narrower one four times. cmd_down() reads .stderr, .stdout and .returncode.
+    """
+
+    returncode = 0
+    stdout = ""
+    stderr = ""
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
@@ -711,3 +723,72 @@ def test_every_external_entry_carries_its_evidence():
     for port, why in network_target.EXTERNAL_WALLET_PORTS.items():
         assert len(why) > 80, f"{port}'s entry does not say what it is and how that was measured"
         assert "2026-" in why, f"{port}'s entry carries no date for its measurement"
+
+
+# --- a restart does not cycle a chain daemon -------------------------------------
+
+
+def test_restart_does_NOT_stop_chain_daemons_and_off_still_does(monkeypatch):
+    """IT TOOK THE OPERATOR'S GRIDCOIN DAEMON DOWN TWICE IN ONE HOUR, 2026-10-13.
+
+    `off` stopped it cleanly both times -- "accepted stop and its port is free after
+    0.5s" -- and `up` then ran the recorded command and found nothing LISTENing, first
+    after 30s and again after 120s with the budget raised. The chain was left down each
+    time and the staking unlock went with it, which nothing in this stack can restore.
+
+    THE SPLIT IS THE FIX: `off` is the operator asking for every process to stop, stated
+    explicitly each run. `restart` is a request about the TERMINAL, and nothing it does
+    needs a wallet daemon cycled -- `up` declines to start a second copy on a bound port,
+    the container reconnects to whatever is listening, and a daemon takes minutes to bind
+    where a container takes seconds.
+
+    ASSERTED ON THE CALL, not on the output, because the output is what was already
+    saying the right thing while the behavior did the wrong one: this file's restart
+    banner read "GRC COSTS MORE THAN A RESTART even when it IS stoppable" and then paid
+    it on every run.
+    """
+    calls = []
+    monkeypatch.setattr(swap_stack, "stop_the_chain_daemons", lambda: calls.append("stopped"))
+    monkeypatch.setattr(swap_stack, "say_chain_daemons_left_running", lambda: calls.append("left"))
+    # NAMES READ OFF cmd_down(), NOT GUESSED. The first draft patched
+    # `swap_stack.supervisor_stop`, which does not exist -- cmd_down() calls
+    # `supervisor.main(["stop", ...])`. AttributeError on the first run, in the same
+    # session the operator said "quit fucking assuming things", in a test about a fix
+    # for assuming things.
+    monkeypatch.setattr(swap_stack.supervisor, "main", lambda argv: 0)
+    monkeypatch.setattr(swap_stack, "compose", lambda *a, **k: _DoneStub())
+    monkeypatch.setattr(swap_stack, "report_listeners", lambda files: [])
+
+    swap_stack.cmd_down((), chain_daemons_too=False)
+    assert calls == ["left"], "a restart asked a chain daemon to stop"
+
+    calls.clear()
+    swap_stack.cmd_down(())
+    assert calls == ["stopped"], "`off` stopped stopping them, which is the request itself"
+
+
+def test_the_left_running_lines_name_every_configured_chain(monkeypatch, capsys):
+    """A restart that silently stopped touching them would read like the one that broke
+    them. Rule 13: a skip that looks like a success is a defect in the output."""
+    monkeypatch.setattr(swap_stack, "configured_chain_daemons", lambda: [
+        ("GRC", {"port": 25779, "host": "127.0.0.1"}, object()),
+        ("LTC", {"port": 19443, "host": "127.0.0.1"}, object()),
+    ])
+
+    swap_stack.say_chain_daemons_left_running()
+    printed = capsys.readouterr().out
+
+    for asset, port in (("GRC", 25779), ("LTC", 19443)):
+        assert f"{asset} LEFT RUNNING" in printed.replace("  ", " "), f"{asset} got no line"
+        assert str(port) in printed, f"{asset}'s port is not named, so it cannot be checked"
+    assert "staking" in printed, "the cost that motivated this is not stated"
+    assert "swap_stack.py off" in printed, "the way to actually stop one is not named"
+
+
+def test_no_configured_chain_is_a_RESULT_and_not_a_blank(monkeypatch, capsys):
+    """`(none)` is a result (rule 14). A blank gap here reads as "the block broke"."""
+    monkeypatch.setattr(swap_stack, "configured_chain_daemons", lambda: [])
+
+    swap_stack.say_chain_daemons_left_running()
+
+    assert "(none)" in capsys.readouterr().out

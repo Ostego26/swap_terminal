@@ -2521,7 +2521,7 @@ def test_restart_starts_nothing_when_the_stop_could_not_be_proven(monkeypatch, c
     survivor keeps what it had, and both report fine.
     """
     started = []
-    monkeypatch.setattr(swap_stack, "cmd_down", lambda _files: 1)
+    monkeypatch.setattr(swap_stack, "cmd_down", lambda _files, **_kw: 1)
     monkeypatch.setattr(swap_stack, "cmd_up", lambda _files: started.append("up") or 0)
 
     code = swap_stack.cmd_restart(("docker-compose.yml",))
@@ -2544,7 +2544,8 @@ def test_restart_starts_once_the_stop_is_proven_and_returns_ups_code(monkeypatch
     shape, one command out.
     """
     order = []
-    monkeypatch.setattr(swap_stack, "cmd_down", lambda _files: order.append("down") or 0)
+    monkeypatch.setattr(swap_stack, "cmd_down",
+                        lambda _files, **_kw: order.append("down") or 0)
     monkeypatch.setattr(swap_stack, "cmd_up", lambda _files: order.append("up") or 7)
 
     code = swap_stack.cmd_restart(("docker-compose.yml",))
@@ -2569,18 +2570,24 @@ def test_restart_says_up_front_that_it_leaves_the_chain_daemons_running(monkeypa
 
     Then `off` learned to stop them -- the operator asked three times -- and it closed
     their Litecoin GUI wallet, because it stops by the configured RPC port and that
-    port was served by `litecoin-qt`. The invariant that came out of it is SYMMETRY: a
+    port was served by `litecoin-qt`. The invariant that came out of it was SYMMETRY: a
     daemon is stopped only where <ASSET>_DAEMON_COMMAND says `on` can start it again.
-    So the banner now names that variable, which is the part an operator can ACT on,
-    and this asserts it.
 
-    THE PASSPHRASE CLAUSE IS KEPT RATHER THAN DROPPED, because it is still true and
-    still a cost nobody would otherwise discover: Gridcoin's wallet is left fully
-    unlocked for STAKING (CLAUDE.md names it as the only such chain), a stop ends that,
-    and `up` cannot restore it. Deleting the assertion along with the sentence would
-    have removed a warning that outlived the rule it was written for.
+    AND ON 2026-10-13 A RESTART STOPPED STOPPING THEM AT ALL, which is why this now
+    asserts the KWARG and not a sentence. Symmetry was necessary and not sufficient: GRC
+    passed it -- GRC_DAEMON_COMMAND was set, `on` could start it -- and `restart` still
+    took that daemon down twice in one hour, because "can be started again" is not "comes
+    back within 120 seconds". The staking unlock went both times.
+
+    THE ASSERTION MOVED FROM THE BANNER TO THE CALL on purpose. The banner was already
+    saying the right thing -- "GRC COSTS MORE THAN A RESTART even when it IS stoppable" --
+    while the behavior paid that cost on every run, so a test over the prose passed
+    throughout. `chain_daemons_too=False` is the behavior, and it is what is checked.
+
+    THE PASSPHRASE CLAUSE IS KEPT, because the cost is still real and is now the REASON
+    the restart declines rather than a warning about what it is about to do.
     """
-    monkeypatch.setattr(swap_stack, "cmd_down", lambda _files: 1)
+    monkeypatch.setattr(swap_stack, "cmd_down", lambda _files, **_kw: 1)
     monkeypatch.setattr(swap_stack, "cmd_up", lambda _files: 0)
     swap_stack.cmd_restart(("docker-compose.yml",))
     said = capsys.readouterr().out
@@ -2588,13 +2595,40 @@ def test_restart_says_up_front_that_it_leaves_the_chain_daemons_running(monkeypa
     assert "chain daemons" in header, (
         f"the restart banner does not mention the chain daemons before acting: {header}"
     )
-    assert "DAEMON_COMMAND" in header, (
-        f"the banner does not name the variable that DECIDES whether a daemon is stopped, which "
-        f"is the only part of this an operator can act on: {header}"
+    assert "NOT STOPPED" in header, (
+        f"the banner does not say that a restart leaves them alone, which is the thing an "
+        f"operator is deciding whether to trust: {header}"
     )
-    assert "passphrase" in header, (
+    assert "passphrase" in header or "staking" in header, (
         f"and does not say what a GRC stop costs -- its wallet is left unlocked for staking and "
-        f"`up` cannot restore that: {header}"
+        f"`up` cannot restore that, which is now the REASON it declines: {header}"
+    )
+    assert "swap_stack.py off" in header or "`off`" in header, (
+        f"the banner does not name the command that DOES stop them, so an operator who wants "
+        f"that is left without it: {header}"
+    )
+
+
+def test_restart_passes_chain_daemons_too_FALSE_rather_than_merely_saying_so(monkeypatch):
+    """THE BEHAVIOR, not the prose. MUTATION: drop the kwarg from cmd_restart.
+
+    This is the assertion the old one could not make. The restart banner read "GRC COSTS
+    MORE THAN A RESTART even when it IS stoppable" while `restart` stopped it on every
+    run, so every test over that header passed while the daemon went down twice.
+    """
+    seen = {}
+
+    def fake_down(_files, **kwargs):
+        seen.update(kwargs)
+        return 1
+
+    monkeypatch.setattr(swap_stack, "cmd_down", fake_down)
+    monkeypatch.setattr(swap_stack, "cmd_up", lambda _files: 0)
+
+    swap_stack.cmd_restart(("docker-compose.yml",))
+
+    assert seen.get("chain_daemons_too") is False, (
+        f"cmd_restart did not ask cmd_down to leave the chain daemons alone: {seen}"
     )
 
 

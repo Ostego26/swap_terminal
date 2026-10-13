@@ -874,6 +874,67 @@ def stop_the_chain_daemons() -> None:
             say("                    still work (they unlock per send); staking waits for you.")
 
 
+def say_chain_daemons_left_running() -> None:
+    """Name every chain daemon a RESTART is deliberately not touching. Never silent.
+
+    =========================================================================
+    `restart` TOOK THE OPERATOR'S GRIDCOIN DAEMON DOWN TWICE IN ONE HOUR
+    =========================================================================
+
+    Measured 2026-10-13, both times. `off` stopped it cleanly -- "accepted stop and its
+    port is free after 0.5s" -- and then `up` ran its recorded command and found nothing
+    LISTENing, first after 30s and then after 120s with the budget raised. Each time the
+    chain was left down, and each time the staking unlock was gone: the wallet is left
+    unlocked for STAKING, nothing here has the passphrase, and `up` cannot restore it.
+
+    AND THIS FILE'S OWN RESTART BANNER ALREADY SAID SO: "AND GRC COSTS MORE THAN A
+    RESTART even when it IS stoppable". It named the cost and then paid it anyway, every
+    time, which is the shape of a comment that documents a defect instead of preventing
+    one.
+
+    SO A RESTART NO LONGER STOPS THEM, AND THE ARGUMENT IS NOT CAUTION. Restarting the
+    TERMINAL has no need to cycle a chain daemon:
+
+      - nothing is corrupted by one surviving. The proof `down` owes is about the
+        WORKERS, which take a lock on one SQLite database, and the containers and their
+        ports. `up` step 3 already checks each chain's port and reports "already up; not
+        starting a second copy", so there is no second copy to fear -- this file's own
+        gate comment makes that argument in the other direction.
+      - the container reconnects to whatever is listening when it comes back. A daemon
+        that never stopped is the best case for step 8, not a risk to it.
+      - a chain daemon takes minutes to bind (wallet plus block index) where the
+        containers take seconds, so cycling them makes a restart an order of magnitude
+        slower in return for nothing.
+      - and the losses are not symmetric: stopping costs a staking unlock this stack
+        cannot restore, while not stopping costs nothing anybody has named.
+
+    `off` STILL STOPS THEM, which is the whole point of the split. The operator asked
+    twice for `down` to reach every process -- "when i fucking type docker up or docker
+    down this should start/stop every subprocess or pid" -- and it does. `off` is that
+    request, stated explicitly each time it is run. `restart` is a request about the
+    terminal, and nobody asked it to cycle a wallet.
+
+    NAMED, NOT SKIPPED (rule 13: a skip that reads as a success is a defect in the
+    output). Every configured chain gets a line saying it was left alone and why, because
+    a `restart` that silently stopped touching them would be indistinguishable from the
+    one that broke them.
+    """
+    rows = configured_chain_daemons()
+    if not rows:
+        say("     (none)  <- no chain in this process has an adapter, so none was touched")
+        return
+    for asset, settings, _adapter in rows:
+        port = settings.get("port")
+        say(f"     {asset:4s} LEFT RUNNING  a RESTART does not stop a chain daemon. Nothing on "
+            f"{port} was asked to stop,")
+        say("                        and `up` will see the port is already bound and not start a "
+            "second copy.")
+    say("     why           stopping one costs minutes to come back and, on GRC, a staking")
+    say("                   unlock nothing here can restore -- in exchange for nothing a")
+    say("                   terminal restart needs. `swap_stack.py off` still stops them,")
+    say("                   which is that request stated explicitly.")
+
+
 def start_the_chain_daemons() -> None:
     """Start each configured chain daemon from its own <ASSET>_DAEMON_COMMAND.
 
@@ -921,7 +982,7 @@ def start_the_chain_daemons() -> None:
         say(f"     {asset:4s} {label} {sentence}")
 
 
-def cmd_down(files: tuple[str, ...]) -> int:
+def cmd_down(files: tuple[str, ...], *, chain_daemons_too: bool = True) -> int:
     """Stop this terminal's processes and containers, then PROVE it.
 
     ORDER MATTERS AND IS NOT ARBITRARY. Workers first, containers second:
@@ -1007,7 +1068,10 @@ def cmd_down(files: tuple[str, ...]) -> int:
     say("")
     say("  3. chain daemons -- the operator asked for this twice")
     say(f"     {env_file_note()}")
-    stop_the_chain_daemons()
+    if chain_daemons_too:
+        stop_the_chain_daemons()
+    else:
+        say_chain_daemons_left_running()
     say("")
     say("  4. proof -- absence is the assertion, not an exit code (rule 13)")
     remaining = report_listeners(files)
@@ -2474,17 +2538,20 @@ def cmd_restart(files: tuple[str, ...]) -> int:
     # reasoning -- "a stop this cannot undo is not one to automate" -- turned out to be
     # exactly the right rule; it was just being applied unconditionally to every chain
     # instead of being checked per chain.
-    say("  chain daemons     stopped ONLY where <ASSET>_DAEMON_COMMAND says this can start them")
-    say("                    again. A stop this cannot undo is not one to automate -- learned on")
-    say("                    2026-10-12 by closing the operator's Litecoin GUI wallet, which was")
-    say("                    what served the configured port. `down` names each one and says")
-    say("                    which case it is in.")
-    say("                    AND GRC COSTS MORE THAN A RESTART even when it IS stoppable: its")
-    say("                    wallet is left unlocked for STAKING and nothing here has the")
-    say("                    passphrase, so `up` cannot restore that. Payouts still work -- they")
-    say("                    unlock per send -- and staking waits for you.")
+    say("  chain daemons     NOT STOPPED, as of 2026-10-13. This used to stop them where")
+    say("                    <ASSET>_DAEMON_COMMAND said it could start them again, and the line")
+    say("                    right here said \"GRC COSTS MORE THAN A RESTART even when it IS")
+    say("                    stoppable\" -- then paid that cost on every run. It took the")
+    say("                    operator's Gridcoin daemon down twice in one hour: stopped cleanly")
+    say("                    both times, failed to come back within 30s and then within 120s,")
+    say("                    and the staking unlock went with it each time.")
+    say("                    Nothing a terminal restart does needs a chain daemon cycled: `up`")
+    say("                    declines to start a second copy on a bound port, the container")
+    say("                    reconnects to whatever is listening, and a daemon takes minutes to")
+    say("                    bind where a container takes seconds. `off` still stops them --")
+    say("                    that is the request stated explicitly. Step 3 names each one.")
     say("")
-    stopped = cmd_down(files)
+    stopped = cmd_down(files, chain_daemons_too=False)
     say("")
     if stopped != 0:
         say("  REFUSED TO START  `down` exited "
