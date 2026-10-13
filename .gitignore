@@ -153,3 +153,10 @@ runtime/browser-profile/
 # COMPLETE second copy of this tree, which is why tests/source_tree.py also excludes
 # it: a nested checkout makes every sweep that counts something count it twice.
 .claude/
+
+# A DIRECTORY LITERALLY NAMED `$HOME`, which chain_daemons.start_daemon() created
+# twice on 2026-10-13: GRC_DAEMON_COMMAND held an unexpanded $HOME and shlex.split
+# with no shell passed it through verbatim, so a Gridcoin daemon synced MAINNET into
+# `./$HOME/.GridcoinResearch-desk`. chain_daemons.refuse_to_run() stops that now;
+# this keeps the wreckage of an older checkout out of a commit.
+$HOME/

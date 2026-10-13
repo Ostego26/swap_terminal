@@ -103,6 +103,7 @@ import shlex
 import socket
 import subprocess
 import time
+from pathlib import Path
 from typing import NamedTuple
 
 # THE RECORDED REMEDIES, read rather than restated (rule 8). This module asks a
@@ -507,6 +508,80 @@ def start_command(asset: str) -> str:
     return os.getenv(f"{asset}_DAEMON_COMMAND", "").strip()
 
 
+def refuse_to_run(asset: str, command: str) -> str:
+    """Why this command must not be executed, or "". CHECKED BEFORE subprocess.run.
+
+    =========================================================================
+    IT STARTED A MAINNET GRIDCOIN NODE IN A DIRECTORY NAMED `$HOME`, TWICE
+    =========================================================================
+
+    Measured 2026-10-13 from the operator's own host. GRC_DAEMON_COMMAND is
+
+        gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon
+
+    which is how a person types it. start_daemon() runs it through shlex.split with NO
+    shell -- deliberately, so a stray `;` in a path cannot become a second command -- and
+    shlex.split expands nothing:
+
+        ['gridcoinresearchd', '-datadir=$HOME/.GridcoinResearch-desk', '-daemon']
+
+    So `-datadir` named a directory LITERALLY called `$HOME`, relative to the working
+    directory. Gridcoin created it, found no gridcoinresearch.conf in it, and therefore
+    no `testnet=1` -- so it came up on MAINNET with a fresh empty wallet, never bound
+    25779, and `up` reported NO LISTENER and diagnosed a datadir lock. The daemon's own
+    log, when the operator finally started it by hand, showed a clean sync and no lock
+    error at all: the hypothesis was refuted and the cause was this.
+
+    IT HAPPENED TWICE because `restart` stopped the real daemon first, so each run cost
+    the staking unlock AND left an orphan syncing the wrong chain.
+
+    =========================================================================
+    AND I WROTE THE FIX FOR THIS ON 2026-10-12 AND DID NOT WIRE IT UP
+    =========================================================================
+
+    capture_daemon_commands.expanded_for_no_shell() exists, and its docstring names THIS
+    FUNCTION'S CALLER as the reason it exists: "chain_daemons.start_daemon() runs
+    <ASSET>_DAEMON_COMMAND through shlex.split and subprocess.run with NO shell ... and
+    shlex.split expands nothing." It was called on the CAPTURE path only. A guard written
+    against a measured failure, placed one call site away from the failure.
+
+    REFUSED RATHER THAN EXPANDED HERE, and that is the same argument that docstring makes:
+    expanding at run time would be a second place that decides what a command means. The
+    writer owns the expansion; the runner's job is to notice an unexpanded value and stop.
+    An expansion here would also have silently papered over every stored command that is
+    already wrong, which is the state this was found in.
+
+    THE DATADIR CHECK IS A SECOND, INDEPENDENT NET. A Bitcoin-derived daemon pointed at a
+    directory that does not exist CREATES it and starts a fresh chain, and for Gridcoin a
+    fresh datadir carries no conf and therefore defaults to MAINNET. That is true of any
+    wrong path, not just an unexpanded one, so it is checked separately -- either guard
+    alone would have caught this.
+    """
+    tokens = shlex.split(command)
+    unexpanded = [token for token in tokens if "$" in token or token.startswith("~")
+                  or "/~" in token]
+    if unexpanded:
+        return (
+            f"REFUSED: {asset}_DAEMON_COMMAND contains {unexpanded[0]!r}, which is NOT expanded "
+            f"before it runs -- this starts the command with shlex.split and no shell, so `$HOME` "
+            f"and `~` reach the daemon LITERALLY. A Gridcoin daemon pointed at a directory named "
+            f"`$HOME` creates it, finds no conf in it and therefore no testnet=1, and comes up on "
+            f"MAINNET. Rewrite the stored value with the path spelled out: `python3 "
+            f"capture_daemon_commands.py --accept-recorded --apply` expands it, or "
+            f"`--wait --apply` with the daemon running stores the argv the kernel actually got."
+        )
+    datadir = next((token.split("=", 1)[1] for token in tokens
+                    if token.startswith("-datadir=") and "=" in token), "")
+    if datadir and not Path(datadir).is_dir():
+        return (
+            f"REFUSED: {asset}_DAEMON_COMMAND names -datadir={datadir} and no such directory "
+            f"exists. A Bitcoin-derived daemon CREATES it and syncs a fresh chain from zero -- and "
+            f"with no conf in it there is no testnet=1, so Gridcoin would come up on MAINNET. This "
+            f"will not start a daemon against a datadir nobody has ever used."
+        )
+    return ""
+
+
 def start_cause(asset: str, command: str) -> str:
     """WHY a command could run and leave nothing listening, for this command. PURE.
 
@@ -588,6 +663,13 @@ def start_daemon(asset: str, command: str, port: int, *, budget_seconds: float =
     with it, which the sentence below names so an operator sees why. Its reaper is
     `swap_stack.py down`, which is the other half of this module.
     """
+    # BEFORE ANYTHING RUNS. A refusal here is not a failed start -- nothing was
+    # launched -- so it returns the "failed" state with the reason, which is what `up`
+    # prints and continues past.
+    stop = refuse_to_run(asset, command)
+    if stop:
+        return "failed", stop, 0.0
+
     started = time.monotonic()
     try:
         completed = subprocess.run(  # noqa: S603 -- checked: the argument list comes from the operator's own environment variable and is shlex.split rather than passed to a shell, so no string is interpreted. This is the mechanism the operator asked for; refusing to run it would be refusing the feature.

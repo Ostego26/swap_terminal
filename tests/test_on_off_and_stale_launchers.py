@@ -792,3 +792,79 @@ def test_no_configured_chain_is_a_RESULT_and_not_a_blank(monkeypatch, capsys):
     swap_stack.say_chain_daemons_left_running()
 
     assert "(none)" in capsys.readouterr().out
+
+
+# --- the unexpanded $HOME that started a MAINNET node in a junk directory --------
+
+
+def test_an_unexpanded_variable_is_REFUSED_before_anything_runs(monkeypatch):
+    """IT STARTED A MAINNET GRIDCOIN NODE IN A DIRECTORY NAMED `$HOME`, TWICE.
+
+    Measured 2026-10-13. GRC_DAEMON_COMMAND is
+    `gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon`, and start_daemon()
+    runs it through shlex.split with no shell, which expands nothing:
+
+        ['gridcoinresearchd', '-datadir=$HOME/.GridcoinResearch-desk', '-daemon']
+
+    So -datadir named a directory LITERALLY called `$HOME`. Gridcoin created it, found no
+    conf and therefore no testnet=1, came up on MAINNET with an empty wallet, never bound
+    25779 -- and `up` reported NO LISTENER and blamed a datadir lock. The daemon's own log
+    from a hand start showed a clean sync with no lock error, refuting that outright.
+
+    AND THE FIX FOR THIS WAS WRITTEN ON 2026-10-12 AND NOT WIRED UP.
+    capture_daemon_commands.expanded_for_no_shell() names start_daemon() in its own
+    docstring as the reason it exists, and was called on the capture path only.
+
+    NOTHING IS LAUNCHED, which is the assertion: subprocess.run must not be reached.
+    """
+    ran = []
+    monkeypatch.setattr(chain_daemons.subprocess, "run",
+                        lambda *a, **k: ran.append(a) or _DoneStub())
+
+    state, why, waited = chain_daemons.start_daemon(
+        "GRC", "gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon", 25779,
+    )
+
+    assert ran == [], "the command was executed with a literal $HOME"
+    assert state == "failed"
+    assert waited == 0.0, "a refusal is not a failed start; nothing waited"
+    assert "NOT expanded" in why
+    assert "MAINNET" in why, "the consequence that makes this urgent is not named"
+    assert "capture_daemon_commands.py --accept-recorded --apply" in why, (
+        "the refusal does not say how to rewrite the stored value"
+    )
+
+
+@pytest.mark.parametrize("command", [
+    "gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon",
+    "litecoind -datadir=~/.litecoin-desk -daemon",
+    "bitcoind -datadir=/home/x/$USER/btc -daemon",
+])
+def test_every_shape_of_unexpanded_path_is_caught(command):
+    """`$VAR` leading, `~` leading, and `$VAR` in the middle of a path.
+
+    THE DENOMINATOR IS THE PATTERNS, NOT THE LANGUAGE (rule 3). A check for a leading
+    `$` alone passes `/home/x/$USER/btc`, which is just as literal and just as wrong.
+    """
+    assert chain_daemons.refuse_to_run("GRC", command), f"{command!r} was not refused"
+
+
+def test_a_datadir_that_does_not_exist_is_refused_even_when_fully_expanded(tmp_path):
+    """THE SECOND, INDEPENDENT NET. Either guard alone would have caught 2026-10-13.
+
+    A wrong path does not have to contain a `$`. A Bitcoin-derived daemon pointed at a
+    directory that does not exist CREATES it and syncs a fresh chain from zero, and for
+    Gridcoin a fresh datadir carries no conf and so defaults to MAINNET. That is true of
+    any typo, which is why it is checked separately from the expansion.
+    """
+    missing = tmp_path / "never-used"
+    assert chain_daemons.refuse_to_run("GRC", f"gridcoinresearchd -datadir={missing} -daemon")
+
+    missing.mkdir()
+    assert chain_daemons.refuse_to_run("GRC", f"gridcoinresearchd -datadir={missing} -daemon") == ""
+
+
+def test_a_command_with_no_datadir_flag_is_not_refused_for_lacking_one():
+    """Not every daemon is told its datadir. A guard that demanded one would refuse
+    `litecoind -testnet -daemon`, which is a perfectly ordinary line."""
+    assert chain_daemons.refuse_to_run("LTC", "litecoind -testnet -daemon") == ""
