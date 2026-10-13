@@ -33,6 +33,7 @@ regtest/daemons.GRC_CREDENTIALS_ARE_PER_NETWORK had already said the net-specifi
 from __future__ import annotations
 
 import pytest
+from chains import registry
 from chains.credential_match import (
     BOTH_ABSENT,
     DIFFERENT,
@@ -197,8 +198,66 @@ def test_the_entry_point_prints_no_value_either(tmp_path, capsys, monkeypatch):
         assert sentinel not in printed, f"{sentinel!r} was printed by the report"
     # AND THE NAMES ARE PRESENT, because a verdict with nothing to attach it to is
     # useless: the reader has to know which variable and which conf key (rule 14).
-    assert "GRC_RPC_PASSWORD" in printed or "GRC_RPC_PASS" in printed
+    #
+    # THIS ASSERTION USED TO BE `"GRC_RPC_PASSWORD" in printed or "GRC_RPC_PASS" in
+    # printed` AND THAT `or` IS WHY THE DEFECT SHIPPED. The report printed
+    # GRC_RPC_PASSWORD -- a variable this tree does not read -- and an `or` over the
+    # right name and the wrong one passes on either, so the test asserted only that
+    # SOME name was printed. A disjunction between a correct value and an incorrect one
+    # is not a check; it is the shape of a check.
+    #
+    # AND THE ABSENCE ASSERTION IS THE ONE DOING THE WORK, because "GRC_RPC_PASS" is a
+    # SUBSTRING of "GRC_RPC_PASSWORD": the positive assertion alone still passes on the
+    # wrong name. Pinning the right name without also excluding the wrong one would
+    # have let the identical defect through a second time, which is why both lines are
+    # here and why this sentence names the reason rather than leaving a reader to
+    # notice the substring themselves.
+    assert "GRC_RPC_PASS" in printed, (
+        "the report must name the variable config.py actually reads -- grep "
+        "`_env(\"GRC_RPC_PASS` in Config.RPC"
+    )
+    assert "GRC_RPC_PASSWORD" not in printed, (
+        "GRC_RPC_PASSWORD does not exist in this tree. An operator who exported the "
+        "printed name would change nothing and see the same 401."
+    )
     assert "rpcpassword" in printed
+
+
+def test_the_printed_variable_name_comes_from_the_table_not_from_the_dict_key():
+    """setting_variable() answers from _REQUIRED_SETTINGS; a constructed name cannot.
+
+    The DEFECT ASSERTION, stated as the inequality that was shipped: for all three
+    Bitcoin-derived chains the Config.RPC dict key is `password` and the variable is
+    PASS, so f"{asset}_RPC_{key.upper()}" and the real name are different strings. This
+    test fails if anybody reintroduces the construction, because the construction
+    cannot produce what the table holds.
+    """
+    for asset in ("BTC", "LTC", "GRC"):
+        assert registry.setting_variable(asset, "password") == f"{asset}_RPC_PASS"
+        assert registry.setting_variable(asset, "user") == f"{asset}_RPC_USER"
+        constructed = f"{asset}_RPC_PASSWORD"
+        assert registry.setting_variable(asset, "password") != constructed, (
+            f"{constructed} is what the f-string produced and it is not a variable this "
+            f"tree reads"
+        )
+
+
+def test_setting_variable_refuses_to_invent_a_name():
+    """"" for a key no chain declares, and for an asset the table does not carry.
+
+    A caller that gets "" has to say it cannot name the variable. A caller that got a
+    plausible name would print it, which is the whole defect this function replaced --
+    so the empty answer is the feature and is pinned here rather than left to the
+    `for` loop falling off its end by accident.
+    """
+    assert registry.setting_variable("GRC", "port") == "GRC_RPC_PORT", (
+        "port maps to None in the table, which means ask configuring_variable()"
+    )
+    assert registry.setting_variable("GRC", "secret_sauce") == ""
+    assert registry.setting_variable("DOGE", "password") == ""
+    # And ICP, whose names are NOT shaped <ASSET>_RPC_* at all -- the case that proved
+    # the suffix scheme wrong in registry.py's own table comment.
+    assert registry.setting_variable("ICP", "owner_principal") == "ICP_OWNER_PRINCIPAL"
 
 
 def test_a_matching_pair_exits_zero(tmp_path, capsys, monkeypatch):

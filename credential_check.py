@@ -49,7 +49,7 @@ sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 import env_preamble  # noqa: F401, E402  # isort: skip  -- MUST stay above `from config import Config`; E402 because REPO_ROOT is assigned before the sys.path line, which ruff does not accept as preamble -- the same reason every import below carries one
 
 import chain_daemons  # noqa: E402
-from chains import credential_match  # noqa: E402
+from chains import credential_match, registry  # noqa: E402
 from chains.daemon_conf import DaemonConfError, parse_daemon_conf  # noqa: E402
 from config import Config  # noqa: E402
 from report_block import labeled, wrapped  # noqa: E402
@@ -72,6 +72,32 @@ def refusal(asset: str, settings: dict) -> str:
             f"conf to compare a credential, for the reason nothing here will stop or start one."
         )
     return ""
+
+
+def variable_phrase(asset: str, env_key: str) -> str:
+    """How to NAME the environment side of one field. Asks the table; never builds a name.
+
+    THIS LINE IS THE ONE AN OPERATOR ACTS ON -- it is the only part of the report that
+    says what to change -- and on 2026-10-12 it named a variable that does not exist.
+    It was f"{asset}_RPC_{verdict.env_key.upper()}", so the Config.RPC dict key
+    `password` became `GRC_RPC_PASSWORD` where config.py reads `GRC_RPC_PASS`. An
+    operator who exported the printed name would have changed nothing, re-run, seen the
+    same 401, and had no reason to doubt the name.
+
+    chains/registry.setting_variable() reads the same table missing_settings() reads,
+    and tests/test_offline_reason_names_the_variables.py greps config.py for every name
+    in it -- so a rename in config.py fails a test here instead of printing a variable
+    nothing reads. A constructed name has no test that can fail.
+    """
+    variable = registry.setting_variable(asset, env_key)
+    if variable:
+        return variable
+    # NOT A FABRICATED NAME. An asset with no declared variable for this field gets a
+    # sentence saying so, because "the environment" with no name attached is at least
+    # honestly unhelpful, where a plausible wrong name is worse than silence (rule 14:
+    # state what the number means next to the number).
+    return (f"NOTHING NAMED -- {asset} declares no environment variable for the {env_key} "
+            f"field in chains/registry._REQUIRED_SETTINGS")
 
 
 def run(args) -> int:
@@ -115,9 +141,11 @@ def run(args) -> int:
 
     verdicts = credential_match.compare(settings, conf_values)
     for verdict in verdicts:
-        print(labeled(verdict.conf_key, f"{verdict.verdict}  <- {verdict.label}: "
-                                        f"{asset}_RPC_{verdict.env_key.upper()} vs "
-                                        f"{verdict.conf_key} in that file"))
+        for line in wrapped(verdict.conf_key,
+                            f"{verdict.verdict}  <- {verdict.label}: "
+                            f"{variable_phrase(asset, verdict.env_key)} vs "
+                            f"{verdict.conf_key} in that file"):
+            print(line)
     print()
     for line in wrapped("verdict", credential_match.headline(verdicts)):
         print(line)

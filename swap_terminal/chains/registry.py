@@ -382,11 +382,43 @@ def missing_settings(rpc: Mapping[str, object], asset: str) -> list[str]:
     configuring_variable(), which never raises.
     """
     entry = _settings(rpc, asset)
-    names = []
-    for key, variable in _REQUIRED_SETTINGS.get(asset, ()):
-        if not entry.get(key):
-            names.append(configuring_variable(asset) if variable is None else variable)
-    return names
+    return [
+        setting_variable(asset, key)
+        for key, _variable in _REQUIRED_SETTINGS.get(asset, ())
+        if not entry.get(key)
+    ]
+
+
+def setting_variable(asset: str, key: str) -> str:
+    """The environment variable name that sets ONE Config.RPC key, or "" if none does.
+
+    SAME TABLE missing_settings() reads, and that is the entire reason this exists as a
+    function rather than as an f-string at the call site. 2026-10-12, measured on the
+    operator's screen: credential_check.py printed
+
+        rpcpassword     DIFFERENT  <- the RPC password: GRC_RPC_PASSWORD vs rpcpassword
+
+    and GRC_RPC_PASSWORD IS NOT A VARIABLE THIS TREE READS. config.py reads
+    _env("GRC_RPC_PASS", "") -- grep `_env("GRC_RPC_PASS` in Config.RPC. The output was
+    built as f"{asset}_RPC_{env_key.upper()}" from the Config.RPC dict key `password`,
+    which is a plausible-looking derivation that happens to be wrong for all three
+    Bitcoin-derived chains, because the variable is PASS and the dict key is password.
+
+    That is the 2026-09-26 incident again, which why_unconfigured()'s docstring records:
+    the operator's value sat under GRC_TESTNET_RPC_PASS while a message named a
+    different variable, and the fix then was to stop deriving names by convention. A
+    second derivation-by-convention grew back four lines from the table that exists to
+    stop it. The table is the authority; this is the only way to ask it.
+
+    "" rather than a guess for a key no chain declares: a caller that cannot name the
+    variable must say so, and a caller that printed a constructed name instead is the
+    defect being fixed here. None in the table means the primary name, which
+    network_target.configuring_variable() owns and which never raises.
+    """
+    for candidate, variable in _REQUIRED_SETTINGS.get(asset, ()):
+        if candidate == key:
+            return configuring_variable(asset) if variable is None else variable
+    return ""
 
 
 def unconfigured_chains(adapters: Mapping[str, object], *assets: str) -> list[str]:
