@@ -87,9 +87,96 @@ class ChainPorts(NamedTuple):
 # gridcoin.conf files, surveyed 2026-09-25 -- not a guess at what is
 # conventional. 25779 is the one the running testnet daemon uses and is what
 # gridcoin_credentials.TESTNET_RPC_URL names.
+#: PORTS THAT BELONG TO A WALLET THIS STACK DOES NOT OWN. Hands off, by name.
+#:
+#: =========================================================================
+#: TWO POPULATIONS OF WALLET PER CHAIN, AND NOTHING HERE KNEW IT
+#: =========================================================================
+#:
+#: Operator, 2026-10-13, correcting a claim this tree had been printing on every
+#: `off`, `up` and `chains` for a day: "ltc is not the gui wallet that is a
+#: 'external' wallet for the swapper to send or receive ltc" and then "we have a gui
+#: wallet for grc testnet and it's a fake 'external' wallet too and a goddamn
+#: motherfucker cli is supposed to be a part of the stack."
+#:
+#: So per chain there are TWO kinds of wallet on this host:
+#:
+#:   THE STACK'S OWN      a headless CLI daemon, part of the deployment. bitcoind on
+#:                        18443, litecoind on 19443, gridcoinresearchd on 25779.
+#:                        These are what the terminal talks to, starts and stops.
+#:   AN EXTERNAL WALLET   a GUI the operator uses BY HAND to send test coins into a
+#:                        swap or receive them out of it. It is a counterparty, not
+#:                        infrastructure. The stack must never address it, configure
+#:                        itself against it, or stop it.
+#:
+#: NOTHING IN THIS TREE DISTINGUISHED THEM, and the cost is measured twice:
+#:
+#:   2026-10-12  `swap_stack.py off` stopped "the daemon on the configured port" and
+#:               CLOSED the operator's litecoin-qt, because LTC_RPC_PORT was 19332.
+#:               The guard added afterwards -- never stop what you cannot start --
+#:               treated the symptom. The cause was that the terminal was configured
+#:               against an external wallet, and it still was a day later.
+#:   2026-10-13  GRC_RPC_PORT had been moved off 25715 onto the desk daemon at 25779
+#:               earlier, which is why GRC works. But WHY 25715 was wrong was never
+#:               written down -- only that it got changed -- so LTC kept the identical
+#:               mistake live in .env, and every surface told the operator to recover
+#:               the GUI wallet rather than to point at their own node.
+#:
+#: ORTHOGONAL TO test_ports AND THAT IS DELIBERATE. 19332 and 25715 ARE testnet ports
+#: and classifying a configured one as test is still correct -- the axes are
+#: test-vs-mainnet and ours-vs-theirs, and conflating them would make a GUI wallet
+#: look like a mainnet hazard, which it is not.
+#:
+#: WHAT IS NOT LISTED IS NOT A CLAIM OF OWNERSHIP. A port absent from here has not been
+#: established either way, which is why callers REFUSE on a match and never assert
+#: safety from a miss (rule 17).
+EXTERNAL_WALLET_PORTS: dict[int, str] = {
+    19332: (
+        "the operator's litecoin-qt, an EXTERNAL Litecoin wallet for sending coins into a "
+        "swap and receiving them out of it. Measured 2026-10-12, when stopping the daemon "
+        "on this port closed that window; and again by OPEN_FINDINGS finding 2, where "
+        "litecoind could not bind testnet P2P 19335 'because litecoin-qt held it' and the "
+        "desk's own node was given its own datadir with port=19444 and rpcport=19443"
+    ),
+    25715: (
+        "the operator's Gridcoin testnet GUI wallet, EXTERNAL in the same sense. The desk's "
+        "own daemon is gridcoinresearchd on 25779 (chains/daemon_launch.RECORDED['GRC']), "
+        "and GRC_RPC_PORT was moved off 25715 onto it on 2026-10-13 -- this entry is why, "
+        "which went unrecorded at the time and let LTC keep the same defect"
+    ),
+}
+
+
+def is_external_wallet(port: object) -> str:
+    """Why this port must not be addressed by the stack, or "". One reader's question.
+
+    A FUNCTION RATHER THAN A DICT LOOKUP AT EACH SITE because `port` arrives as a str
+    from the environment in some callers and an int in others, and an int-keyed `in`
+    check silently misses "19332". config.py coerces, discovery does not, and the one
+    that misses is the one writing .env.
+    """
+    try:
+        return EXTERNAL_WALLET_PORTS.get(int(port), "")
+    except (TypeError, ValueError):
+        return ""
+
+
 CHAIN_PORTS: dict[str, ChainPorts] = {
-    "BTC": ChainPorts(8332, frozenset({18332, 18443}), "BTC_RPC_PORT", "18443 regtest, 18332 testnet"),
-    "LTC": ChainPorts(9332, frozenset({19332, 19443}), "LTC_RPC_PORT", "19443 regtest, 19332 testnet"),
+    # THE HINTS USED TO READ "18443 regtest, 18332 testnet" AND "19443 regtest, 19332
+    # testnet", AND ON THIS HOST BOTH HAD IT BACKWARDS where it mattered. The 2026-10-10
+    # migration (OPEN_FINDINGS finding 2) moved the desk's own daemons to TEST networks
+    # and KEPT those ports: `LISTEN 172.17.0.1:18443 bitcoind` on testnet4 and
+    # `LISTEN 172.17.0.1:19443 litecoind` on test. 19332 and 18332 are the DEFAULT
+    # testnet RPC ports, which is why an external wallet holds one of them.
+    #
+    # So a reader setting LTC_RPC_PORT "for testnet" was told 19332 by the one string
+    # whose job is to tell them what to set -- and 19332 is the operator's external
+    # litecoin-qt, not the stack's daemon. Rule 16 in a string somebody pastes from.
+    "BTC": ChainPorts(8332, frozenset({18332, 18443}), "BTC_RPC_PORT",
+                      "18443 is this desk's bitcoind (testnet4); 18332 is the DEFAULT testnet port"),
+    "LTC": ChainPorts(9332, frozenset({19332, 19443}), "LTC_RPC_PORT",
+                      "19443 is this desk's litecoind (test); 19332 is the DEFAULT testnet port and "
+                      "is held by an EXTERNAL wallet here"),
     # THE HINT NAMES BOTH TEST PORTS, and it used to name only 25779 while the
     # operator's own Gridcoin test daemon listens on 25715. So the sentence a
     # reader sees when GRC is unconfigured -- "set GRC_RPC_PORT to the test chain

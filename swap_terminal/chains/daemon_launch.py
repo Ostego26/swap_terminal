@@ -131,29 +131,68 @@ RECORDED: dict[str, RecordedLaunch] = {
     ),
     "LTC": RecordedLaunch(
         command="",
+        # 19332 AND IT STAYS 19332, because this field's contract is "the port the
+        # command was OBSERVED serving, never the port it is assumed to serve" -- and
+        # 19332 is what was observed, on 2026-10-12, when stopping the daemon there
+        # closed litecoin-qt.
+        #
+        # I SET THIS TO 19443 ON 2026-10-13 AND BACKED IT OUT WITHIN THE HOUR. The desk's
+        # litecoind WAS on 19443 on 2026-10-10 per OPEN_FINDINGS finding 2, and I wrote
+        # that into this field -- which asserts that a command was observed serving it,
+        # for a record whose `command` is "". A three-day-old listener line is not an
+        # observation of now, and this field is the one place in the table that is
+        # explicitly not for inference. Operator, the same hour: "quit fucking assuming
+        # things."
+        #
+        # The 19443 fact is real and lives where inference is allowed to live: the prose
+        # below, CHAIN_PORTS' hint, and network_target.EXTERNAL_WALLET_PORTS.
         serves_port=19332,
         recorded_at=(
             "NO LAUNCH LINE HAS EVER BEEN RECORDED, and what is recorded instead is why. "
-            "What served the configured port 19332 on this host was the operator's "
-            "litecoin-qt GUI WALLET -- established the hard way on 2026-10-12, when "
-            "`swap_stack.py off` stopped the daemon on the configured port through its "
-            "RPC and closed that window (chain_daemons._refuse_cannot_start_it_again is "
-            "the guard added for it). 19332 is Litecoin's DEFAULT testnet RPC port, "
-            "which is why the GUI holds it"
+            "THE DESK'S OWN litecoind IS ON 19443 (OPEN_FINDINGS finding 2, 2026-10-10: "
+            "`LISTEN 172.17.0.1:19443 litecoind`, network `test`, paying tltc1...), and "
+            "nobody has captured the command line that starts it. 19332 -- Litecoin's "
+            "DEFAULT testnet RPC port -- is held by the operator's EXTERNAL litecoin-qt, "
+            "established the hard way on 2026-10-12 when `swap_stack.py off` stopped the "
+            "daemon on the then-configured port and closed that window. The lasting fix "
+            "is network_target.EXTERNAL_WALLET_PORTS; _refuse_cannot_start_it_again was "
+            "the guard added at the time and covers the symmetry half"
         ),
         unestablished=(
-            "A HEADLESS EQUIVALENT, and it is deliberately not written here. "
-            "`litecoind -testnet -daemon` would read ~/.litecoin/litecoin.conf and want "
-            "the same 19332, so it is not a drop-in: OPEN_FINDINGS records litecoind "
-            "already failing to start against this GUI once -- \"Error: Failed to listen "
-            "on any port\" -- because litecoin-qt held testnet P2P 19335, and the fix "
-            "was a separate datadir with its own `port=` and `rpcport=` under [test]. "
-            "That is a configuration decision with an LTC_RPC_PORT change behind it, not "
-            "a command line, so it is the operator's. REOPENING THE GUI WALLET is what "
-            "restores the measured configuration, and capture_daemon_commands.py will "
-            "then store its real command line -- after which `off` can close it and `on` "
-            "can reopen it, which is the symmetry that guard is about"
+            "THE DATADIR OF THE DESK'S OWN litecoind, and that is the ONLY piece missing. "
+            "Everything else is established: OPEN_FINDINGS finding 2 records "
+            "`LISTEN 172.17.0.1:19443 litecoind pid 2465635` on TEST, paying tltc1... "
+            "addresses, with `swapterm chains` exiting 0 on 2026-10-10 -- a separate "
+            "datadir with `port=19444` and `rpcport=19443` under [test], chosen precisely "
+            "so it leaves litecoin-qt alone. So the launch line is "
+            "`litecoind -datadir=<that datadir> -daemon` and only <that datadir> is unknown "
+            "here; `capture_daemon_commands.py --wait --apply` reads it off the running "
+            "process."
         ),
+        # ===================================================================
+        # THIS ENTRY USED TO CONCLUDE "REOPENING THE GUI WALLET is what restores the
+        # measured configuration" AND THAT WAS THE DEFECT, not a gap.
+        # ===================================================================
+        #
+        # The paragraph above it had already identified the right answer -- "a separate
+        # datadir with its own `port=` and `rpcport=` under [test]" -- and then classified
+        # it as "a configuration decision ... so it is the operator's" and recommended the
+        # GUI wallet instead, because that was the MEASURED configuration. Preferring a
+        # measurement over the correct answer it had in hand.
+        #
+        # It was also already false when written: that separate datadir EXISTED, on 19443,
+        # since 2026-10-10, two days before this entry recorded it as a decision nobody
+        # had taken. OPEN_FINDINGS had the listener line.
+        #
+        # The cost ran for a day. Every `off`, `up` and `chains` told the operator to
+        # recover litecoin-qt, and LTC_RPC_PORT stayed 19332 -- pointed at a wallet that
+        # is a COUNTERPARTY, not infrastructure. Operator, 2026-10-13: "ltc is not the gui
+        # wallet that is a 'external' wallet for the swapper to send or receive ltc" and
+        # "a goddamn motherfucker cli is supposed to be a part of the stack."
+        #
+        # network_target.EXTERNAL_WALLET_PORTS is where that distinction now lives, with
+        # chain_daemons._refuse_external_wallet refusing to touch one by name and
+        # configure_env.discover_ports() refusing to write one into .env.
     ),
 }
 

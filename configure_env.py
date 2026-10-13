@@ -121,7 +121,10 @@ from chains.daemon_conf import (  # noqa: E402 -- after the sys.path line above
 from chains.daemon_network import CHAIN_TEST_NETWORKS  # noqa: E402 -- after the sys.path line above
 from config import database_path  # noqa: E402
 from env_file import assignments_in  # noqa: E402 -- the PARSE only, never the loader
-from network_target import CHAIN_PORTS  # noqa: E402 -- as every root tool does
+from network_target import (  # noqa: E402 -- as every root tool does
+    CHAIN_PORTS,
+    is_external_wallet,
+)
 from regtest.daemons import CHAIN_DEFAULTS  # noqa: E402 -- the one owner of each chain's datadir and conf name
 
 ENV_FILE = REPO_ROOT / ".env"
@@ -689,7 +692,23 @@ def discover_ports() -> dict[str, tuple[str, str]]:
     live = listening_ports()
     found: dict[str, tuple[str, str]] = {}
     for asset, ports in CHAIN_PORTS.items():
-        candidates = sorted(ports.test_ports & live)
+        listening = sorted(ports.test_ports & live)
+        # AN EXTERNAL WALLET IS NEVER A CANDIDATE, and this is the mechanism that pointed
+        # the terminal at one. Measured 2026-10-13: LTC's test_ports are {19332, 19443},
+        # the desk's litecoind was down, the operator's litecoin-qt was up on 19332 --
+        # Litecoin's DEFAULT testnet RPC port -- so exactly one test port was listening
+        # and this wrote it into .env as LTC_RPC_PORT. `off` then stopped "the daemon on
+        # the configured port" and closed their wallet, and every surface spent a day
+        # telling them to recover it.
+        #
+        # SAID, NOT SILENTLY DROPPED (rule 13/14). A chain that goes unconfigured because
+        # the only thing listening was somebody else's wallet is the single most useful
+        # line in this block, and a quiet skip would read as "nothing is running".
+        external = [port for port in listening if is_external_wallet(port)]
+        for port in external:
+            say(f"    {asset}: {port} is LISTENing and is NOT this stack's daemon -- "
+                f"{is_external_wallet(port)[:120]}... NOT OFFERED.")
+        candidates = [port for port in listening if not is_external_wallet(port)]
         if len(candidates) == _EXACTLY_ONE:
             # ports.port_variable AND ports.test_hint -- THE FIELD NAMES, READ OFF THE
             # CLASS. The first version of this line said `ports.variable` and

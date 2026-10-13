@@ -111,6 +111,7 @@ from typing import NamedTuple
 # sentences to services/admin_view.probe_chain(). No cycle: that module imports only
 # dataclasses and .coin_amounts.
 from chains.daemon_capabilities import refusal_remedy
+from network_target import is_external_wallet
 
 #: RPC ports that belong to a MAINNET chain. A configured port matching one of
 #: these is REFUSED by name rather than acted on.
@@ -230,6 +231,43 @@ def _refuse_mainnet_port(asset: str, settings, _unconfigured_why: str) -> str:
     )
 
 
+def _refuse_external_wallet(asset: str, settings, _unconfigured_why: str) -> str:
+    """A configured port that belongs to a wallet this stack does not own. HANDS OFF.
+
+    THE GUARD THAT WOULD HAVE SAVED THE WALLET, rather than the one that was added
+    afterwards. On 2026-10-12 `off` stopped the daemon on LTC_RPC_PORT and closed the
+    operator's litecoin-qt. The guard added then was _refuse_cannot_start_it_again, which
+    is about SYMMETRY -- never stop what you cannot start -- and it is correct and keeps
+    its place. But it treated a symptom: the reason that window was reachable at all is
+    that the terminal was CONFIGURED AGAINST AN EXTERNAL WALLET, and it still was a day
+    later because nothing in the tree could say so.
+
+    Operator, 2026-10-13: "ltc is not the gui wallet that is a 'external' wallet for the
+    swapper to send or receive ltc", and then the same for Gridcoin's 25715. The desk's
+    own node is a headless CLI daemon -- litecoind on 19443, gridcoinresearchd on 25779 --
+    and an external GUI is a COUNTERPARTY. Stopping a counterparty's wallet is not a
+    worse version of stopping your own daemon; it is a different act.
+
+    SAME SHAPE AS _refuse_mainnet_port AND DELIBERATELY SO. Refused by NAME, with what
+    the port is and the evidence behind that, because a refusal an operator cannot check
+    is one they route around. network_target.EXTERNAL_WALLET_PORTS carries the evidence
+    per port and is the single table (rule 8) -- configure_env's port discovery reads the
+    same one so it can never WRITE what this then refuses to touch.
+
+    AFTER the mainnet guard, because a port that is both is the more dangerous fact.
+    """
+    del asset
+    why = is_external_wallet(settings.get("port"))
+    if not why:
+        return ""
+    return (
+        f"its configured RPC port is {settings.get('port')}, which is NOT this stack's "
+        f"daemon -- it is {why}. REFUSED BY NAME: this command will not start or stop a "
+        f"wallet the terminal does not own. Point <ASSET>_RPC_PORT at this desk's own "
+        f"headless daemon instead; `python3 swap_stack.py chains` then asks the right one."
+    )
+
+
 def _refuse_unconfigured(_asset: str, _settings, unconfigured_why: str) -> str:
     """The CALLER's sentence for a chain with no adapter, never one spelled here.
 
@@ -313,7 +351,9 @@ def _refuse_cannot_start_it_again(asset: str, _settings, _unconfigured_why: str)
     # <ASSET>_DAEMON_COMMAND, and a recorded line never becomes that value.
     return (
         f"{asset}_DAEMON_COMMAND is unset, so this cannot START it again and will not STOP it. On "
-        f"2026-10-12 this closed the operator's Litecoin GUI wallet, which was what served "
+        f"2026-10-12 this closed the operator's Litecoin GUI wallet, because the CONFIGURED PORT "
+        f"was 19332 -- that wallet is EXTERNAL and the desk's own litecoind is elsewhere; see "
+        f"network_target.EXTERNAL_WALLET_PORTS, which refuses one by name now. It was what served "
         f"the configured port. THREE WAYS OUT, cheapest first: `python3 "
         f"capture_daemon_commands.py --accept-recorded --apply` takes the start command this "
         f"tree has RECORDED for this chain, after which `on` starts it and `off` stops it; "
@@ -335,6 +375,10 @@ def _refuse_cannot_start_it_again(asset: str, _settings, _unconfigured_why: str)
 _REFUSAL_GUARDS = (
     _refuse_no_settings,
     _refuse_mainnet_port,
+    # AFTER MAINNET, BEFORE EVERYTHING ELSE. A port that is both a mainnet port and an
+    # external wallet -- 15715, the operator's Gridcoin mainnet GUI -- should report the
+    # mainnet fact, which is the one that names real coins.
+    _refuse_external_wallet,
     _refuse_unconfigured,
     _refuse_no_port,
     _refuse_remote_host,

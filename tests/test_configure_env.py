@@ -44,8 +44,9 @@ from __future__ import annotations
 import ast
 import pathlib
 
+import network_target
 import pytest
-from network_target import CHAIN_PORTS
+from network_target import CHAIN_PORTS, is_external_wallet
 from regtest.daemons import CHAIN_DEFAULTS
 
 import configure_env
@@ -321,8 +322,16 @@ def test_the_ports_come_from_the_shared_table_and_never_mainnet(env_file, monkey
     mainnet = {ports.mainnet_port for ports in CHAIN_PORTS.values()}
     # ONE test port per chain, plus every mainnet port. The mainnet ports must be ignored
     # and the single test port must be offered.
-    one_test_port_each = {min(ports.test_ports) for ports in CHAIN_PORTS.values()}
-    monkeypatch.setattr(configure_env, "listening_ports", lambda: mainnet | one_test_port_each)
+    #
+    # THE STACK'S OWN PORT, NOT min(test_ports), and the difference is the whole of
+    # network_target.EXTERNAL_WALLET_PORTS. min() picks 19332 for LTC -- Litecoin's
+    # DEFAULT testnet RPC port, held by the operator's external litecoin-qt -- so after
+    # that table landed on 2026-10-13 this seed made LTC correctly undiscoverable and the
+    # count assertion failed. The test was seeding the exact configuration the new guard
+    # exists to refuse.
+    ours = {min(port for port in ports.test_ports if not is_external_wallet(port))
+            for ports in CHAIN_PORTS.values()}
+    monkeypatch.setattr(configure_env, "listening_ports", lambda: mainnet | ours)
 
     found = configure_env.discover_ports()
 
@@ -418,7 +427,17 @@ def test_a_port_that_discovery_misses_becomes_a_question(env_file, monkeypatch, 
         )
     # AND THE PROMPT IS ANSWERABLE, which is the half a bare name does not satisfy: the
     # hint comes from ChainPorts.test_hint, the same string the workers' banner prints.
-    assert "18443 regtest, 18332 testnet" in would_ask
+    #
+    # DERIVED FROM THE TABLE, NOT TYPED. This asserted the literal
+    # "18443 regtest, 18332 testnet" until 2026-10-13, when both hints were corrected --
+    # they called 18443 and 19443 "regtest" while those are this desk's TESTNET daemons,
+    # which is the string that made 19332 look like the right testnet port to set. A test
+    # that retypes the value it checks fails on the fix and passes on the defect.
+    for ports in CHAIN_PORTS.values():
+        assert ports.test_hint in would_ask, (
+            f"{ports.port_variable}'s prompt does not carry its own hint, so the question "
+            f"is unanswerable without opening network_target.py"
+        )
     assert "down or on another port" in would_ask
 
 
@@ -2175,3 +2194,94 @@ def test_a_matching_credential_already_in_env_says_so_rather_than_nothing(tmp_pa
     assert "GRC:" in printed, "the chain got no line at all, which is the defect"
     assert "MATCHES" in printed or "already matches" in printed.lower()
     assert "same-password" not in printed
+
+
+# --- an external wallet is never offered, never written, never touched ----------
+
+
+def test_discovery_never_offers_a_port_that_belongs_to_an_external_wallet(env_file, monkeypatch, capsys):
+    """THE MECHANISM THAT POINTED THE TERMINAL AT THE OPERATOR'S OWN LITECOIN WALLET.
+
+    Measured 2026-10-13. LTC's test_ports are {19332, 19443}. The desk's litecoind was
+    down; the operator's litecoin-qt was up on 19332, which is Litecoin's DEFAULT testnet
+    RPC port. So exactly one test port was listening, `len(candidates) == 1` was true, and
+    this wrote the external wallet into .env as LTC_RPC_PORT. `swap_stack.py off` then
+    stopped "the daemon on the configured port" and closed that window, and for a day
+    every surface told the operator to recover the GUI wallet rather than to point at
+    their own node.
+
+    Operator: "ltc is not the gui wallet that is a 'external' wallet for the swapper to
+    send or receive ltc ... a goddamn motherfucker cli is supposed to be a part of the
+    stack."
+
+    SEEDED WITH THE EXTERNAL PORT ALONE, which is exactly that configuration.
+    """
+    monkeypatch.setattr(configure_env, "listening_ports", lambda: {19332})
+
+    found = configure_env.discover_ports()
+
+    assert "LTC_RPC_PORT" not in found, (
+        "19332 was offered as LTC_RPC_PORT. It is the operator's external litecoin-qt, "
+        "not this stack's litecoind."
+    )
+    assert found == {}, f"something else was offered from a lone external port: {found}"
+
+
+def test_an_external_port_that_is_listening_is_NAMED_and_not_silently_dropped(env_file, monkeypatch, capsys):
+    """A chain left unconfigured because somebody else's wallet holds the port is the
+    single most useful line in that block, and silence reads as "nothing is running".
+
+    Rule 13: a skip that looks like a success is a defect in the output. Rule 14: never
+    let a result print nothing.
+    """
+    monkeypatch.setattr(configure_env, "listening_ports", lambda: {19332, 25715})
+    monkeypatch.setattr("sys.argv", ["configure_env.py"])
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+
+    for port, asset in ((19332, "LTC"), (25715, "GRC")):
+        assert f"{asset}: {port} is LISTENing and is NOT this stack's daemon" in printed, (
+            f"{asset} was dropped without a line, so {port} reads as nothing running"
+        )
+    assert "NOT OFFERED" in printed
+
+
+def test_the_stacks_own_port_is_still_offered_when_both_are_listening(env_file, monkeypatch):
+    """The exclusion must not cost the right answer when the right daemon IS up.
+
+    Both listening is the ordinary state on this host -- the external wallet open AND the
+    desk's node running -- and before the external table that was `len(candidates) == 2`,
+    which discover_ports() deliberately refuses to resolve ("picking one would be a guess
+    about which the operator means"). With one of the two known to be a counterparty it
+    is no longer a guess, and this is the case that makes the table worth having rather
+    than merely safe.
+    """
+    monkeypatch.setattr(configure_env, "listening_ports", lambda: {19332, 19443})
+
+    found = configure_env.discover_ports()
+
+    assert found.get("LTC_RPC_PORT", ("",))[0] == "19443", (
+        f"with both listening, the desk's own litecoind must be the answer: {found}"
+    )
+
+
+def test_every_external_port_is_a_test_port_of_the_chain_it_belongs_to():
+    """The two tables must agree, or a port is refused for a chain that never had it.
+
+    EXTERNAL_WALLET_PORTS is keyed by port and says nothing about which chain. If an
+    entry were not in any chain's test_ports, discovery would never see it and the entry
+    would be inert -- a guard that cannot fire, which is worse than none because it reads
+    as covered.
+    """
+    every_test_port = {port for ports in CHAIN_PORTS.values() for port in ports.test_ports}
+
+    for port in network_target.EXTERNAL_WALLET_PORTS:
+        assert port in every_test_port, (
+            f"{port} is registered as an external wallet and is in no chain's test_ports, "
+            f"so discovery can never encounter it and the entry is inert"
+        )
+        assert port not in {ports.mainnet_port for ports in CHAIN_PORTS.values()}, (
+            f"{port} is both a mainnet port and an external wallet. Mainnet is the more "
+            f"dangerous fact and MAINNET_RPC_PORTS is where it belongs."
+        )

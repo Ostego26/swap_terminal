@@ -43,6 +43,7 @@ import socket
 import subprocess
 import sys
 
+import network_target
 import pytest
 import requests
 
@@ -117,7 +118,7 @@ def test_a_MAINNET_port_is_refused_by_name(port, chain):
 def test_a_remote_host_is_refused():
     """Reaching across a network to shut down somebody else's node is not `off`'s job."""
     refusal = chain_daemons.refuse_to_touch(
-        "LTC", {"port": 19332, "host": "10.0.0.5", "password": "x"}
+        "LTC", {"port": 19443, "host": "10.0.0.5", "password": "x"}
     )
     assert refusal.refuses
     assert "not loopback" in refusal.why
@@ -137,7 +138,7 @@ def test_a_configured_testnet_daemon_on_loopback_is_NOT_refused(monkeypatch):
     """
     monkeypatch.setenv("LTC_DAEMON_COMMAND", "/usr/local/bin/litecoind -testnet -daemon")
     refusal = chain_daemons.refuse_to_touch(
-        "LTC", {"port": 19332, "host": "127.0.0.1", "password": "x"}
+        "LTC", {"port": 19443, "host": "127.0.0.1", "password": "x"}
     )
     assert not refusal.refuses, refusal.why
 
@@ -146,6 +147,14 @@ def test_a_configured_testnet_daemon_on_loopback_is_NOT_refused(monkeypatch):
 #
 # THE REGRESSION THAT CLOSED THE OPERATOR'S WALLET, 2026-10-12. Their words: "hey what
 # the fuck did you do? why'd my 'external' litecoin gui wallet just close".
+#
+# THE FIXTURES IN THIS FILE USE 19443, NOT 19332, SINCE 2026-10-13. Six of them stood
+# in for "an ordinary LTC testnet daemon" with 19332 -- Litecoin's DEFAULT testnet RPC
+# port, which on this host is the operator's EXTERNAL litecoin-qt. Once
+# network_target.EXTERNAL_WALLET_PORTS landed, those six hit the new refusal first and
+# three tests about OTHER guards failed on their own fixture. 19443 is the desk's own
+# litecoind, which is what every one of them meant. The one place 19332 is still used
+# deliberately is the external-wallet test at the bottom, where it is the subject.
 #
 # `off` stops by the configured RPC port and sends `stop`. The program holding 19332
 # was `litecoin-qt`, an interactive GUI wallet, not a headless litecoind -- and
@@ -164,7 +173,7 @@ def test_a_daemon_with_NO_start_command_is_NOT_stoppable(monkeypatch):
     """
     monkeypatch.delenv("LTC_DAEMON_COMMAND", raising=False)
     refusal = chain_daemons.refuse_to_touch(
-        "LTC", {"port": 19332, "host": "127.0.0.1", "password": "x"}
+        "LTC", {"port": 19443, "host": "127.0.0.1", "password": "x"}
     )
     assert refusal.refuses
     assert "LTC_DAEMON_COMMAND is unset" in refusal.why
@@ -185,7 +194,7 @@ def test_the_symmetry_holds_for_every_chain_with_a_local_daemon(monkeypatch):
     for asset in chain_daemons.MAINNET_RPC_PORTS_BY_ASSET:
         monkeypatch.delenv(f"{asset}_DAEMON_COMMAND", raising=False)
         refusal = chain_daemons.refuse_to_touch(
-            asset, {"port": 19332, "host": "127.0.0.1", "password": "x"}
+            asset, {"port": 19443, "host": "127.0.0.1", "password": "x"}
         )
         assert refusal.refuses, f"{asset} is stoppable with no start command"
 
@@ -212,7 +221,7 @@ def test_every_guard_is_callable_on_its_own(monkeypatch):
     same function with extra steps.
     """
     monkeypatch.delenv("LTC_DAEMON_COMMAND", raising=False)
-    settings = {"port": 19332, "host": "127.0.0.1", "password": "x"}
+    settings = {"port": 19443, "host": "127.0.0.1", "password": "x"}
     assert chain_daemons._refuse_no_settings("LTC", {}, "")
     assert chain_daemons._refuse_no_settings("LTC", settings, "") == ""
     assert chain_daemons._refuse_mainnet_port("LTC", {"port": 9332}, "")
@@ -605,7 +614,7 @@ def test_the_unset_command_refusal_names_BOTH_ways_out(monkeypatch):
     """
     monkeypatch.delenv("LTC_DAEMON_COMMAND", raising=False)
     refusal = chain_daemons._refuse_cannot_start_it_again(
-        "LTC", {"port": 19332, "host": "127.0.0.1"}, "",
+        "LTC", {"port": 19443, "host": "127.0.0.1"}, "",
     )
 
     assert refusal, "with no DAEMON_COMMAND set, this must refuse"
@@ -627,3 +636,78 @@ def test_the_unset_command_refusal_names_BOTH_ways_out(monkeypatch):
         "and the capture path must carry --wait, or it races the daemon it just told them "
         "to start (-daemon returns before the RPC port is bound)"
     )
+
+
+# --- the three wallets per chain, and which one the stack may address ------------
+
+
+def test_an_external_wallets_port_is_refused_by_name_before_anything_is_asked():
+    """THE GUARD THAT WOULD HAVE SAVED THE WALLET, rather than the one added after.
+
+    2026-10-12: `off` stopped the daemon on LTC_RPC_PORT and closed the operator's
+    litecoin-qt. The guard added then was _refuse_cannot_start_it_again -- symmetry,
+    never stop what you cannot start -- which is correct and keeps its place. It treated
+    a symptom: the window was reachable at all because the terminal was CONFIGURED
+    AGAINST AN EXTERNAL WALLET, and it still was a day later because nothing in the tree
+    could say so.
+
+    Operator, 2026-10-13: "ltc is not the gui wallet that is a 'external' wallet for the
+    swapper to send or receive ltc", and the same for Gridcoin's 25715.
+    """
+    for asset, port in (("LTC", 19332), ("GRC", 25715)):
+        refusal = chain_daemons.refuse_to_touch(asset, {"port": port, "host": "127.0.0.1"})
+
+        assert refusal.refuses, f"{asset} on {port} was not refused"
+        assert "NOT this stack's daemon" in refusal.why
+        assert "REFUSED BY NAME" in refusal.why, (
+            "a refusal an operator cannot check is one they route around"
+        )
+
+
+def test_the_stacks_own_ports_are_NOT_refused_by_that_guard():
+    """A guard that refused everything would be safe and useless.
+
+    These are the headless CLI daemons the stack owns -- bitcoind 18443, litecoind 19443,
+    gridcoinresearchd 25779 -- and the external guard must be silent on all three. Other
+    guards may still speak (an unset <ASSET>_DAEMON_COMMAND, for one), so this asserts
+    the ABSENCE of this guard's sentence rather than the absence of any refusal.
+    """
+    for asset, port in (("BTC", 18443), ("LTC", 19443), ("GRC", 25779)):
+        why = chain_daemons._refuse_external_wallet(asset, {"port": port, "host": "127.0.0.1"}, "")
+
+        assert why == "", f"{asset}'s own daemon on {port} was called an external wallet: {why}"
+
+
+def test_three_gridcoin_wallets_and_each_one_has_a_rule():
+    """Operator, 2026-10-13, twice over: "there two motherfucking gui wallets for grc
+    running on this host. one is a mainnet and don't fucking touch it ever. rule. the
+    other is the test net 'external'".
+
+    So three wallets, three rules, and all three are asserted here because the cost of
+    confusing them is not symmetric: 15715 holds real coins and is unlocked for staking.
+
+    MAINNET IS CHECKED FIRST, which is asserted rather than assumed: 15715 must report
+    the MAINNET fact, not the external one, because that is the sentence naming real
+    money.
+    """
+    mainnet = chain_daemons.refuse_to_touch("GRC", {"port": 15715, "host": "127.0.0.1"})
+    assert mainnet.refuses
+    assert "GRC mainnet" in mainnet.why, "15715 must be refused as MAINNET, the stronger fact"
+
+    external = chain_daemons.refuse_to_touch("GRC", {"port": 25715, "host": "127.0.0.1"})
+    assert external.refuses
+    assert "NOT this stack's daemon" in external.why
+
+    ours = chain_daemons._refuse_external_wallet("GRC", {"port": 25779, "host": "127.0.0.1"}, "")
+    assert ours == "", "25779 is the desk's own gridcoinresearchd and must be addressable"
+
+
+def test_every_external_entry_carries_its_evidence():
+    """A hands-off list whose entries cannot be checked is a list people route around.
+
+    Rule 17 in table form: each entry says what the port is AND how that was established,
+    with a date, so a reader can disagree with the measurement rather than with the rule.
+    """
+    for port, why in network_target.EXTERNAL_WALLET_PORTS.items():
+        assert len(why) > 80, f"{port}'s entry does not say what it is and how that was measured"
+        assert "2026-" in why, f"{port}'s entry carries no date for its measurement"
