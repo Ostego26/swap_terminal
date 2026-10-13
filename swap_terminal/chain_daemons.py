@@ -169,6 +169,30 @@ LOCAL_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 STOP_PROOF_SECONDS = 30.0
 STOP_POLL_SECONDS = 0.5
 
+#: SECONDS TO WAIT FOR A STARTED DAEMON TO BIND, and it is a DIFFERENT question from
+#: proving a stop, which is why it is a different number.
+#:
+#: IT WAS STOP_PROOF_SECONDS UNTIL 2026-10-13, and that constant's own comment three
+#: lines up argues against the reuse: 30 is "a ceiling on PROVING absence". Absence is
+#: proven the moment a port is free; PRESENCE has to wait out everything a daemon does
+#: before it listens, which on a Bitcoin-derived node is loading the wallet AND the
+#: block index. Those are not the same duration and nothing said they were -- the
+#: constant was simply the one already in the file.
+#:
+#: WHAT IT COST, measured on the operator's host 2026-10-13: `swap_stack.py restart`
+#: stopped their Gridcoin desk daemon (the stop authenticated on the first try with the
+#: credentials that had just been fixed), then started it again, then reported
+#:
+#:     GRC  NO LISTENER  ran (exit 0) and nothing is LISTENing on 25779 after 30.2s
+#:
+#: and left the chain down. Whether 30s was simply too short for that node is NOT
+#: ESTABLISHED and cannot be from here -- see start_sentence() for the two causes that
+#: look identical from outside and for the one file that distinguishes them. 120 is
+#: chosen to be longer than a plausible testnet index load rather than from a
+#: measurement of one, and that is said rather than dressed up: it is a ceiling on
+#: waiting, so being generous costs a slow report and being tight costs a chain.
+START_PROOF_SECONDS = 120.0
+
 
 class DaemonRefusal(NamedTuple):
     """Why a configured chain daemon will not be touched. Empty `why` means it will."""
@@ -439,7 +463,72 @@ def start_command(asset: str) -> str:
     return os.getenv(f"{asset}_DAEMON_COMMAND", "").strip()
 
 
-def start_daemon(asset: str, command: str, port: int, *, budget_seconds: float = STOP_PROOF_SECONDS):
+def start_cause(asset: str, command: str) -> str:
+    """WHY a command could run and leave nothing listening, for this command. PURE.
+
+    The decision only -- which cause applies to the line that was run. start_daemon()
+    composes the measured prefix (exit code, port, elapsed) around it, so the one branch
+    in here can be called with two strings and asserted on (rule 10, and PLR0913 when
+    the measurements were parameters of it too).
+
+    =========================================================================
+    IT USED TO END WITH A CAUSE THAT CANNOT APPLY TO THE COMMAND IT RAN
+    =========================================================================
+
+    Unconditionally, this appended:
+
+        "A daemon started without its own -daemon flag dies with this command"
+
+    chains/daemon_launch.RECORDED["GRC"] is
+    `gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon`. IT HAS THE FLAG.
+    So on 2026-10-13 the operator's only explanation for a down chain named the one
+    cause that was ruled out by the command printed beside it -- and `exit 0` was
+    offered as if it told them something, when a forking daemon's parent exits 0 whether
+    the child lives or dies.
+
+    Rule 16: a wrong comment is a bug, and this one is in output somebody acts on while
+    a chain is down.
+
+    =========================================================================
+    TWO CAUSES THAT LOOK IDENTICAL FROM HERE, AND THE FILE THAT SEPARATES THEM
+    =========================================================================
+
+    With `-daemon` present, `exit 0` means the fork succeeded and nothing more. Either
+    the daemon is STILL LOADING -- wallet plus block index, which on a testnet node can
+    exceed any budget this file picks -- or it EXITED DURING STARTUP. Nothing observable
+    from outside the process distinguishes those, so this sentence does not guess
+    between them (rule 17). It names the daemon's own debug.log, which says which, and
+    the startup failure most likely in this exact sequence.
+
+    THAT FAILURE IS NAMED AS A HYPOTHESIS AND NOT AS THE CAUSE. A Bitcoin-derived daemon
+    closes its RPC listener EARLY in shutdown and then flushes the wallet and the block
+    index, holding the datadir lock throughout -- so stop_daemon() can prove the PORT is
+    free (it proved it in 1.0s) while the old process is still running, and a new one
+    started immediately after exits with "Cannot obtain a lock on data directory". That
+    is a real race in this module, visible by reading it. Whether it is what happened on
+    the operator's host is not established, and the log is what would settle it.
+    """
+    if "-daemon" not in shlex.split(command):
+        return (
+            f"{asset}_DAEMON_COMMAND has no -daemon flag, so the daemon was a CHILD of this "
+            f"short-lived command and died with it. Add -daemon to the command."
+        )
+    return (
+        "THE EXIT CODE SAYS NOTHING HERE: the command carries -daemon, so its parent forks "
+        "and exits 0 whether the daemon then lives or dies. TWO CAUSES LOOK THE SAME FROM "
+        "OUTSIDE and only the daemon's own debug.log separates them -- it is in the datadir "
+        "that command names, under testnet/ on a testnet run. (a) STILL LOADING: a "
+        "Bitcoin-derived node binds its RPC port only after the wallet and block index are "
+        "read, which can take longer than any budget this file picks; re-run `swap_stack.py "
+        "chains` in a minute and it may simply be up. (b) EXITED DURING STARTUP, and the "
+        "likeliest reason right after a stop is `Cannot obtain a lock on data directory` -- "
+        "a daemon closes its RPC port EARLY in shutdown and keeps the datadir lock while it "
+        "flushes, so a port proven free does not mean the old process is gone. NOT "
+        "ESTABLISHED as the cause here; the log says which it was."
+    )
+
+
+def start_daemon(asset: str, command: str, port: int, *, budget_seconds: float = START_PROOF_SECONDS):
     """Run `command`, then wait for `port` to be LISTENing. Returns (state, sentence, seconds).
 
     shlex.split AND NOT shell=True. The value comes from the operator's own
@@ -476,8 +565,9 @@ def start_daemon(asset: str, command: str, port: int, *, budget_seconds: float =
     tail = (completed.stderr or completed.stdout or "").strip().splitlines()
     return (
         "not_listening",
-        f"ran (exit {completed.returncode}) and nothing is LISTENing on {port} after {waited:.1f}s"
+        f"ran (exit {completed.returncode}) and nothing is LISTENing on {port} "
+        f"after {waited:.1f}s"
         + (f" -- {tail[-1][:160]}" if tail else "")
-        + ". A daemon started without its own -daemon flag dies with this command",
+        + f". {start_cause(asset, command)}",
         waited,
     )

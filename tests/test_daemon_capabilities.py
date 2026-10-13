@@ -17,8 +17,10 @@ the one divergence nothing absorbs yet.
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
+import chain_daemons
 import pytest
 from chains.coin_amounts import CHAIN_DECIMALS
 from chains.daemon_capabilities import (
@@ -827,3 +829,74 @@ def test_the_401_entry_rules_out_what_it_rules_out():
     # is a sentence printed into a terminal and pasted back.
     for forbidden in ("rpcpassword=", "rpcuser=", "GRC_RPC_PASS="):
         assert forbidden not in meaning, f"{forbidden!r} invites a value into a pasted report"
+
+
+# --- the cause named for a daemon that ran and never listened --------------------
+
+
+def test_the_no_daemon_flag_cause_is_NOT_named_for_a_command_that_carries_it():
+    """THE DEFECT, as the inequality that shipped: it was appended unconditionally.
+
+    2026-10-13, the operator's only explanation for a down chain:
+
+        GRC  NO LISTENER  ran (exit 0) and nothing is LISTENing on 25779 after 30.2s
+                          -- Gridcoin starting. A daemon started without its own
+                          -daemon flag dies with this command
+
+    chains/daemon_launch.RECORDED["GRC"] is
+    `gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon`. The flag is
+    there. So the sentence named the one cause the command printed beside it ruled out,
+    while a chain was down and somebody was reading it to decide what to do (rule 16).
+    """
+    forking = chain_daemons.start_cause("GRC", "gridcoinresearchd -datadir=$HOME/.x -daemon")
+
+    assert "has no -daemon flag" not in forking, "the ruled-out cause is named again"
+    assert "EXIT CODE SAYS NOTHING" in forking, (
+        "exit 0 from a forking parent is offered as if it meant something"
+    )
+    assert "debug.log" in forking, "the one file that distinguishes the two causes is not named"
+
+
+def test_the_no_daemon_flag_cause_IS_named_when_the_flag_is_really_missing():
+    """The branch is a real discriminator, not a way to delete an inconvenient sentence.
+
+    Without -daemon the daemon IS a child of a short-lived command and does die with it,
+    and that is a complete explanation rather than two hypotheses -- so it is stated
+    flatly, with the fix.
+    """
+    child = chain_daemons.start_cause("LTC", "litecoind -testnet -datadir=/home/x/.litecoin")
+
+    assert "has no -daemon flag" in child
+    assert "Add -daemon to the command" in child
+    assert "debug.log" not in child, "a complete explanation does not need a log to resolve it"
+
+
+def test_the_two_causes_are_offered_as_hypotheses_and_not_as_the_cause():
+    """Rule 17: a reason to believe is not the same as having checked.
+
+    The datadir-lock race IS real and visible by reading stop_daemon() -- a
+    Bitcoin-derived daemon closes its RPC port early in shutdown and holds the datadir
+    lock while it flushes, so a port proven free does not mean the process is gone.
+    Whether it is what happened on any particular host is not knowable from here.
+    """
+    sentence = chain_daemons.start_cause("GRC", "gridcoinresearchd -daemon")
+
+    assert "NOT ESTABLISHED" in sentence
+    assert "Cannot obtain a lock on data directory" in sentence, (
+        "the likeliest startup failure in this exact sequence is not named"
+    )
+    assert "STILL LOADING" in sentence, "the benign cause is not offered, so a slow node reads as a failure"
+
+
+def test_the_start_budget_is_its_own_number_and_longer_than_the_stop_proof():
+    """Absence is proven when a port frees; PRESENCE waits out a block index load.
+
+    STOP_PROOF_SECONDS' own comment calls it "a ceiling on PROVING absence", which is
+    the argument against having reused it for a start. They were the same 30.0 until
+    2026-10-13, when a Gridcoin daemon was reported down after 30.2s.
+    """
+    assert chain_daemons.START_PROOF_SECONDS > chain_daemons.STOP_PROOF_SECONDS
+    # AND THE DEFAULT IS WIRED, not merely defined -- the constant existing while
+    # start_daemon() still defaulted to the stop budget would change nothing.
+    assert (inspect.signature(chain_daemons.start_daemon).parameters["budget_seconds"].default
+            == chain_daemons.START_PROOF_SECONDS)
