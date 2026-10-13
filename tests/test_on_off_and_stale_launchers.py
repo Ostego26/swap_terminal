@@ -806,10 +806,21 @@ def test_an_unexpanded_variable_is_REFUSED_before_anything_runs(monkeypatch):
 
         ['gridcoinresearchd', '-datadir=$HOME/.GridcoinResearch-desk', '-daemon']
 
-    So -datadir named a directory LITERALLY called `$HOME`. Gridcoin created it, found no
-    conf and therefore no testnet=1, came up on MAINNET with an empty wallet, never bound
-    25779 -- and `up` reported NO LISTENER and blamed a datadir lock. The daemon's own log
-    from a hand start showed a clean sync with no lock error, refuting that outright.
+    So -datadir named a directory LITERALLY called `$HOME`. `-daemon` forks: the parent
+    printed "Gridcoin starting" and exited 0, the child found no such directory and died,
+    and nothing ever bound 25779 -- while `up` reported NO LISTENER and blamed a datadir
+    lock. A hand start's log showed a clean sync with no lock error, refuting that.
+
+    AND THEN THIS TEST ENFORCED MY SECOND GUESS. It asserted "MAINNET" in the refusal,
+    because I had written that Gridcoin "created it, found no conf, and came up on
+    MAINNET". `pgrep -af gridcoinresearch` and `du -sh ./$HOME` settled it an hour later:
+    four Gridcoin processes, all accounted for, and NO `$HOME` directory after two
+    attempts. A Bitcoin-derived daemon REFUSES a missing datadir rather than creating
+    one. So no mainnet node and no junk datadir -- and a test over the wrong consequence
+    would have blocked the correction, which is what a test asserting prose can do.
+
+    The consequence is narrower and in one way worse: SILENT. The parent has exited 0
+    before the child dies, so there is no exit code and no output anywhere.
 
     AND THE FIX FOR THIS WAS WRITTEN ON 2026-10-12 AND NOT WIRED UP.
     capture_daemon_commands.expanded_for_no_shell() names start_daemon() in its own
@@ -829,7 +840,14 @@ def test_an_unexpanded_variable_is_REFUSED_before_anything_runs(monkeypatch):
     assert state == "failed"
     assert waited == 0.0, "a refusal is not a failed start; nothing waited"
     assert "NOT expanded" in why
-    assert "MAINNET" in why, "the consequence that makes this urgent is not named"
+    assert "DIES DURING STARTUP" in why and "silently" in why, (
+        "the measured consequence is not named -- the parent exits 0 before the child dies, "
+        "so nothing reports it"
+    )
+    assert "MAINNET" not in why, (
+        "the refusal claims a mainnet node, which pgrep and `du -sh ./$HOME` refuted: no "
+        "directory was created and no extra process existed"
+    )
     assert "capture_daemon_commands.py --accept-recorded --apply" in why, (
         "the refusal does not say how to rewrite the stored value"
     )

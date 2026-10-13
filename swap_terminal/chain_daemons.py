@@ -526,14 +526,29 @@ def refuse_to_run(asset: str, command: str) -> str:
         ['gridcoinresearchd', '-datadir=$HOME/.GridcoinResearch-desk', '-daemon']
 
     So `-datadir` named a directory LITERALLY called `$HOME`, relative to the working
-    directory. Gridcoin created it, found no gridcoinresearch.conf in it, and therefore
-    no `testnet=1` -- so it came up on MAINNET with a fresh empty wallet, never bound
-    25779, and `up` reported NO LISTENER and diagnosed a datadir lock. The daemon's own
-    log, when the operator finally started it by hand, showed a clean sync and no lock
-    error at all: the hypothesis was refuted and the cause was this.
+    directory. `-daemon` forks: the PARENT printed "Gridcoin starting" and exited 0, and
+    the child then found no such directory and died. Nothing ever bound 25779, and `up`
+    reported NO LISTENER and diagnosed a datadir lock.
+
+    THE DAEMON'S OWN LOG REFUTED THAT, and then a second measurement refuted my
+    replacement for it. Started by hand, the log showed a clean sync -- blocks 3309057
+    through 3309068, no lock error -- so the lock hypothesis was wrong. I then wrote here
+    that Gridcoin "created it, found no conf, and came up on MAINNET with a fresh empty
+    wallet", which was ALSO a guess, and `pgrep -af gridcoinresearch` plus
+    `du -sh ./$HOME` settled it an hour later: FOUR Gridcoin processes, every one of them
+    accounted for -- the mainnet GUI, the testnet GUI, the desk daemon -- and NO `$HOME`
+    directory at all after two attempts. A Bitcoin-derived daemon REFUSES a datadir that
+    does not exist; it does not create one. No mainnet node was ever started and no junk
+    datadir was ever written.
+
+    SO THE CONSEQUENCE IS NARROWER AND WORSE IN ONE WAY: the failure is completely
+    silent. The parent has already exited 0 by the time the child dies, so there is no
+    exit code to read, nothing in this tree's output, and `on` simply can never start
+    that chain. Two guesses in two turns, both stated as mechanisms; what is written here
+    now is what was measured.
 
     IT HAPPENED TWICE because `restart` stopped the real daemon first, so each run cost
-    the staking unlock AND left an orphan syncing the wrong chain.
+    the staking unlock for nothing.
 
     =========================================================================
     AND I WROTE THE FIX FOR THIS ON 2026-10-12 AND DID NOT WIRE IT UP
@@ -551,11 +566,10 @@ def refuse_to_run(asset: str, command: str) -> str:
     An expansion here would also have silently papered over every stored command that is
     already wrong, which is the state this was found in.
 
-    THE DATADIR CHECK IS A SECOND, INDEPENDENT NET. A Bitcoin-derived daemon pointed at a
-    directory that does not exist CREATES it and starts a fresh chain, and for Gridcoin a
-    fresh datadir carries no conf and therefore defaults to MAINNET. That is true of any
-    wrong path, not just an unexpanded one, so it is checked separately -- either guard
-    alone would have caught this.
+    THE DATADIR CHECK IS A SECOND, INDEPENDENT NET, and it checks what the daemon itself
+    checks -- a directory that is not there is refused, after the fork, where nobody sees
+    it. A wrong path need not contain a `$`, so it is checked separately; either guard
+    alone would have caught 2026-10-13.
     """
     tokens = shlex.split(command)
     unexpanded = [token for token in tokens if "$" in token or token.startswith("~")
@@ -564,9 +578,10 @@ def refuse_to_run(asset: str, command: str) -> str:
         return (
             f"REFUSED: {asset}_DAEMON_COMMAND contains {unexpanded[0]!r}, which is NOT expanded "
             f"before it runs -- this starts the command with shlex.split and no shell, so `$HOME` "
-            f"and `~` reach the daemon LITERALLY. A Gridcoin daemon pointed at a directory named "
-            f"`$HOME` creates it, finds no conf in it and therefore no testnet=1, and comes up on "
-            f"MAINNET. Rewrite the stored value with the path spelled out: `python3 "
+            f"and `~` reach the daemon LITERALLY. A daemon pointed at a directory that does not "
+            f"exist DIES DURING STARTUP, and silently: -daemon has already forked and the parent "
+            f"exited 0, so nothing reports it and this chain can never start. Measured 2026-10-13. "
+            f"Rewrite the stored value with the path spelled out: `python3 "
             f"capture_daemon_commands.py --accept-recorded --apply` expands it, or "
             f"`--wait --apply` with the daemon running stores the argv the kernel actually got."
         )
@@ -575,9 +590,10 @@ def refuse_to_run(asset: str, command: str) -> str:
     if datadir and not Path(datadir).is_dir():
         return (
             f"REFUSED: {asset}_DAEMON_COMMAND names -datadir={datadir} and no such directory "
-            f"exists. A Bitcoin-derived daemon CREATES it and syncs a fresh chain from zero -- and "
-            f"with no conf in it there is no testnet=1, so Gridcoin would come up on MAINNET. This "
-            f"will not start a daemon against a datadir nobody has ever used."
+            f"exists. A Bitcoin-derived daemon REFUSES a datadir that is not there -- measured on "
+            f"this host 2026-10-13, where two attempts created no directory and left no process -- "
+            f"and with -daemon it refuses AFTER forking, so the parent exits 0 and nothing says a "
+            f"word. This will not run a command whose datadir cannot be the right one."
         )
     return ""
 

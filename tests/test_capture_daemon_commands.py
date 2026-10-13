@@ -446,3 +446,92 @@ def test_applying_writes_through_the_one_env_writer(monkeypatch, capsys):
     printed = capsys.readouterr().out
     assert "will now START these daemons" in printed
     assert "off" in printed, "the symmetry is the point and the output says so"
+
+
+# --- a captured argv replaces a stale stored command ----------------------------
+
+
+def _row(command: str):
+    """One plan() row, in the shape captures_to_write() actually unpacks.
+
+    SIX FIELDS, read off the loop rather than guessed: (asset, port, pid, command,
+    refusal, flags). A stub narrower than the thing it stands in for is the pattern this
+    suite has paid for repeatedly.
+    """
+    return ("GRC", 25779, 2825590, command, "", ["-datadir", "-daemon"])
+
+
+EXPANDED = "/usr/local/bin/gridcoinresearchd -datadir=/home/x/.GridcoinResearch-desk -daemon"
+STALE = "gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon"
+
+
+def test_a_stored_command_that_DIFFERS_is_replaced_by_the_running_argv(capsys):
+    """THE NO-OP OF A FIX I HAD JUST RECOMMENDED, measured 2026-10-13.
+
+    GRC_DAEMON_COMMAND held `gridcoinresearchd -datadir=$HOME/...` with an UNEXPANDED
+    $HOME, so `on` ran it with a literal `$HOME` and the daemon died after the fork every
+    time. The remedy is this command -- and it printed
+
+        GRC  pid 2825590 on port 25779  (gridcoinresearchd)
+            flags       -datadir -daemon
+            unchanged   GRC_DAEMON_COMMAND is already set; this does not overwrite it
+
+        nothing to write.
+
+    with the correct expanded argv in hand, on the same screen. "Do not clobber what the
+    operator set" is right for a GUESS and wrong for a MEASUREMENT:
+    /proc/<pid>/cmdline is the argv the kernel actually got for the process serving that
+    port. The second no-op-of-a-recommended-fix in one day -- configure_env.
+    credentials_from_confs() was the first, for the identical reason.
+    """
+    to_write = capture.captures_to_write([_row(EXPANDED)], {"GRC_DAEMON_COMMAND": STALE})
+    printed = capsys.readouterr().out
+
+    assert to_write == {"GRC_DAEMON_COMMAND": EXPANDED}, (
+        "the stale value survived, so the recommended fix is still a no-op"
+    )
+    assert "REPLACING" in printed
+    assert "unchanged" not in printed
+    # AND NEITHER COMMAND IS PRINTED. A command line can carry -rpcpassword, which is
+    # this file's whole printing discipline; the flag NAMES are enough to see what moved.
+    assert "$HOME" not in printed
+    assert "/home/x/.GridcoinResearch-desk" not in printed
+
+
+def test_a_stored_command_that_MATCHES_exactly_writes_nothing(capsys):
+    """Rewriting a value to itself would make every run report a change (rule 13)."""
+    to_write = capture.captures_to_write([_row(EXPANDED)], {"GRC_DAEMON_COMMAND": EXPANDED})
+    printed = capsys.readouterr().out
+
+    assert to_write == {}
+    assert "unchanged" in printed
+    assert "already matches this process's own argv exactly" in printed
+    assert "REPLACING" not in printed
+
+
+def test_an_absent_command_is_still_a_plain_would_set(capsys):
+    """The first-capture path is unchanged, and reads differently from a replacement."""
+    to_write = capture.captures_to_write([_row(EXPANDED)], {})
+    printed = capsys.readouterr().out
+
+    assert to_write == {"GRC_DAEMON_COMMAND": EXPANDED}
+    assert "would set" in printed
+    assert "REPLACING" not in printed
+    assert EXPANDED not in printed, "the command was printed; only its length may be"
+
+
+def test_a_refusal_still_beats_a_replacement(capsys):
+    """Order matters: a row this tool refuses must not be written just because it differs.
+
+    A command line carrying a single quote cannot survive .env's encoding, and a mainnet
+    datadir is refused upstream. Neither becomes writable by being different from what is
+    stored.
+    """
+    quoted = "gridcoinresearchd -datadir=/home/x/it's-here -daemon"
+
+    to_write = capture.captures_to_write([_row(quoted)], {"GRC_DAEMON_COMMAND": STALE})
+    printed = capsys.readouterr().out
+
+    assert to_write == {}, "a refused command was written because the stored one differed"
+    assert "REFUSED" in printed
+    assert "REPLACING" not in printed

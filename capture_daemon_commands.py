@@ -561,6 +561,70 @@ def say_accept_recorded(rpc, *, applying: bool) -> int:
     return 0
 
 
+def captures_to_write(rows, already: dict) -> dict[str, str]:
+    """{variable: captured command} for every row worth writing, with a line each.
+
+    EXTRACTED BECAUSE ruff's C901 TOOK main() TO 11 the moment the stale-value branch
+    landed, and rule 12 reads that as orchestration having swallowed a decision: "the fix
+    is to extract the decision so it can be called with seeded inputs, not to raise the
+    ceiling." The decision is three-way -- absent, identical, or DIFFERENT -- and the
+    third one was missing for a day, so it is now callable with two dicts and asserted on
+    without a running daemon anywhere.
+
+    PRINTS AS IT DECIDES, because every outcome needs a line (rule 13): a row that writes
+    nothing must look different from a row that writes, and "unchanged" must look
+    different from "REPLACING".
+    """
+    to_write: dict[str, str] = {}
+    for asset, port, pid, command, refusal, flags in rows:
+        name = f"{asset}_DAEMON_COMMAND"
+        print(f"  {asset}  pid {pid} on port {port}  ({Path(command.split()[0]).name})")
+        print(f"      flags       {' '.join(flags) or '(none)'}")
+        if refusal:
+            print(f"      REFUSED     {refusal}")
+            continue
+        if "'" in command:
+            # write_env() single-quotes the value, and its docstring says a value
+            # containing a single quote is the caller's to refuse. This is that caller.
+            print("      REFUSED     its command line contains a single quote, which .env cannot carry")
+            continue
+        stored = already.get(name, "")
+        if stored == command:
+            print(f"      unchanged   {name} already matches this process's own argv exactly")
+            continue
+        if stored:
+            # REPLACED, NOT SKIPPED, AND THIS IS WHY. Until 2026-10-13 any stored value at
+            # all stopped the write: "unchanged -- already set; this does not overwrite
+            # it". "Do not clobber what the operator set" is right for a GUESS and wrong
+            # for a MEASUREMENT: /proc/<pid>/cmdline is the argv the kernel actually got
+            # for the process serving that port, which is the strongest authority this
+            # tree can have about what starts that daemon. A stored value that differs
+            # from it is stale by definition.
+            #
+            # WHAT IT COST, measured the same day. GRC_DAEMON_COMMAND held
+            # `gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon` with an
+            # UNEXPANDED $HOME, so `on` ran it with a literal `$HOME` and the daemon died
+            # during startup every time (chain_daemons.refuse_to_run now stops that). The
+            # remedy for it is this command -- and this command printed "unchanged" and
+            # wrote nothing, with the correct expanded argv in hand, on the same screen.
+            # The second no-op-of-a-recommended-fix in one day; configure_env.
+            # credentials_from_confs() was the first, for the same reason.
+            #
+            # RUNNING THIS *IS* THE OPT-IN. --wait --apply with the daemon up is an
+            # operator saying "store what is actually running", and --apply is already the
+            # write gate. A third confirmation would make the fix unreachable again.
+            #
+            # NEITHER VALUE IS PRINTED. A command line can carry -rpcpassword, which is
+            # this file's whole printing discipline; the FLAG NAMES are already on the line
+            # above and are enough to see what changed.
+            print(f"      REPLACING   {name} is set to something ELSE -- this process's own argv "
+                  f"is the authority and wins")
+        else:
+            print(f"      would set   {name}  <- {len(command)} characters, not shown")
+        to_write[name] = command
+    return to_write
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--apply", action="store_true", help="write the captured commands into .env")
@@ -605,24 +669,7 @@ def main() -> int:
         return 0
 
     already = configure_env.existing_assignments()
-    to_write: dict[str, str] = {}
-    for asset, port, pid, command, refusal, flags in rows:
-        name = f"{asset}_DAEMON_COMMAND"
-        print(f"  {asset}  pid {pid} on port {port}  ({Path(command.split()[0]).name})")
-        print(f"      flags       {' '.join(flags) or '(none)'}")
-        if refusal:
-            print(f"      REFUSED     {refusal}")
-            continue
-        if "'" in command:
-            # write_env() single-quotes the value, and its docstring says a value
-            # containing a single quote is the caller's to refuse. This is that caller.
-            print("      REFUSED     its command line contains a single quote, which .env cannot carry")
-            continue
-        if already.get(name):
-            print(f"      unchanged   {name} is already set; this does not overwrite it")
-            continue
-        print(f"      would set   {name}  <- {len(command)} characters, not shown")
-        to_write[name] = command
+    to_write = captures_to_write(rows, already)
 
     print()
     if not to_write:
@@ -633,6 +680,7 @@ def main() -> int:
         return 0
     configure_env.write_env(to_write)
     print(f"  wrote {', '.join(sorted(to_write))} into {configure_env.ENV_FILE}")
+    print("  every other line carried through unchanged; no .bak was made")
     print("  `python3 swap_stack.py on` will now start these daemons. `off` already stops them.")
     return 0
 
