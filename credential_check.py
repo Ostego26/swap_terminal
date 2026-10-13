@@ -38,6 +38,7 @@ the only reliable source.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -46,7 +47,7 @@ sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
 # .env BEFORE config, because config.Config is a class body evaluated once at import:
 # a load afterwards changes nothing and looks like it worked. See env_preamble's header.
-import env_preamble  # noqa: F401, E402  # isort: skip  -- MUST stay above `from config import Config`; E402 because REPO_ROOT is assigned before the sys.path line, which ruff does not accept as preamble -- the same reason every import below carries one
+import env_preamble  # noqa: E402  # isort: skip  -- MUST stay above `from config import Config`; E402 because REPO_ROOT is assigned before the sys.path line, which ruff does not accept as preamble -- the same reason every import below carries one
 
 import chain_daemons  # noqa: E402
 from chains import credential_match, registry  # noqa: E402
@@ -72,6 +73,74 @@ def refusal(asset: str, settings: dict) -> str:
             f"conf to compare a credential, for the reason nothing here will stop or start one."
         )
     return ""
+
+
+#: Where the environment side of a comparison came from. Three states, and the middle
+#: one is the whole reason this exists.
+FROM_ENV_FILE, EXPORTED, NOT_SET = "from .env", "EXPORTED IN THIS SHELL", "not set anywhere"
+
+
+def value_source(variable: str, loaded_from_env_file, environ) -> str:
+    """Did this variable come from .env, or from an export in this shell? PURE.
+
+    =========================================================================
+    THE FOURTH ROUND THIS EXISTS TO PREVENT
+    =========================================================================
+
+    THIS TOOL AND configure_env.py LOOK AT DIFFERENT THINGS, and the asymmetry is
+    deliberate in both:
+
+      credential_check.py  compares Config.RPC -- the PROCESS environment, which holds
+                           .env (env_preamble loaded it) AND anything exported in this
+                           shell, with the export winning.
+      configure_env.py     reads .env ALONE. It is registered in
+                           tests/test_env_preamble.MUST_NOT_LOAD precisely so it can
+                           tell "set in the file" from "set in your shell", which is
+                           the distinction that tool exists to manage.
+
+    So if GRC_RPC_USER is EXPORTED rather than in .env: `configure_env --apply` writes
+    the right value to .env and reports it, the CONTAINER picks it up (compose reads
+    .env), and re-running this tool in that same shell still says DIFFERENT -- because
+    load_into_environ() uses setdefault and the export wins. Which reads as "the fix did
+    not work."
+
+    That is the third variant of one failure in one day: a recommendation whose no-op was
+    invisible. The first was credentials_from_confs() skipping anything already in .env;
+    the second was main()'s filter dropping it again. Both were found by measuring rather
+    than reading, after being recommended three times. This one is named BEFORE it
+    happens, which is the only cheaper moment.
+
+    env_preamble.LOADED_NAMES IS THE AUTHORITY and it is exact rather than inferred: it
+    is what load_into_environ() actually set, so a name in it came from the file and a
+    name set but absent from it was already in the environment when this process started.
+    Both arguments are passed in so this can be called with seeded inputs (rule 10).
+    """
+    if variable in loaded_from_env_file:
+        return FROM_ENV_FILE
+    return EXPORTED if environ.get(variable) else NOT_SET
+
+
+def exported_warning(sources: dict) -> list[str]:
+    """The extra lines when a value is exported rather than in .env. [] otherwise.
+
+    SEPARATE FROM THE FIX BLOCK because it is a different claim: the command still does
+    the right thing to .env and to the container, and what it cannot do is change a
+    variable this shell already holds. Telling somebody "the fix failed" when their
+    container is now correct would be the opposite error.
+    """
+    exported = sorted(name for name, source in sources.items() if source == EXPORTED)
+    if not exported:
+        return []
+    return [
+        *wrapped("CAUTION", f"{', '.join(exported)} {'is' if len(exported) == 1 else 'are'} "
+                            f"EXPORTED IN THIS SHELL, not read out of .env -- and an export wins "
+                            f"over .env, here and for docker compose alike. So the command above "
+                            f"will write .env correctly and the CONTAINER will pick it up, while "
+                            f"re-running THIS tool in THIS shell keeps reporting DIFFERENT."),
+        *wrapped("", "Clear the export (or open a new shell) before re-checking, or the right "
+                     "answer will look like a failure. `swap_stack.py chains` asks the container "
+                     "and is the verdict that matters."),
+    ]
 
 
 def variable_phrase(asset: str, env_key: str) -> str:
@@ -142,6 +211,33 @@ def next_command(asset: str, path: Path, verdicts: list) -> list[str]:
     ]
 
 
+def verdict_lines(asset: str, verdicts: list) -> tuple[list[str], dict]:
+    """One row per field, plus {variable: where it came from}. The report's whole body.
+
+    EXTRACTED BECAUSE ruff's C901 TOOK run() TO 11, and rule 12 reads that as
+    orchestration having swallowed a decision: "the fix is to extract the decision so it
+    can be called with seeded inputs, not to raise the ceiling." Two decisions are here
+    -- which NAME to print (the table's, never a constructed one) and where that name's
+    value came from -- and both were defects in this file within one day, so both are now
+    callable with seeded inputs instead of only reachable by running the tool.
+
+    `sources` is returned rather than printed so exported_warning() can be written and
+    tested against it without re-deriving anything (rule 8).
+    """
+    lines: list[str] = []
+    sources: dict[str, str] = {}
+    for verdict in verdicts:
+        variable = variable_phrase(asset, verdict.env_key)
+        # WHERE THIS SIDE CAME FROM, beside the verdict rather than in a footnote: it
+        # decides whether writing .env will change what this tool reports next run.
+        sources[variable] = value_source(variable, env_preamble.LOADED_NAMES, os.environ)
+        lines.extend(wrapped(verdict.conf_key,
+                             f"{verdict.verdict}  <- {verdict.label}: "
+                             f"{variable} ({sources[variable]}) vs "
+                             f"{verdict.conf_key} in that file"))
+    return lines, sources
+
+
 def run(args) -> int:
     """Orchestration only: refuse, parse, compare, print (rule 10)."""
     asset = args.asset.upper()
@@ -182,16 +278,15 @@ def run(args) -> int:
         return 2
 
     verdicts = credential_match.compare(settings, conf_values)
-    for verdict in verdicts:
-        for line in wrapped(verdict.conf_key,
-                            f"{verdict.verdict}  <- {verdict.label}: "
-                            f"{variable_phrase(asset, verdict.env_key)} vs "
-                            f"{verdict.conf_key} in that file"):
-            print(line)
+    lines, sources = verdict_lines(asset, verdicts)
+    for line in lines:
+        print(line)
     print()
     for line in wrapped("verdict", credential_match.headline(verdicts)):
         print(line)
     for line in next_command(asset, path, verdicts):
+        print(line)
+    for line in exported_warning(sources):
         print(line)
     # EXIT 0 ONLY WHEN EVERY FIELD MATCHES, so this is scriptable; 1 when something
     # differs, and 2 for a refusal or an unreadable file -- which is NOT a verdict about

@@ -441,3 +441,83 @@ def test_the_gridcoin_opt_in_appears_only_for_gridcoin(tmp_path, capsys, monkeyp
     assert "--read-daemon-confs" in printed
     assert "--read-gridcoin-conf" not in printed
     assert f"--conf BTC={conf} --apply" in printed
+
+
+# --- .env or an export? the asymmetry that would read as a fourth no-op ----------
+
+
+@pytest.mark.parametrize("loaded,environ,expected", [
+    (["GRC_RPC_USER"], {"GRC_RPC_USER": "x"}, checker.FROM_ENV_FILE),
+    ([], {"GRC_RPC_USER": "x"}, checker.EXPORTED),
+    ([], {}, checker.NOT_SET),
+    ([], {"GRC_RPC_USER": ""}, checker.NOT_SET),
+    (["OTHER"], {"GRC_RPC_USER": "x"}, checker.EXPORTED),
+])
+def test_value_source_distinguishes_the_file_from_an_export(loaded, environ, expected):
+    """env_preamble.LOADED_NAMES is EXACT, not inferred: it is what the loader set.
+
+    A name in it came from .env. A name set but absent from it was already in the
+    environment when the process started, which means an export -- and an export wins
+    over .env, because load_into_environ() uses setdefault, as compose does.
+
+    An empty value reads as NOT SET, which is config.py's own convention throughout:
+    an unset variable arrives as "" rather than as a missing key, and neither can
+    authenticate.
+    """
+    assert checker.value_source("GRC_RPC_USER", loaded, environ) == expected
+
+
+def test_an_exported_credential_is_warned_about_so_the_fix_is_not_read_as_a_failure():
+    """THE FOURTH VARIANT, named before it happened rather than after.
+
+    credential_check.py compares the PROCESS environment; configure_env.py reads .env
+    alone, deliberately, because telling "set in the file" from "set in your shell" is
+    the distinction that tool exists to manage. So for an EXPORTED credential the fix
+    writes .env correctly, the container picks it up, and re-running this tool in the
+    same shell still reports DIFFERENT.
+
+    The warning says the fix WORKED and names what it cannot reach. Saying "the fix
+    failed" when somebody's container is now correct is the opposite error and would
+    cost another round.
+    """
+    # WHITESPACE NORMALIZED, because report_block.wrapped() breaks lines wherever the
+    # width falls and then indents the continuation. `" ".join(lines)` leaves the indent
+    # INSIDE the string, so a phrase that straddles a break is not findable -- which is
+    # how this assertion failed on its first run while the sentence was correct. Two
+    # tests in this session have now broken on a reflow rather than on a behavior; the
+    # answer both times is to assert on the words, not on the layout.
+    warning = " ".join(" ".join(checker.exported_warning(
+        {"GRC_RPC_USER": checker.EXPORTED, "GRC_RPC_PASS": checker.FROM_ENV_FILE}
+    )).split())
+
+    assert "GRC_RPC_USER" in warning
+    assert "GRC_RPC_PASS" not in warning, "a variable read from .env is not affected"
+    assert "write .env correctly" in warning, "it does not say the fix still works"
+    assert "swap_stack.py chains" in warning, "the verdict that matters is not named"
+
+
+def test_nothing_is_warned_about_when_every_value_came_from_the_file():
+    """A caution printed when there is nothing to be cautious about is noise that
+    teaches an operator to stop reading the last block (rule 14)."""
+    assert checker.exported_warning({"GRC_RPC_USER": checker.FROM_ENV_FILE}) == []
+    assert checker.exported_warning({}) == []
+    assert checker.exported_warning({"GRC_RPC_USER": checker.NOT_SET}) == [], (
+        "a variable set nowhere is reported by its VERDICT (ONLY IN THE CONF), not by a "
+        "caution about exports"
+    )
+
+
+def test_every_verdict_row_names_where_its_value_came_from(monkeypatch):
+    """Beside the verdict, not in a footnote: it decides what the next run will say."""
+    monkeypatch.setattr(checker.env_preamble, "LOADED_NAMES", ["GRC_RPC_USER"])
+    monkeypatch.setattr(checker.os, "environ", {"GRC_RPC_USER": "a", "GRC_RPC_PASS": "b"})
+    verdicts = compare({"user": "a", "password": "b"}, {"rpcuser": "z", "rpcpassword": "y"})
+
+    lines, sources = checker.verdict_lines("GRC", verdicts)
+    text = " ".join(lines)
+
+    assert sources == {"GRC_RPC_USER": checker.FROM_ENV_FILE, "GRC_RPC_PASS": checker.EXPORTED}
+    assert f"GRC_RPC_USER ({checker.FROM_ENV_FILE})" in text
+    assert f"GRC_RPC_PASS ({checker.EXPORTED})" in text
+    for value in ("a", "b", "z", "y"):
+        assert f"={value}" not in text, "a value reached the row"
