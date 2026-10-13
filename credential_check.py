@@ -100,6 +100,48 @@ def variable_phrase(asset: str, env_key: str) -> str:
             f"field in chains/registry._REQUIRED_SETTINGS")
 
 
+def next_command(asset: str, path: Path, verdicts: list) -> list[str]:
+    """The exact command that fixes this, with the real path in it. [] when nothing differs.
+
+    =========================================================================
+    THE OPERATOR RAN THIS TOOL THREE TIMES AND THE FIX NEVER HAPPENED
+    =========================================================================
+
+    2026-10-13. Three messages, three pastes, each one `credential_check.py` followed by
+    `swap_stack.py restart`, each one reporting DIFFERENT on both fields. The command
+    that copies the credentials was in my chat message and in the 401 remedy -- and not
+    in the output of the tool they were actually running, which ended at "Set the
+    environment to match this file" and did not say how.
+
+    SO IT IS PRINTED HERE, AND WITH NO PLACEHOLDER IN IT. Every other surface has to
+    write `<the conf that daemon read>`, because guessing which of this host's three
+    Gridcoin datadirs a daemon used is the failure measured on 2026-09-29 and again on
+    2026-10-12. This tool is the one place that does not have to guess: --conf is a
+    required argument, so the path is already in hand and the line can be complete and
+    pasteable. The thing that made this diagnostic trustworthy -- refusing to guess the
+    path -- is exactly what lets it print the remedy in full.
+
+    ONLY WHEN SOMETHING DIFFERS. A matching pair needs no command, and headline() already
+    says what a 401 with every field SAME means. Printing a fix for a thing that is not
+    broken is how an operator learns to skip the last block.
+    """
+    if not any(v.verdict == credential_match.DIFFERENT for v in verdicts):
+        return []
+    flag = " --read-gridcoin-conf" if asset.upper() == "GRC" else ""
+    return [
+        "",
+        labeled("to fix it", "this copies them from that conf into .env and prints neither value:"),
+        f"      python3 configure_env.py --read-daemon-confs{flag} \\",
+        f"          --conf {asset}={path} --apply",
+        *wrapped("then", "`python3 swap_stack.py restart`, because an already-running container keeps "
+                         "the environment it started with. Run the configure_env line WITHOUT --apply "
+                         "first if you want to see what it would write; it reports and writes nothing."),
+        *wrapped("why --conf", "this tool never guesses which conf a daemon read, and neither does "
+                               "that one -- a stated path is the authority, and without it "
+                               "configure_env refuses to replace a value that is already in .env."),
+    ]
+
+
 def run(args) -> int:
     """Orchestration only: refuse, parse, compare, print (rule 10)."""
     asset = args.asset.upper()
@@ -148,6 +190,8 @@ def run(args) -> int:
             print(line)
     print()
     for line in wrapped("verdict", credential_match.headline(verdicts)):
+        print(line)
+    for line in next_command(asset, path, verdicts):
         print(line)
     # EXIT 0 ONLY WHEN EVERY FIELD MATCHES, so this is scriptable; 1 when something
     # differs, and 2 for a refusal or an unreadable file -- which is NOT a verdict about

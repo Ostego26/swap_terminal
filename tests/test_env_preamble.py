@@ -47,6 +47,7 @@ import pathlib
 import re
 
 import pytest
+from prose import code_without_prose
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -134,14 +135,51 @@ def test_every_root_tool_reading_config_loads_env_or_is_registered():
 
 @pytest.mark.parametrize("name", sorted(MUST_NOT_LOAD))
 def test_the_registered_exceptions_really_do_not_load_it(name):
-    """Both directions. A register entry is a claim, and a claim gets checked (rule 17)."""
-    source = (REPO_ROOT / name).read_text(encoding="utf-8")
+    """Both directions. A register entry is a claim, and a claim gets checked (rule 17).
+
+    CODE, NOT RAW SOURCE, and the change is prose-as-code occurrence fourteen. This read
+    the whole file, so on 2026-10-13 it failed the moment configure_env.
+    existing_assignments() grew a docstring QUOTING `env_file.load_into_environ()` in
+    order to explain why that function is deliberately never imported -- the sentence
+    documenting the rule was read as a breach of it.
+
+    prose.code_without_prose() unparses the module with docstrings stripped and comments
+    gone from the tree entirely, so an explanation cannot trip the gate while an actual
+    call still does. Proven both ways by the two assertions below.
+    """
+    code = code_without_prose(REPO_ROOT / name)
 
     for marker in _LOADS:
-        assert marker not in source, (
-            f"{name} is registered as MUST NOT LOAD and contains {marker!r}. "
+        assert marker not in code, (
+            f"{name} is registered as MUST NOT LOAD and contains {marker!r} in CODE. "
             f"{MUST_NOT_LOAD[name]}"
         )
+
+
+def test_the_exception_gate_reads_code_and_not_the_explanation(tmp_path):
+    """MUTATION, both directions, because a gate that cannot fail is not a gate.
+
+    A file that only TALKS about the loader must pass; a file that CALLS it must fail.
+    Without the second half, switching to code_without_prose() could have been a way to
+    make the gate quiet rather than accurate.
+    """
+    talks = tmp_path / "talks_about_it.py"
+    talks.write_text(
+        '"""This module never calls env_file.load_into_environ(), and here is why."""\n'
+        "# import env_preamble would arm every process that imports Config.\n"
+        "VALUE = 1\n"
+    )
+    calls = tmp_path / "calls_it.py"
+    calls.write_text("import env_file\nenv_file.load_into_environ()\n")
+
+    talks_code = code_without_prose(talks)
+    calls_code = code_without_prose(calls)
+
+    for marker in _LOADS:
+        assert marker not in talks_code, f"{marker!r} survived as prose, so the gate still misfires"
+    assert "env_file.load_into_environ()" in calls_code, (
+        "a real call vanished, so the gate would pass a file that loads .env"
+    )
 
 
 def test_the_preamble_loads_before_config_is_imported_in_every_tool_that_uses_it():

@@ -364,3 +364,80 @@ def test_a_401_remedy_still_prints_no_value_and_no_path_it_cannot_know():
         assert "Using data directory" in GRC_CREDENTIALS_ARE_PER_NETWORK, (
             "nothing tells the reader where to GET the path the placeholder stands for"
         )
+
+
+# --- the exact command, with the real path, in the tool they actually run -------
+
+
+def test_a_DIFFERING_report_ends_with_the_complete_pasteable_command(tmp_path, capsys, monkeypatch):
+    """THE GAP THAT COST THREE ROUNDS: the diagnostic proved the cause and not the fix.
+
+    2026-10-13, three pastes in three messages, each `credential_check.py` then
+    `swap_stack.py restart`, each DIFFERENT on both fields. The command that copies the
+    credentials was in the 401 remedy and in a chat message -- not in the output of the
+    tool being run, which ended at "Set the environment to match this file".
+
+    NO PLACEHOLDER, which is the point. Every other surface must write `<the conf that
+    daemon read>` because guessing the datadir is the measured failure. This tool takes
+    --conf as a REQUIRED argument, so it is the one place that already knows, and the
+    assertion is that the printed line carries the real path rather than a stand-in.
+    """
+    conf = tmp_path / "desk" / "testnet" / "gridcoinresearch.conf"
+    conf.parent.mkdir(parents=True)
+    conf.write_text(f"rpcuser={CONF_USER}\nrpcpassword={CONF_PASS}\n")
+    monkeypatch.setitem(
+        checker.Config.RPC, "GRC",
+        {"user": ENV_USER, "password": ENV_PASS, "host": "127.0.0.1", "port": 25779},
+    )
+
+    assert checker.main(["--asset", "GRC", "--conf", str(conf)]) == 1
+    printed = capsys.readouterr().out
+
+    assert "configure_env.py --read-daemon-confs --read-gridcoin-conf" in printed
+    assert f"--conf GRC={conf} --apply" in printed, (
+        "the command does not carry the real path, so it cannot be pasted"
+    )
+    assert "<" not in printed.split("to fix it")[1], (
+        "a placeholder reached the command block of the one tool that knows the path"
+    )
+    assert "swap_stack.py restart" in printed, "the required recreate is not named"
+    for sentinel in SENTINELS:
+        assert sentinel not in printed
+
+
+def test_a_MATCHING_report_prints_no_command_at_all(tmp_path, capsys, monkeypatch):
+    """Printing a fix for a thing that is not broken teaches an operator to skip the block.
+
+    headline() already says what a 401 with every field SAME means -- the daemon read a
+    different file -- and no command this tool could print would help with that.
+    """
+    conf = tmp_path / "gridcoinresearch.conf"
+    conf.write_text(f"rpcuser={ENV_USER}\nrpcpassword={ENV_PASS}\n")
+    monkeypatch.setitem(
+        checker.Config.RPC, "GRC",
+        {"user": ENV_USER, "password": ENV_PASS, "host": "127.0.0.1", "port": 25779},
+    )
+
+    assert checker.main(["--asset", "GRC", "--conf", str(conf)]) == 0
+    printed = capsys.readouterr().out
+
+    assert "to fix it" not in printed
+    assert "configure_env.py" not in printed
+    assert "EVERY FIELD MATCHES" in printed
+
+
+def test_the_gridcoin_opt_in_appears_only_for_gridcoin(tmp_path, capsys, monkeypatch):
+    """--read-gridcoin-conf on a BTC command would exit 2, not configure anything."""
+    conf = tmp_path / "bitcoin.conf"
+    conf.write_text(f"rpcuser={CONF_USER}\nrpcpassword={CONF_PASS}\n")
+    monkeypatch.setitem(
+        checker.Config.RPC, "BTC",
+        {"user": ENV_USER, "password": ENV_PASS, "host": "127.0.0.1", "port": 18443},
+    )
+
+    assert checker.main(["--asset", "BTC", "--conf", str(conf)]) == 1
+    printed = capsys.readouterr().out
+
+    assert "--read-daemon-confs" in printed
+    assert "--read-gridcoin-conf" not in printed
+    assert f"--conf BTC={conf} --apply" in printed

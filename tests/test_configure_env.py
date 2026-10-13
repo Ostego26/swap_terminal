@@ -2045,3 +2045,133 @@ def test_a_dry_run_arming_block_does_not_claim_an_unwritten_value_is_set(
     assert sol_line and "NOT set in .env" in sol_line[0], (
         f"a dry run reported an unwritten value as set: {sol_line}"
     )
+
+
+# --- replacing a credential that is already in .env and WRONG -------------------
+#
+# THE OPERATOR'S EXACT STATE on 2026-10-13, measured three times across three
+# messages: GRC_RPC_USER and GRC_RPC_PASS are IN .env, they do not match the conf
+# the daemon read, credential_check.py says DIFFERENT on both, and every surface
+# prints 401. I recommended `configure_env.py --read-daemon-confs
+# --read-gridcoin-conf --conf GRC=<path> --apply` three times. It could not have
+# worked: credentials_from_confs() did `continue` when BOTH variables were already
+# present, so the conf was never opened -- and the `continue` came before any
+# say(), so the chain vanished from the report with no line naming it while
+# `(none)  <- nothing was read; every line above says why` claimed otherwise.
+
+
+def _wrong_credentials_already_in_env(tmp_path, monkeypatch, *, state_the_path):
+    """The operator's state, seeded: .env wrong, conf right, and they differ.
+
+    Returns (env_file, conf_path, argv). `state_the_path` decides whether --conf names
+    the file, because that is the distinction the fix turns on: a path the OPERATOR
+    stated is an authority, and one this tool guessed from its tables is not.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "GRC_RPC_USER='stale-wrong-user'\n"
+        "GRC_RPC_PASS='stale-wrong-password'\n"
+        "GRC_RPC_PORT='25779'\n"
+    )
+    conf = tmp_path / "desk" / "testnet" / "gridcoinresearch.conf"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("rpcuser=the-real-desk-user\nrpcpassword=the-real-desk-password\n")
+
+    monkeypatch.setattr(configure_env, "ENV_FILE", env_file)
+    monkeypatch.setattr(configure_env, "DAEMON_CONFS",
+                        {"GRC": (str(conf), "GRC_RPC_USER", "GRC_RPC_PASS")})
+    monkeypatch.setenv("ST_ANSWERS", "")
+    argv = ["configure_env.py", "--apply", "--read-daemon-confs", "--read-gridcoin-conf"]
+    if state_the_path:
+        argv += ["--conf", f"GRC={conf}"]
+    monkeypatch.setattr("sys.argv", argv)
+    return env_file, conf
+
+
+def test_a_stated_conf_REPLACES_a_credential_already_in_env_that_differs(tmp_path, monkeypatch, capsys):
+    """THE ONE THAT WAS BROKEN. Proven against the real script, real .env, real conf.
+
+    Before the fix this asserted nothing: .env came back carrying stale-wrong-user and
+    the report said `(none)  <- nothing was read`. The operator ran the recommendation
+    three times with that outcome available to be measured and nobody measured it.
+
+    WHY A STATED PATH IS ALLOWED TO REPLACE. --conf is the operator saying "this is the
+    file the daemon read" -- it is an assertion about their own host, which no table can
+    make. Given that, a .env value that differs from it is stale by definition, and
+    leaving it is the behavior that cost three rounds. A GUESSED path gets the opposite
+    treatment and the test below pins it.
+    """
+    env_file, _conf = _wrong_credentials_already_in_env(tmp_path, monkeypatch, state_the_path=True)
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+    written = env_file.read_text()
+
+    assert "GRC_RPC_USER='the-real-desk-user'" in written, (
+        "the conf's rpcuser did not reach .env -- this is the defect that made the "
+        "recommended command a no-op three times"
+    )
+    assert "GRC_RPC_PASS='the-real-desk-password'" in written
+    assert "stale-wrong-user" not in written, "the stale value survived beside the new one"
+    assert "stale-wrong-password" not in written
+    # EVERY OTHER LINE CARRIED THROUGH, which write_env() promises and which matters
+    # here because the port is what points these credentials at a daemon.
+    assert "GRC_RPC_PORT='25779'" in written
+    # AND NEITHER VALUE WAS PRINTED. A replacement is a second path into the write, so
+    # the leak assertion is repeated on it rather than inherited.
+    for value in ("the-real-desk-password", "stale-wrong-password"):
+        assert value not in printed, f"{value!r} was printed"
+    # THE REPLACEMENT IS ANNOUNCED BY NAME. An operator whose credential was silently
+    # swapped cannot tell this run from one that did nothing (rule 13).
+    assert "REPLACING" in printed or "replaced" in printed.lower()
+    assert "GRC_RPC_USER" in printed
+
+
+def test_a_GUESSED_conf_reports_the_difference_and_writes_NOTHING(tmp_path, monkeypatch, capsys):
+    """Without --conf the path came from a table, and a table cannot assert whose it is.
+
+    This host runs THREE Gridcoin wallets and DAEMON_CONFS knows one path. Replacing a
+    credential from a file nobody named is how an operator who had correctly pointed
+    .env at their desk daemon gets the mainnet staking wallet's login instead -- the
+    inverse of the bug above and a worse one, because it breaks a working config.
+
+    So the difference is REPORTED, the write does not happen, and the line names --conf.
+    """
+    env_file, _conf = _wrong_credentials_already_in_env(tmp_path, monkeypatch, state_the_path=False)
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+    written = env_file.read_text()
+
+    assert "stale-wrong-user" in written, "a guessed conf must not replace what is in .env"
+    assert "the-real-desk-user" not in written
+    assert "DIFFERS" in printed, "the difference was not reported at all"
+    assert "--conf" in printed, "the line does not say how to assert the path"
+    for value in ("the-real-desk-password", "stale-wrong-password"):
+        assert value not in printed
+
+
+def test_a_matching_credential_already_in_env_says_so_rather_than_nothing(tmp_path, monkeypatch, capsys):
+    """`(none)` claimed "every line above says why" while printing no line for the chain.
+
+    The `continue` ran before any say(), so a skipped chain left no trace. That is
+    rule 14's blank gap and rule 13's skip-that-looks-like-success at once, and it is
+    what made the no-op invisible for three rounds.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("GRC_RPC_USER='same-user'\nGRC_RPC_PASS='same-password'\nGRC_RPC_PORT='25779'\n")
+    conf = tmp_path / "gridcoinresearch.conf"
+    conf.write_text("rpcuser=same-user\nrpcpassword=same-password\n")
+    monkeypatch.setattr(configure_env, "ENV_FILE", env_file)
+    monkeypatch.setattr(configure_env, "DAEMON_CONFS",
+                        {"GRC": (str(conf), "GRC_RPC_USER", "GRC_RPC_PASS")})
+    monkeypatch.setenv("ST_ANSWERS", "")
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--read-daemon-confs",
+                                     "--read-gridcoin-conf", "--conf", f"GRC={conf}"])
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+
+    assert "GRC:" in printed, "the chain got no line at all, which is the defect"
+    assert "MATCHES" in printed or "already matches" in printed.lower()
+    assert "same-password" not in printed

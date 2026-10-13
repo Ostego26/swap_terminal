@@ -108,6 +108,7 @@ from typing import NamedTuple
 REPO_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
 
+from chains import credential_match  # noqa: E402 -- after the sys.path line above
 from chains.daemon_conf import (  # noqa: E402 -- after the sys.path line above
     TOP_LEVEL,
     conf_sections,
@@ -119,6 +120,7 @@ from chains.daemon_conf import (  # noqa: E402 -- after the sys.path line above
 # chosen as the source of a credential.
 from chains.daemon_network import CHAIN_TEST_NETWORKS  # noqa: E402 -- after the sys.path line above
 from config import database_path  # noqa: E402
+from env_file import assignments_in  # noqa: E402 -- the PARSE only, never the loader
 from network_target import CHAIN_PORTS  # noqa: E402 -- as every root tool does
 from regtest.daemons import CHAIN_DEFAULTS  # noqa: E402 -- the one owner of each chain's datadir and conf name
 
@@ -602,21 +604,46 @@ def secret_names() -> set[str]:
 
 
 def existing_assignments() -> dict[str, str]:
-    """The UNCOMMENTED assignments already in .env, name -> value.
+    """The UNCOMMENTED assignments already in .env, name -> value, quotes STRIPPED.
 
     Read so that a second run does not re-ask what is already set, and so that nothing
     this script does not own is disturbed. Values are read and never printed.
+
+    =========================================================================
+    IT HAD ITS OWN PARSER AND THE TWO DISAGREED ABOUT QUOTING
+    =========================================================================
+
+    env_file.assignments_in() strips a matching pair of surrounding quotes, "because
+    compose strips them"; this function did not. write_env() below writes every value
+    SINGLE-QUOTED -- it has to, since that is the only dotenv encoding an arbitrary
+    value survives -- so everything this tool has ever written came back out of here
+    wrapped in apostrophes.
+
+    Harmless while every caller only tested truthiness. Measured 2026-10-13, the moment
+    one COMPARED: credentials_from_confs() asked whether .env's GRC_RPC_USER matches the
+    conf's rpcuser, and `'same-user'` is not `same-user`, so a credential that agreed
+    perfectly was reported as DIFFERENT. The "already matches" branch -- the single most
+    useful thing to tell somebody chasing a 401 -- could never fire.
+
+    Two call sites had already compensated with `.strip("'\"")` of their own, which is
+    how a divergence like this stays invisible: each site looks correct, and the one that
+    forgets is the one that is comparing.
+
+    env_file.py's own comment set the condition for merging them: the two parsers "are
+    kept separate rather than merged because configure_env is an operator-facing writer
+    that must not import a module whose whole purpose is a side effect on os.environ --
+    and because a shared parser would be a third thing to keep in step for two callers
+    whose needs have not diverged in any way yet. If a third caller appears, that is the
+    signal to merge them." The needs diverged instead, which is the stronger signal.
+
+    `assignments_in` IS IMPORTED BY NAME, not the module, so `env_file.load_into_environ()`
+    cannot be reached from here even by accident -- this file is registered in
+    tests/test_env_preamble.MUST_NOT_LOAD and that register is asserted over this source.
+    The parse is pure; the loader is the other function and stays out of reach.
     """
-    live: dict[str, str] = {}
     if not ENV_FILE.exists():
-        return live
-    for line in ENV_FILE.read_text().splitlines():
-        if line.lstrip().startswith("#") or "=" not in line:
-            continue
-        match = re.match(r"^([A-Z_][A-Z0-9_]*)=(.*)$", line.strip())
-        if match:
-            live[match.group(1)] = match.group(2)
-    return live
+        return {}
+    return assignments_in(ENV_FILE.read_text())
 
 
 def listening_ports() -> set[int]:
@@ -1107,8 +1134,9 @@ def say_stated_confs(stated: dict[str, Path], refusals: list[str]) -> None:
         say(f"    REFUSED: {refusal}")
 
 
-def credentials_from_confs(discovered: dict, already: dict, *, gridcoin: bool,
-                           stated: Mapping[str, Path] | None = None) -> dict[str, tuple[str, str]]:
+def credentials_from_confs(
+    discovered: dict, already: dict, *, gridcoin: bool, stated: Mapping[str, Path] | None = None,
+) -> tuple[dict[str, tuple[str, str]], set[str]]:
     """rpcuser and rpcpassword out of each daemon's own conf. NO VALUE IS EVER PRINTED.
 
     =========================================================================
@@ -1155,12 +1183,29 @@ def credentials_from_confs(discovered: dict, already: dict, *, gridcoin: bool,
     stated reason: "a second formatter is a second chance to interpolate the wrong key".
     """
     found: dict[str, tuple[str, str]] = {}
+    replacing: set[str] = set()
     for chain, (_conventional, user_variable, pass_variable) in sorted(DAEMON_CONFS.items()):
         if chain == "GRC" and not gridcoin:
             say(f"    {chain}: NOT READ. {GRIDCOIN_CONF_HAZARD}")
             continue
-        if already.get(user_variable) and already.get(pass_variable):
-            continue
+        # THE `continue` THAT USED TO BE HERE MADE THE RECOMMENDED FIX A NO-OP, THREE
+        # TIMES, ON THE DAY THE RECOMMENDATION WAS WRITTEN.
+        #
+        #     if already.get(user_variable) and already.get(pass_variable):
+        #         continue
+        #
+        # "Do not re-ask what is already set" is right for ASKING and wrong for READING A
+        # CONF: the whole point of this flag is to replace a value with the one the daemon
+        # actually read, and a credential that is PRESENT AND WRONG is the only state that
+        # produces the 401 it exists to fix. The operator's GRC_RPC_USER and GRC_RPC_PASS
+        # were both set, both wrong, and credential_check.py said DIFFERENT on both --
+        # so this returned before opening the conf, every run.
+        #
+        # AND IT WAS INVISIBLE, which is why it survived three rounds: the `continue` came
+        # before any say(), so the chain left no line, while the summary printed
+        # `(none)  <- nothing was read; every line above says why` with nothing above it.
+        # Rule 13's skip-that-reads-as-success and rule 14's blank gap in one statement.
+        # Every outcome below prints a line now, including the two that write nothing.
         # THE PORT IS READ BEFORE THE FILE IS CHOSEN, which is the ordering the whole
         # conf_candidates() change turns on: a daemon answering on a regtest port is this
         # repository's own harness and its conf is the harness's, and one on a testnet
@@ -1200,6 +1245,42 @@ def credentials_from_confs(discovered: dict, already: dict, *, gridcoin: bool,
                 f"HASH and cannot be used as a password -- set rpcuser/rpcpassword, or leave the chain off")
             continue
 
+        # WHAT IS IN .env ALREADY, COMPARED THROUGH THE MODULE WHOSE JOB THAT IS.
+        # chains/credential_match.compare() answers SAME / DIFFERENT / ONLY_IN_* and
+        # cannot report a value -- its verdict type has no field one could occupy. A
+        # second comparison spelled here would be rule 8's shape over the one decision
+        # in this function where being wrong writes somebody's wrong password back.
+        verdicts = credential_match.compare(
+            {"user": already.get(user_variable, ""), "password": already.get(pass_variable, "")},
+            settings,
+        )
+        differing = [v for v in verdicts if v.verdict == credential_match.DIFFERENT]
+        agreeing = [v for v in verdicts if v.verdict == credential_match.SAME]
+        if differing and chain not in (stated or {}):
+            # A GUESSED PATH MAY NOT REPLACE A CREDENTIAL, and this is the inverse hazard
+            # of the one above rather than caution. This host runs THREE Gridcoin wallets
+            # and DAEMON_CONFS knows one path, so replacing from a file nobody named is
+            # how an operator who had correctly pointed .env at their desk daemon ends up
+            # with the mainnet staking wallet's login. Reported, not written, and the
+            # line says how to assert the path.
+            say(f"    {chain}: {path} DIFFERS from what .env already has for "
+                f"{', '.join(v.conf_key for v in differing)}, and this path came from this "
+                f"tool's own table rather than from you -- so nothing was taken. If that IS "
+                f"the file your daemon read, say so with --conf {chain}={path} and it will be "
+                f"replaced; if it is not, the conf you want is named in the daemon's own "
+                f"`Using data directory` log line.")
+            continue
+        if agreeing and not differing:
+            # SAID RATHER THAN SKIPPED. This is the branch the old `continue` collapsed
+            # into silence, and "already correct" is the single most useful thing an
+            # operator chasing a 401 can be told -- it moves the question to WHICH FILE
+            # the daemon read, which is where credential_match.headline() sends them.
+            say(f"    {chain}: {path} already MATCHES .env for "
+                f"{', '.join(v.conf_key for v in agreeing)}; nothing to change here. A 401 with "
+                f"this file matching means the daemon read a DIFFERENT file -- check its "
+                f"`Using data directory` log line.")
+            continue
+
         found[user_variable] = (settings["rpcuser"], f"rpcuser read from {path}")
         # THE VALUE IS IN THE TUPLE BECAUSE IT HAS TO BE WRITTEN. It is not in the
         # REASON, and say_dry_run()/say_what_was_written() print names and reasons only.
@@ -1208,7 +1289,15 @@ def credentials_from_confs(discovered: dict, already: dict, *, gridcoin: bool,
             f"rpcpassword read from {path} and NOT shown"
             + (f" (top level plus [{section}])" if section else ""),
         )
-    return found
+        # NAMED AS A REPLACEMENT so main()'s `not already.get(name)` filter does not drop
+        # it -- that filter is correct for a discovered DEFAULT and wrong for a value the
+        # operator pointed this tool at. It is a SET of names and never of values.
+        for verdict in differing:
+            replacing.add(user_variable if verdict.env_key == "user" else pass_variable)
+        if replacing:
+            say(f"    {chain}: REPLACING {', '.join(sorted(replacing))} -- .env has a value for "
+                f"each and it is not what {path} says. The stated path is the authority.")
+    return found, replacing
 
 
 def _probed_port(chain: str, discovered: dict, already: dict) -> int:
@@ -2156,11 +2245,17 @@ def main() -> int:
     # FROM THE CONFS, AND ONLY WHEN ASKED. Merged into `discovered` so credentials flow
     # through the same dry-run report, the same "still unset" computation and the same
     # write -- a second path for them would be a second chance to print one.
+    # BOUND BEFORE THE BRANCH, because the filter below reads it on every path. The
+    # first draft bound it only inside the `if`, so a plain `configure_env.py` -- no
+    # --read-daemon-confs -- raised UnboundLocalError. Three existing tests caught it,
+    # which is what they are for: the cost of this change landing on a run that does not
+    # read a conf at all was exactly the case I was not thinking about.
+    replacing: set[str] = set()
     if args.read_daemon_confs:
         say("  READING CREDENTIALS FROM EACH DAEMON'S OWN CONF")
         stated, conf_refusals = stated_confs(args.conf_paths)
         say_stated_confs(stated, conf_refusals)
-        from_confs = credentials_from_confs(
+        from_confs, replacing = credentials_from_confs(
             discovered, already, gridcoin=args.read_gridcoin_conf, stated=stated,
         )
         for variable, (_value, why) in sorted(from_confs.items()):
@@ -2172,7 +2267,12 @@ def main() -> int:
     elif unused_flags := inert_read_flags(args):
         say_inert_read_flags(unused_flags)
 
-    values = {name: value for name, (value, _why) in discovered.items() if not already.get(name)}
+    # `or name in replacing` IS THE THIRD CLAUSE AND IT WAS MISSING, which is the second
+    # half of the no-op proven on 2026-10-13: even once the conf was read, this dropped
+    # every name already in .env -- so a replacement the operator asked for by stating the
+    # path was discarded one line after being found. `replacing` holds NAMES only.
+    values = {name: value for name, (value, _why) in discovered.items()
+              if not already.get(name) or name in replacing}
     # `name not in values` IS THE THIRD CLAUSE AND IT WAS MISSING, which produced output
     # that contradicted itself on the first real run of --read-daemon-confs:
     #
