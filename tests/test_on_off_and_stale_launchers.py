@@ -798,29 +798,29 @@ def test_no_configured_chain_is_a_RESULT_and_not_a_blank(monkeypatch, capsys):
 
 
 def test_an_unexpanded_variable_is_REFUSED_before_anything_runs(monkeypatch):
-    """IT STARTED A MAINNET GRIDCOIN NODE IN A DIRECTORY NAMED `$HOME`, TWICE.
+    """A REAL FAILURE MODE, and not the one it was written to explain.
 
-    Measured 2026-10-13. GRC_DAEMON_COMMAND is
-    `gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon`, and start_daemon()
-    runs it through shlex.split with no shell, which expands nothing:
+    THE MECHANISM IS MEASURED: start_daemon() runs <ASSET>_DAEMON_COMMAND through
+    shlex.split with no shell, which expands nothing --
 
         ['gridcoinresearchd', '-datadir=$HOME/.GridcoinResearch-desk', '-daemon']
 
-    So -datadir named a directory LITERALLY called `$HOME`. `-daemon` forks: the parent
-    printed "Gridcoin starting" and exited 0, the child found no such directory and died,
-    and nothing ever bound 25779 -- while `up` reported NO LISTENER and blamed a datadir
-    lock. A hand start's log showed a clean sync with no lock error, refuting that.
+    -- and a daemon handed a `-datadir` that does not exist dies after the fork, where
+    the parent has already exited 0 and nothing reports it. Worth refusing before it
+    runs, and capture_daemon_commands.expanded_for_no_shell() had named this caller as
+    the reason it exists while being wired only into the capture path.
 
-    AND THEN THIS TEST ENFORCED MY SECOND GUESS. It asserted "MAINNET" in the refusal,
-    because I had written that Gridcoin "created it, found no conf, and came up on
-    MAINNET". `pgrep -af gridcoinresearch` and `du -sh ./$HOME` settled it an hour later:
-    four Gridcoin processes, all accounted for, and NO `$HOME` directory after two
-    attempts. A Bitcoin-derived daemon REFUSES a missing datadir rather than creating
-    one. So no mainnet node and no junk datadir -- and a test over the wrong consequence
-    would have blocked the correction, which is what a test asserting prose can do.
+    IT WAS NOT WHAT BROKE GRC ON 2026-10-13, and this is the third correction to that
+    claim. The stored command turned out to be the absolute, fully expanded path all
+    along -- `capture_daemon_commands.py --wait --apply` reported "already matches this
+    process's own argv exactly" -- so `on` ran a correct command and that failure is
+    still unexplained. chain_daemons.refuse_to_run() carries all three diagnoses and
+    which of them survived.
 
-    The consequence is narrower and in one way worse: SILENT. The parent has exited 0
-    before the child dies, so there is no exit code and no output anywhere.
+    AND THIS TEST BRIEFLY ENFORCED ONE OF THE WRONG ONES: it asserted "MAINNET" in the
+    refusal, from a guess that the daemon would create the directory, find no conf and
+    default to mainnet. `pgrep` and `du -sh ./$HOME` refuted that, and the assertion
+    then failed the correction -- which is exactly what a test over prose can do.
 
     AND THE FIX FOR THIS WAS WRITTEN ON 2026-10-12 AND NOT WIRED UP.
     capture_daemon_commands.expanded_for_no_shell() names start_daemon() in its own

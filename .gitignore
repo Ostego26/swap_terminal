@@ -154,11 +154,11 @@ runtime/browser-profile/
 # it: a nested checkout makes every sweep that counts something count it twice.
 .claude/
 
-# A DIRECTORY LITERALLY NAMED `$HOME`. GRC_DAEMON_COMMAND held an unexpanded $HOME and
-# chain_daemons.start_daemon() ran it through shlex.split with no shell, so `-datadir`
-# reached the daemon verbatim twice on 2026-10-13. MEASURED AFTERWARDS: no such
-# directory was ever created -- a Bitcoin-derived daemon refuses a datadir that is not
-# there rather than creating one, so the child just died after the fork. This entry is
-# kept anyway, because the cost of being wrong about that once is a chain's data inside
-# a git repository. chains/refuse_to_run() stops the command now.
+# A DIRECTORY LITERALLY NAMED `$HOME`, which nothing here has ever created. An
+# unexpanded `$HOME` in <ASSET>_DAEMON_COMMAND would reach a daemon verbatim --
+# shlex.split with no shell expands nothing -- and chain_daemons.refuse_to_run() now
+# refuses such a command before it runs. MEASURED 2026-10-13: a Bitcoin-derived daemon
+# REFUSES a datadir that is not there rather than creating one, and no `$HOME` directory
+# existed on the operator's host. Kept anyway: the cost of being wrong about that once
+# is a chain's data committed into a git repository.
 $HOME/

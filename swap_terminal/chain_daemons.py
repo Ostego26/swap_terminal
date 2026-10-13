@@ -512,53 +512,56 @@ def refuse_to_run(asset: str, command: str) -> str:
     """Why this command must not be executed, or "". CHECKED BEFORE subprocess.run.
 
     =========================================================================
-    IT STARTED A MAINNET GRIDCOIN NODE IN A DIRECTORY NAMED `$HOME`, TWICE
+    A REAL FAILURE MODE, AND *NOT* THE CAUSE OF THE ONE IT WAS WRITTEN FOR
     =========================================================================
 
-    Measured 2026-10-13 from the operator's own host. GRC_DAEMON_COMMAND is
+    THE MECHANISM IS MEASURED AND THE GUARD IS SOUND. start_daemon() runs
+    <ASSET>_DAEMON_COMMAND through shlex.split with NO shell -- deliberately, so a stray
+    `;` in a path cannot become a second command -- and shlex.split expands nothing:
 
-        gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon
-
-    which is how a person types it. start_daemon() runs it through shlex.split with NO
-    shell -- deliberately, so a stray `;` in a path cannot become a second command -- and
-    shlex.split expands nothing:
-
+        >>> shlex.split("gridcoinresearchd -datadir=$HOME/.GridcoinResearch-desk -daemon")
         ['gridcoinresearchd', '-datadir=$HOME/.GridcoinResearch-desk', '-daemon']
 
-    So `-datadir` named a directory LITERALLY called `$HOME`, relative to the working
-    directory. `-daemon` forks: the PARENT printed "Gridcoin starting" and exited 0, and
-    the child then found no such directory and died. Nothing ever bound 25779, and `up`
-    reported NO LISTENER and diagnosed a datadir lock.
+    A daemon handed a `-datadir` that does not exist dies during startup, and with
+    `-daemon` it dies AFTER forking -- so the parent has already printed and exited 0,
+    and nothing anywhere reports it. That is worth refusing before it runs.
 
-    THE DAEMON'S OWN LOG REFUTED THAT, and then a second measurement refuted my
-    replacement for it. Started by hand, the log showed a clean sync -- blocks 3309057
-    through 3309068, no lock error -- so the lock hypothesis was wrong. I then wrote here
-    that Gridcoin "created it, found no conf, and came up on MAINNET with a fresh empty
-    wallet", which was ALSO a guess, and `pgrep -af gridcoinresearch` plus
-    `du -sh ./$HOME` settled it an hour later: FOUR Gridcoin processes, every one of them
-    accounted for -- the mainnet GUI, the testnet GUI, the desk daemon -- and NO `$HOME`
-    directory at all after two attempts. A Bitcoin-derived daemon REFUSES a datadir that
-    does not exist; it does not create one. No mainnet node was ever started and no junk
-    datadir was ever written.
-
-    SO THE CONSEQUENCE IS NARROWER AND WORSE IN ONE WAY: the failure is completely
-    silent. The parent has already exited 0 by the time the child dies, so there is no
-    exit code to read, nothing in this tree's output, and `on` simply can never start
-    that chain. Two guesses in two turns, both stated as mechanisms; what is written here
-    now is what was measured.
-
-    IT HAPPENED TWICE because `restart` stopped the real daemon first, so each run cost
-    the staking unlock for nothing.
+    capture_daemon_commands.expanded_for_no_shell() was written against this on
+    2026-10-12 and its docstring names THIS function's caller as the reason it exists. It
+    was wired into the CAPTURE path only, so the runner had no defense. That gap is what
+    this closes.
 
     =========================================================================
-    AND I WROTE THE FIX FOR THIS ON 2026-10-12 AND DID NOT WIRE IT UP
+    AND IT WAS NOT WHAT BROKE GRC ON 2026-10-13. THREE WRONG DIAGNOSES.
     =========================================================================
 
-    capture_daemon_commands.expanded_for_no_shell() exists, and its docstring names THIS
-    FUNCTION'S CALLER as the reason it exists: "chain_daemons.start_daemon() runs
-    <ASSET>_DAEMON_COMMAND through shlex.split and subprocess.run with NO shell ... and
-    shlex.split expands nothing." It was called on the CAPTURE path only. A guard written
-    against a measured failure, placed one call site away from the failure.
+    `swap_stack.py restart` left the operator's Gridcoin desk daemon down twice, after
+    `off` stopped it cleanly and `up` ran its command and found nothing on 25779 -- first
+    at 30s, then at 120s. I offered three causes and all three are refuted or untested:
+
+      a datadir lock    SAID TO BE REFUTED BY THE DAEMON'S LOG, AND IT WAS NOT.
+                        The log showed a clean sync with no lock error -- from 07:43:19
+                        onward, the HAND start. The failed `up` ran at 07:23:21, twenty
+                        minutes earlier, and `tail -40` never reached it. Absence of
+                        evidence in a window that does not contain the event. STILL THE
+                        LEADING CANDIDATE AND STILL UNTESTED: a Bitcoin-derived daemon
+                        closes its RPC port EARLY in shutdown and holds the datadir lock
+                        while it flushes, so stop_daemon() proving the port free in 0.5s
+                        does not mean the process is gone.
+      an unexpanded     REFUTED. `capture_daemon_commands.py --wait --apply` reported
+      $HOME             "GRC_DAEMON_COMMAND already matches this process's own argv
+                        exactly" -- so the stored value is the absolute, fully expanded
+                        path and always was. `on` ran a correct command.
+      a MAINNET node    REFUTED, and downstream of the one above anyway. `pgrep -af
+      in ./$HOME        gridcoinresearch` found four processes, all accounted for, and
+                        `du -sh ./$HOME` found no such directory.
+
+    WHAT THIS GUARD IS FOR, THEN: a failure mode that is real, silent and cheap to
+    refuse -- not an explanation of that incident. Writing it as the cause is the thing
+    rule 17 exists to stop, and it took three rounds here. The incident itself cannot
+    recur through `restart`, which no longer stops chain daemons at all (f788e5a), and
+    what would settle it is the debug.log around the FAILING attempt rather than the
+    successful one.
 
     REFUSED RATHER THAN EXPANDED HERE, and that is the same argument that docstring makes:
     expanding at run time would be a second place that decides what a command means. The
@@ -580,7 +583,7 @@ def refuse_to_run(asset: str, command: str) -> str:
             f"before it runs -- this starts the command with shlex.split and no shell, so `$HOME` "
             f"and `~` reach the daemon LITERALLY. A daemon pointed at a directory that does not "
             f"exist DIES DURING STARTUP, and silently: -daemon has already forked and the parent "
-            f"exited 0, so nothing reports it and this chain can never start. Measured 2026-10-13. "
+            f"exited 0, so nothing reports it and this chain can never start. "
             f"Rewrite the stored value with the path spelled out: `python3 "
             f"capture_daemon_commands.py --accept-recorded --apply` expands it, or "
             f"`--wait --apply` with the daemon running stores the argv the kernel actually got."
@@ -590,10 +593,10 @@ def refuse_to_run(asset: str, command: str) -> str:
     if datadir and not Path(datadir).is_dir():
         return (
             f"REFUSED: {asset}_DAEMON_COMMAND names -datadir={datadir} and no such directory "
-            f"exists. A Bitcoin-derived daemon REFUSES a datadir that is not there -- measured on "
-            f"this host 2026-10-13, where two attempts created no directory and left no process -- "
-            f"and with -daemon it refuses AFTER forking, so the parent exits 0 and nothing says a "
-            f"word. This will not run a command whose datadir cannot be the right one."
+            f"exists. A Bitcoin-derived daemon REFUSES a datadir that is not there rather than "
+            f"creating one -- measured on this host 2026-10-13, where no such directory was ever "
+            f"written -- and with -daemon it refuses AFTER forking, so the parent exits 0 and "
+            f"nothing says a word. This will not run a command whose datadir cannot be right."
         )
     return ""
 
