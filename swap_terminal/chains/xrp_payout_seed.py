@@ -102,6 +102,8 @@ from __future__ import annotations
 
 import os
 
+from env_routes import how_a_value_arrives
+
 # THE NAME OF the variable, which is not itself a secret.
 #
 # Named ..._ENV_VAR rather than ..._SEED or ..._SECRET for the reason
@@ -215,9 +217,10 @@ def missing_seed_refusal() -> str:
         f"cannot pay out: {SIGNING_SEED_ENV_VAR} is not set in this process's environment, so there is "
         f"no signing seed and every XRP payout would refuse before signing. This is the DEFAULT and it "
         f"is why no XRP swap can be created: a swap that cannot be paid out would take a deposit it can "
-        f"never settle. Export {SIGNING_SEED_ENV_VAR} in the shell that starts this process -- a value "
-        f"set in a file, or in another shell, does not reach here -- and set XRP_DEPOSIT_ACCOUNT to the "
-        f"account that seed controls. Both are custody decisions and neither has a default."
+        f"never settle. "
+        + how_a_value_arrives(SIGNING_SEED_ENV_VAR, armed_chain="XRP")
+        + " Set XRP_DEPOSIT_ACCOUNT to the account that seed controls as well. Both are custody "
+          "decisions and neither has a default."
     )
 
 

@@ -116,6 +116,7 @@ from chains.registry import why_cannot_pay_out, why_unconfigured
 from chains.solana_signing import CONFIRM_SOL_SEND
 from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR, signing_seed, signing_seed_is_present
 from chains.xrp_signing import CONFIRM_XRP_SEND
+from env_routes import how_a_value_arrives
 from failure_signature import failure_signature
 from modules.address_authority import check_address
 from services.chain_reachability import (
@@ -735,8 +736,8 @@ def broadcast_payout(adapter, config, address: str, amount: float,
             f"environment, so NOTHING was signed, nothing was submitted and no fee was claimed. The "
             f"swap was created while it WAS set -- chains/xrp.py reads it at adapter construction and "
             f"services/swap_service.create_swap() refuses without it -- so it has been removed since. "
-            f"Export {SIGNING_SEED_ENV_VAR} in the shell that starts this worker; a value set in a "
-            f"file, or in another shell, does not reach here. The account that pays is {source}."
+            + how_a_value_arrives(SIGNING_SEED_ENV_VAR, role="this worker", armed_chain="XRP")
+            + f" The account that pays is {source}."
         )
     return adapter.send_to_address(
         address,
@@ -1946,7 +1947,7 @@ def unlock_readiness_lines(configured_assets) -> list[str]:
             lines.append(
                 f"  {asset} payout unlock  *** {WALLET_UNLOCK_ENV_VAR} IS NOT SET *** so every {asset} payout "
                 f"WILL refuse before sending and the swap will land in 'failed', which nothing retries. A "
-                f"{asset} wallet unlocked for staking cannot send (rpc code -4). Export it in the shell that "
-                f"starts this process; a value set in a file, or in another shell, does not reach here."
+                f"{asset} wallet unlocked for staking cannot send (rpc code -4). "
+                + how_a_value_arrives(WALLET_UNLOCK_ENV_VAR, armed_chain=asset)
             )
     return lines

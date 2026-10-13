@@ -29,6 +29,7 @@ from chains.daemon_capabilities import (
     MEASURED,
     NOT_THIS_DEPLOYMENT,
     RELEASE_HISTORY,
+    SHAPE_COMMANDS,
     SHAPE_MEANS,
     UPSTREAM_SOURCE,
     _capability,
@@ -647,6 +648,15 @@ def test_a_CLASSIFIED_failure_with_no_recorded_remedy_says_ONLY_what_it_proves(a
     telling a BTC 403 that the daemon is running and declined it by IP is simply true.
     Inventing a REMEDY is still forbidden, and that is what the equality pins.
 
+    AND WHAT "ONLY" MEANS MOVED ON 2026-10-13, so the name is now half a lie and the
+    docstring says which half. A 401 on ANY chain also gets the two commands that settle
+    one, from SHAPE_COMMANDS. They are not a remedy for this chain -- they are the same
+    two commands for every chain, and the reason they exist is that the operator had this
+    paragraph on screen three times in one command and still had to be told the commands
+    in a chat message. What stays forbidden is a per-chain remedy nobody measured, which
+    is what the equality below pins: LTC gets meaning + command and nothing of GRC's
+    split-conf sentence.
+
     A SECOND ASSERTION HERE WAS WRONG AND IS GONE: `"rpcallowip" not in remedy` for a
     401. The 401 text mentions rpcallowip on purpose -- to RULE IT OUT ("your IP was
     ACCEPTED, because a caller rejected by rpcallowip gets 403 instead") -- which is the
@@ -659,7 +669,17 @@ def test_a_CLASSIFIED_failure_with_no_recorded_remedy_says_ONLY_what_it_proves(a
     shape = refusal_shape(detail)
 
     assert shape is not None, "this case is about a CLASSIFIED failure"
-    assert remedy == SHAPE_MEANS[shape], why
+    # THE EXPECTED TEXT IS NOW MEANING + COMMAND, and the shape decides whether there is
+    # a command at all. 2026-10-13: SHAPE_COMMANDS gave 401 the two commands that settle
+    # one -- credential_check.py to learn WHICH field differs and configure_env.py to copy
+    # it -- which are chain-independent, so an LTC 401 gets them although no LTC 401
+    # REMEDY has ever been measured. That distinction is the one this test exists to hold,
+    # and it is sharper than the old `== SHAPE_MEANS[shape]`: a command that runs on any
+    # chain is not an invented remedy, and the equality still forbids one.
+    command = SHAPE_COMMANDS.get(shape)
+    expected = (SHAPE_MEANS[shape] if command is None
+                else f"(1) {SHAPE_MEANS[shape]} (2) {command(asset)}")
+    assert remedy == expected, why
 
 
 def test_every_capability_named_in_the_remedy_table_actually_exists():

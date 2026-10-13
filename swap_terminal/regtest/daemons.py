@@ -84,6 +84,7 @@ from typing import Any, Protocol
 
 import requests
 from chains.base import RPCAdapter, RPCError
+from chains.credential_match import how_to_settle_a_401
 from microfortnights import format_duration
 from regtest.console import FAIL, OK, ConsoleLike
 
@@ -609,12 +610,16 @@ GRC_CREDENTIALS_ARE_PER_NETWORK = (
     "three Gridcoin wallets and the desk daemon's is not the default one, so read the directory out "
     "of the daemon's own startup log -- it prints `Using data directory <datadir>/testnet` every run. "
     "Reading them out of the mainnet conf is the cause this project has actually measured for this 401 "
-    "(2026-09-29), so check WHICH FILE before retyping anything. To compare without printing a "
-    "secret: `python3 credential_check.py --asset GRC --conf <datadir>/testnet/gridcoinresearch.conf`, "
-    "which prints SAME or DIFFERENT per field and has no field a value could occupy. Then "
-    "`python3 configure_env.py --read-daemon-confs --read-gridcoin-conf --conf "
-    "GRC=<datadir>/testnet/gridcoinresearch.conf --apply` copies them into .env on your own host "
-    "without printing either."
+    "(2026-09-29), so check WHICH FILE before retyping anything. "
+    # THE COMMANDS ARE NOT SPELLED HERE, and that is rule 8 rather than brevity. They are
+    # chain-independent -- credential_check.py takes --asset and configure_env.py takes
+    # --conf for all three Bitcoin-derived chains -- while everything above this line is
+    # Gridcoin's split-file trap and belongs only to Gridcoin. So the general half is
+    # chains/credential_match.how_to_settle_a_401(), which daemon_capabilities' 401 remedy
+    # ALSO prints: spelling them in both is the third-copy mistake SHAPE_MEANS' own comment
+    # records catching once already. Inlined here for about four hours on 2026-10-13 before
+    # the second caller appeared and made the duplication visible.
+    + how_to_settle_a_401("GRC")
 )
 
 # THE CHECK THIS SENTENCE USED TO RECOMMEND WAS THE WRONG ONE, and it is replaced rather

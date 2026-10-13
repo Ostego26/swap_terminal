@@ -159,3 +159,74 @@ def headline(verdicts: list[FieldVerdict]) -> str:
         "NEITHER SIDE HAS A CREDENTIAL. A daemon with no rpcuser and no rpcpassword refuses "
         "RPC outright, which is 401, and setting them in the conf requires a restart."
     )
+
+
+#: THE GRIDCOIN-ONLY FLAG, named once. configure_env.py gates Gridcoin's conf behind its
+#: own opt-in because the DEFAULT datadir's file belongs to a live staking wallet; BTC and
+#: LTC need no second flag. Spelled here rather than inline in the sentence below so the
+#: branch is one lookup and a fourth chain needing a flag is one entry.
+_EXTRA_READ_FLAG = {"GRC": " --read-gridcoin-conf"}
+
+
+def how_to_settle_a_401(asset: str) -> str:
+    """The two commands that settle a 401 without anybody reading a password out loud.
+
+    =========================================================================
+    THIS SENTENCE EXISTS BECAUSE I HAD TO TYPE IT INTO A CHAT TWICE
+    =========================================================================
+
+    2026-10-12 and again on 2026-10-13. The operator's GRC answered 401 from the host
+    and from the container; `swap_stack.py off`, `up` step 8 and `chains` each printed
+    the recorded remedy, which says correctly what a 401 PROVES and which FILE the
+    credentials live in -- and named no command. So the two things that actually resolve
+    it reached them only because I said so in conversation, which is the one place a
+    remedy cannot be re-read from.
+
+    daemon_capabilities.py's own header makes this argument about itself: "A capability
+    map that no report reads is documentation, and rule 5's test applies to it: if a
+    reader has to open a file to learn something, it is in the wrong place." A remedy
+    that lives only in a chat message is one step worse than that.
+
+    =========================================================================
+    WHY IT IS HERE AND NOT IN daemon_capabilities OR regtest/daemons
+    =========================================================================
+
+    Both of those print a 401 remedy and both would otherwise spell these commands --
+    `SHAPE_MEANS` for any chain, `regtest/daemons.GRC_CREDENTIALS_ARE_PER_NETWORK` for
+    Gridcoin -- which is rule 8's exact shape, and daemon_capabilities' SHAPE_MEANS
+    comment already records catching it once: "The first draft of the 401 entry here
+    restated it, which would have made a third copy of the one sentence in this tree
+    that is already shared properly."
+
+    This module is the leaf both can import (it pulls in nothing but `typing`, where
+    regtest/daemons already imports chains.base), and it is the module whose subject IS
+    comparing credentials without reporting one. So the commands live beside the
+    comparison they drive.
+
+    =========================================================================
+    THE CONF PATH IS A PLACEHOLDER AND MUST STAY ONE
+    =========================================================================
+
+    Every other value here is literal; `<datadir>` is not, and that is the finding
+    rather than a gap. This host runs three Gridcoin wallets, the datadir is chosen by
+    whoever typed the launch command, and guessing it is the failure measured on
+    2026-09-29 and again on 2026-10-12. The daemon prints `Using data directory
+    <datadir>/testnet` every run and that is the only reliable source, so the sentence
+    sends the reader there rather than naming a path that is right one time in three.
+
+    NEITHER COMMAND PRINTS A VALUE. credential_check.py returns verdict words from a
+    type with no field a value could occupy; configure_env.py copies the conf into .env
+    with the value in a tuple and never in a reason line. That property is what makes
+    these safe to put in a report an operator pastes into a chat.
+    """
+    flag = _EXTRA_READ_FLAG.get(asset.upper(), "")
+    return (
+        f"TWO COMMANDS SETTLE IT AND NEITHER PRINTS A PASSWORD. (a) `python3 "
+        f"credential_check.py --asset {asset} --conf <the conf that daemon read>` says SAME or "
+        f"DIFFERENT per field, so you learn WHICH of the two is wrong rather than retyping both. "
+        f"(b) `python3 configure_env.py --read-daemon-confs{flag} --conf "
+        f"{asset}=<that same path> --apply` copies them out of that conf into .env for you -- the "
+        f"value goes in the file and never on the screen. Then recreate the container (`python3 "
+        f"swap_stack.py restart`), because an already-running one keeps the environment it "
+        f"started with."
+    )

@@ -135,6 +135,8 @@ from __future__ import annotations
 # QUESTION "is it set". Importing it this way round, rather than moving the
 # constant here, also keeps every existing importer of
 # chains.solana_signing.KEYPAIR_PATH_VARIABLE working unchanged.
+from env_routes import how_a_value_arrives
+
 from .solana_address import is_on_curve, is_valid_address
 from .solana_signing import KEYPAIR_PATH_VARIABLE, keypair_path_from_environment
 
@@ -231,11 +233,12 @@ def missing_keypair_refusal() -> str:
         f"cannot pay out: {KEYPAIR_PATH_VARIABLE} is not set in this process's environment, so there "
         f"is no signing keypair and every SOL payout would refuse before signing. This is the DEFAULT "
         f"and it is why no swap paying out in SOL can be created: a swap that cannot be paid out would "
-        f"take a deposit it can never settle. Export {KEYPAIR_PATH_VARIABLE} in the shell that starts "
-        f"this process -- a value set in a file, or in another shell, does not reach here -- pointing "
-        f"at the keypair file that owns the account SOL_HOT_WALLET announces, and set SOL_HOT_WALLET "
-        f"to that account. Both are custody decisions and neither has a default. The file's CONTENTS "
-        f"are never read, printed or logged by anything that renders this sentence."
+        f"take a deposit it can never settle. "
+        + how_a_value_arrives(KEYPAIR_PATH_VARIABLE, armed_chain="SOL")
+        + " It names the keypair file that owns the account SOL_HOT_WALLET announces; set "
+          "SOL_HOT_WALLET to that account too. Both are custody decisions and neither has a "
+          "default. The file's CONTENTS are never read, printed or logged by anything that renders "
+          "this sentence."
     )
 
 

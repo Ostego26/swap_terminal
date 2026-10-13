@@ -102,6 +102,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from env_routes import how_a_value_arrives
 from network_target import configuring_variable
 
 from .bitcoin import BitcoinAdapter
@@ -503,18 +504,43 @@ def why_unconfigured(asset: str, rpc: Mapping[str, object] | None = None) -> str
         # SWAP_DB_PATH were two names for one fact and an operator who moved the database
         # moved the container and not the host tools.
         #
-        # NO CREDENTIAL IS IN THAT ALLOWLIST AND THAT IS THE POINT, so the remedy for an
-        # RPC variable is unchanged: it has to be exported. Saying "nothing reads a .env"
-        # would now be false, and saying ".env is read" would be worse -- an operator
-        # would put GRC_RPC_PORT in the file and watch it do nothing. So the line names
-        # WHICH keys are read and why the rest are not, which is the only version that
-        # leads to the right action.
+        # NO CREDENTIAL IS IN THAT ALLOWLIST AND THAT IS THE POINT: the serving path does
+        # not read one out of .env, and saying it did would have an operator put
+        # GRC_RPC_PORT in the file expecting the CONTAINER to pick it up from there.
+        #
+        # ==================================================================
+        # AND THEN IT ENDED "A value set only in .env does not reach here"
+        # WHILE PRINTING TWO LINES UNDER "21 name(s) loaded from .env"
+        # ==================================================================
+        #
+        # Measured on the operator's screen 2026-10-13, in `swap_stack.py off` step 3:
+        #
+        #     settings    21 name(s) loaded from .env; anything already exported in this
+        #                 shell wins, as it does for docker compose
+        #     BTC  NOT TOUCHED  BTC has no adapter in this process: BTC_RPC_PORT is unset
+        #          ... A value set only in .env, or only in another shell, does not reach
+        #          here.
+        #
+        # Both lines came out of one process, 25 lines apart, and they contradict each
+        # other. env_preamble.py landed on 2026-10-12 and made EVERY root tool load .env
+        # -- tests/test_env_preamble.py gates it exhaustively, with gunicorn.conf.py (the
+        # serving path) and configure_env.py (the writer) the two registered exceptions --
+        # so the clause became false for ~30 of the ~32 processes that print it, on the
+        # day the loader was added, in the sentence the loader exists to make accurate.
+        # env_file.py's own header is about the previous version of this same defect: a
+        # message asserting a port was unset while the container talked to it.
+        #
+        # SO IT NAMES THE ROUTES AND ASSERTS NOTHING ABOUT WHICH ONE FAILED. "unset in
+        # .env" is knowable from a root tool (the loader ran) and NOT from inside the
+        # container (it did not), so a single sentence that claimed it would be a
+        # hypothesis in one of the two places it prints -- rule 17. What is true in both
+        # is that the value did not arrive, and the routes it could have arrived by are
+        # worth naming because the compose `environment:` block is the one an operator
+        # does not think of.
         f"{asset} has no adapter in this process: {named} {verb} unset (or 0) in the environment this "
-        f"process was started with. The serving path reads ONLY the database location out of .env "
-        f"(SWAP_DB_PATH and SWAP_DB_DIR) and DELIBERATELY NEVER a credential -- reading those would arm "
-        f"every process that imports Config -- so this has to be exported in the shell that starts the "
-        f"server, or supplied by compose. A value set only in .env, or only in another shell, does not "
-        f"reach here."
+        f"process was started with. " + how_a_value_arrives() + " The serving path itself reads "
+        "only SWAP_DB_PATH and SWAP_DB_DIR out of .env and DELIBERATELY NEVER a credential: reading "
+        "the rest would arm every process that imports Config."
     )
 
 

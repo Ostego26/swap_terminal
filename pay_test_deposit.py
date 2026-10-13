@@ -106,6 +106,7 @@ from chains.solana_units import (
 )
 from config import Config
 from db import db_session
+from env_routes import how_a_value_arrives
 from microfortnights import format_duration
 from services.helpers import utc_now_iso
 from services.swap_view import elapsed_seconds, remaining_seconds
@@ -145,8 +146,12 @@ def devnet_refusal(rpc_url: str) -> Refusal | None:
     if not rpc_url:
         return Refusal(
             "SOL_RPC_URL is not set in this process's environment",
-            "export SOL_RPC_URL=https://api.devnet.solana.com in this shell. Nothing in the serving "
-            "path reads a .env, so a value set in a file or in another shell does not reach here.",
+            # FALSE IN THIS FILE, and by 53 lines: `import env_preamble` at the top of this
+            # tool loads .env before config is imported, so a value in .env DOES reach
+            # here -- it was the one site of the eight where the contradiction was inside
+            # one file. See swap_terminal/env_routes.py for the other seven.
+            "set SOL_RPC_URL=https://api.devnet.solana.com. "
+            + how_a_value_arrives("SOL_RPC_URL"),
         )
     if not any(marker in rpc_url.lower() for marker in DEVNET_MARKERS):
         return Refusal(

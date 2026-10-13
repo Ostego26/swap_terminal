@@ -1197,11 +1197,14 @@ tests.test_correct_payout_amounts::test_the_three_rows_GRIDCOIN_ROUNDED_UP_are_R
 tests.test_correct_payout_amounts::test_the_three_rows_GRIDCOIN_ROUNDED_UP_are_REFUSED_without_the_flag[id7]	passed
 tests.test_correct_payout_amounts::test_two_outputs_to_one_address_with_different_values_is_UNREAD_not_summed	passed
 tests.test_credential_match::test_NO_VALUE_can_reach_anything_this_module_returns	passed
+tests.test_credential_match::test_a_401_remedy_still_prints_no_value_and_no_path_it_cannot_know	passed
 tests.test_credential_match::test_a_mainnet_port_is_refused_before_any_conf_is_opened	passed
 tests.test_credential_match::test_a_matching_pair_exits_zero	passed
 tests.test_credential_match::test_an_unreadable_conf_exits_2_and_not_1	passed
 tests.test_credential_match::test_every_field_matching_points_at_the_WRONG_FILE_rather_than_declaring_success	passed
+tests.test_credential_match::test_only_gridcoin_gets_the_gridcoin_only_opt_in	passed
 tests.test_credential_match::test_setting_variable_refuses_to_invent_a_name	passed
+tests.test_credential_match::test_the_401_commands_name_flags_the_real_parsers_actually_take	passed
 tests.test_credential_match::test_the_entry_point_prints_no_value_either	passed
 tests.test_credential_match::test_the_five_verdicts_are_five[configured0-conf_values0-expected0]	passed
 tests.test_credential_match::test_the_five_verdicts_are_five[configured1-conf_values1-expected1]	passed
@@ -1210,6 +1213,7 @@ tests.test_credential_match::test_the_five_verdicts_are_five[configured3-conf_va
 tests.test_credential_match::test_the_five_verdicts_are_five[configured4-conf_values4-expected4]	passed
 tests.test_credential_match::test_the_five_verdicts_are_five[configured5-conf_values5-expected5]	passed
 tests.test_credential_match::test_the_printed_variable_name_comes_from_the_table_not_from_the_dict_key	passed
+tests.test_credential_match::test_the_sentence_is_spelled_once_and_both_callers_derive_it	passed
 tests.test_credential_match::test_the_verdict_type_has_no_field_a_value_could_occupy	passed
 tests.test_custody_separation::test_a_DEFAULT_wallet_with_a_NAME_is_still_not_separated	passed
 tests.test_custody_separation::test_a_MAINNET_operator_port_opens_NO_second_socket_at_all	passed
@@ -1771,6 +1775,16 @@ tests.test_env_preamble::test_the_preamble_returns_names_and_never_values	passed
 tests.test_env_preamble::test_the_registered_exceptions_really_do_not_load_it[configure_env.py]	passed
 tests.test_env_preamble::test_the_registered_exceptions_really_do_not_load_it[gunicorn.conf.py]	passed
 tests.test_env_preamble::test_the_sweep_finds_the_tools_it_is_meant_to_measure	passed
+tests.test_env_routes::test_every_caller_gets_a_sentence_that_names_env_as_a_working_route	passed
+tests.test_env_routes::test_every_registered_exception_is_still_a_real_file_with_a_reason[swap_terminal/env_routes.py-the module's own header quotes all four claims in order to classify them. The file that replaces a sentence is the one place the old sentence has to appear.]	passed
+tests.test_env_routes::test_every_registered_exception_is_still_a_real_file_with_a_reason[swap_terminal/regtest/operator_panel.py-TRUE THERE, and measured: that file imports no config and calls no loader, so nothing puts .env into its environment. tests/test_env_preamble.py's sweep covers root tools that read Config and this is not one. It is the single site of the eight whose claim was correct, which is why the clause is not banned outright -- a ban would have forced a false correction here.]	passed
+tests.test_env_routes::test_every_registered_exception_is_still_a_real_file_with_a_reason[swap_terminal/services/wizard.py-a DOCSTRING quoting output as it was RENDERED to an unauthenticated reader, which is history. Rewriting a quoted measurement to match today's text would destroy the record of what was actually on the page (rule 1: the drift is the point).]	passed
+tests.test_env_routes::test_every_registered_exception_is_still_a_real_file_with_a_reason[tests/test_env_routes.py-this file, which lists them in STALE_CLAIMS]	passed
+tests.test_env_routes::test_no_code_outside_the_registered_sites_claims_env_does_not_arrive	passed
+tests.test_env_routes::test_operator_panels_claim_is_true_and_that_is_why_it_is_registered	passed
+tests.test_env_routes::test_the_armed_route_is_named_only_for_signing_material	passed
+tests.test_env_routes::test_the_sweep_finds_files_at_all	passed
+tests.test_env_routes::test_the_variable_is_named_only_when_the_caller_has_not_named_it	passed
 tests.test_env_variable_state::test_EVERY_CALLER_IN_THE_TREE_passes_at_most_the_flag	passed
 tests.test_env_variable_state::test_a_REAL_environment_value_is_named_as_the_source	passed
 tests.test_env_variable_state::test_a_SET_BUT_EMPTY_variable_does_NOT_claim_the_variable_is_unset[   ]	passed

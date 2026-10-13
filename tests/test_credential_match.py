@@ -42,8 +42,11 @@ from chains.credential_match import (
     SAME,
     compare,
     headline,
+    how_to_settle_a_401,
 )
+from chains.daemon_capabilities import refusal_remedy
 from conftest import root_entry_point
+from regtest.daemons import GRC_CREDENTIALS_ARE_PER_NETWORK
 
 checker = root_entry_point("credential_check.py", "credential_check_entry")
 
@@ -274,3 +277,90 @@ def test_a_matching_pair_exits_zero(tmp_path, capsys, monkeypatch):
     assert "EVERY FIELD MATCHES" in printed
     for sentinel in SENTINELS:
         assert sentinel not in printed
+
+
+# --- the two commands that settle a 401, and the ONE place they are spelled ------
+
+
+def test_the_401_commands_name_flags_the_real_parsers_actually_take():
+    """A remedy naming a flag that does not exist strands the reader it was written for.
+
+    This sentence is printed by `swap_stack.py off`, `up` step 8 and `chains`, and read
+    by somebody already stuck on a 401. Both commands are checked against the parsers
+    themselves rather than spelled and trusted -- the same gate
+    tests/test_swap_readiness.py puts on GRC_CREDENTIALS_ARE_PER_NETWORK, for the same
+    reason: prose about an interface is worth what its test is worth.
+    """
+    sentence = how_to_settle_a_401("GRC")
+    checker = root_entry_point("credential_check.py", "credential_check_401_commands")
+    configurer = root_entry_point("configure_env.py", "configure_env_401_commands")
+
+    assert "credential_check.py --asset GRC" in sentence
+    for flag in ("--asset", "--conf"):
+        assert flag in checker.build_parser().format_help(), f"credential_check.py lost {flag}"
+    configure_help = configurer.build_parser().format_help()
+    for flag in ("--read-daemon-confs", "--read-gridcoin-conf", "--conf", "--apply"):
+        assert flag in sentence, f"the sentence stopped naming {flag}"
+        assert flag in configure_help, f"configure_env.py lost {flag}"
+
+
+def test_only_gridcoin_gets_the_gridcoin_only_opt_in():
+    """--read-gridcoin-conf on a BTC command would be an argparse error, not a remedy.
+
+    THE BRANCH IS THE DECISION and this is the whole of it: configure_env.py gates
+    Gridcoin's conf behind its own flag because the DEFAULT datadir's file belongs to a
+    live staking wallet, and BTC and LTC need no second flag. A sentence that printed it
+    for every chain would hand a BTC operator a command that exits 2.
+    """
+    assert "--read-gridcoin-conf" in how_to_settle_a_401("GRC")
+    assert "--read-gridcoin-conf" in how_to_settle_a_401("grc"), "the lookup must not be case-bound"
+    for asset in ("BTC", "LTC"):
+        assert "--read-gridcoin-conf" not in how_to_settle_a_401(asset)
+        assert "--read-daemon-confs" in how_to_settle_a_401(asset)
+
+
+def test_the_sentence_is_spelled_once_and_both_callers_derive_it():
+    """MUTATION: spell the commands in either caller. Then GRC prints them TWICE.
+
+    That is not hypothetical -- it was the state of the tree for about four hours on
+    2026-10-13. regtest/daemons.GRC_CREDENTIALS_ARE_PER_NETWORK carried the commands
+    inline, and when daemon_capabilities' 401 remedy needed them the duplication became
+    visible: a GRC 401 in `swap_stack.py off` would have printed one copy from the
+    recorded remedy and another from the shape command. daemon_capabilities' SHAPE_MEANS
+    comment records catching the same thing once already.
+
+    ASSERTED BY COUNTING, not by substring presence, because presence is what both a
+    shared sentence and a duplicated one have.
+    """
+    shared = how_to_settle_a_401("GRC")
+
+    assert GRC_CREDENTIALS_ARE_PER_NETWORK.count(shared) == 1, (
+        "the GRC guidance does not derive the shared sentence, or spells a second copy"
+    )
+    remedy = refusal_remedy("GRC", "401 Client Error: Authorization Required")
+    assert remedy.count("credential_check.py") == 1, (
+        f"a GRC 401 names credential_check.py {remedy.count('credential_check.py')} times; "
+        f"the recorded remedy and the shape command are both spelling it"
+    )
+    assert remedy.count("configure_env.py") == 1
+
+
+def test_a_401_remedy_still_prints_no_value_and_no_path_it_cannot_know():
+    """The placeholder is the finding, not a gap, and the commands carry no credential.
+
+    `<the conf that daemon read>` stays a placeholder because three Gridcoin wallets run
+    on this host and guessing the datadir is the failure measured on 2026-09-29 and
+    again on 2026-10-12. A sentence that named one would be right one time in three, and
+    the two times it was wrong it would send somebody to a different wallet's conf.
+    """
+    for asset in ("GRC", "BTC", "LTC"):
+        sentence = how_to_settle_a_401(asset)
+        for sentinel in SENTINELS:
+            assert sentinel not in sentence
+        assert "<" in sentence and ">" in sentence, (
+            "the conf path stopped being a placeholder -- a named path is a guess at which "
+            "of this host's three Gridcoin datadirs the daemon used"
+        )
+        assert "Using data directory" in GRC_CREDENTIALS_ARE_PER_NETWORK, (
+            "nothing tells the reader where to GET the path the placeholder stands for"
+        )

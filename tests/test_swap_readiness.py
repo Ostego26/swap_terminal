@@ -35,6 +35,11 @@ from swap_readiness import (
 MAINNET_PORT = 15715
 TESTNET_PORT = 25779
 
+#: THE DETAIL A STUBBED CHECK RECORDS when the only question is whether it RAN. Counted,
+#: so it has to be a string no report prose can contain by accident -- see the comment at
+#: its use site for the day a bare "reached" was counted 6 times instead of 2.
+AFTER_THE_CRASH = "ran-after-the-crash-sentinel"
+
 # THE MARKER FOR "THIS RUN REPORTED A SEND PRECONDITION ON THIS CHAIN", in one
 # place because four tests use it and they must not disagree about what they are
 # looking for (rule 8 at its smallest).
@@ -273,15 +278,23 @@ def test_a_crashing_check_is_reported_and_does_not_kill_the_run(monkeypatch, cap
     # deposit, and a zero-arity lambda then raised TypeError INSIDE the runner --
     # which this test read as "the check crashed", failing for the stub's arity
     # rather than for anything about the behavior it covers.
+    # THE DETAIL IS A SENTINEL AND NOT THE WORD "reached", and that is the whole point
+    # of the assertion at the bottom. It was "reached" until 2026-10-13, when
+    # chains/registry.why_unconfigured() grew the phrases "this process was reached by
+    # none of them" and "reaches the host tools" -- and a readiness report carries that
+    # paragraph per unconfigured chain, so the count went 2 -> 6 and this test failed on
+    # prose it does not test. A bare English word is not a discriminator; it is a word
+    # that happens not to appear yet. (The same collision, in the other direction, is
+    # the prose-as-code pattern tests/prose.py exists for.)
     monkeypatch.setattr(swap_readiness, "check_gridcoin",
-                        lambda **_: swap_readiness.record(PASS, "GRC", "reached"))
+                        lambda **_: swap_readiness.record(PASS, "GRC", AFTER_THE_CRASH))
     # `pair=None`, because check_pricing() gained that parameter when --pair landed.
     # A zero-argument stub raises TypeError, the outer wrapper catches it and records
     # "pricing (check crashed)", and this test then failed on its OWN stub rather
     # than on the thing it tests -- a stub narrower than the real signature, which
     # is the fixture-narrower-than-reality pattern this suite keeps hitting.
     monkeypatch.setattr(swap_readiness, "check_pricing",
-                        lambda pair=None: swap_readiness.record(PASS, "pricing", "reached"))
+                        lambda pair=None: swap_readiness.record(PASS, "pricing", AFTER_THE_CRASH))
     monkeypatch.setattr(swap_readiness, "check_xrp", lambda account: None)
     monkeypatch.setattr(swap_readiness, "check_deposit_account", lambda: "")
     swap_readiness._results.clear()
@@ -293,7 +306,9 @@ def test_a_crashing_check_is_reported_and_does_not_kill_the_run(monkeypatch, cap
     assert "check crashed" in out
     assert "KeyError" in out
     assert "swap_readiness.py" in out, "the line must say the bug is in the preflight, not the subject"
-    assert out.count("reached") == 2, "the checks AFTER the crash must still run -- that was the real cost"
+    assert out.count(AFTER_THE_CRASH) == 2, (
+        "the checks AFTER the crash must still run -- that was the real cost"
+    )
 
 
 # --- a failure must not assert the opposite of what it proves -----------------

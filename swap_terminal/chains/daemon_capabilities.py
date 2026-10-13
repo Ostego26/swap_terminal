@@ -84,6 +84,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .coin_amounts import CHAIN_DECIMALS
+from .credential_match import how_to_settle_a_401
 
 #: The Bitcoin-derived chains this file speaks for. XRP, SOL and ICP are not
 #: Bitcoin-derived and have no Core release to compare against; asking about them
@@ -983,8 +984,10 @@ _REFUSAL_REMEDIES: dict[str, tuple[tuple[str, str], ...]] = {
     # (rule 17). Modern Core reads rpcuser/rpcpassword -- or rpcauth -- from the
     # `[test]`/`[testnet4]`/`[regtest]` SECTION of one file, which is a different trap
     # from Gridcoin's split files, and nobody has hit it on this host yet. SHAPE_MEANS
-    # still prints for them, so a BTC or LTC 401 gets told what it proves; what it does
-    # not get is a remedy nobody has measured.
+    # still prints for them, so a BTC or LTC 401 gets told what it proves -- and since
+    # 2026-10-13 SHAPE_COMMANDS also gives it the two commands that settle a 401, which
+    # take --asset and are the same on every chain. What it does not get, and must never
+    # get from here, is a per-chain REMEDY nobody has measured.
 }
 
 
@@ -1098,6 +1101,24 @@ SHAPE_MEANS: dict[str, str] = {
 }
 
 
+#: WHAT TO RUN to settle each shape, keyed by shape. The THIRD question an operator has,
+#: after what it proves (SHAPE_MEANS) and what to change (_REFUSAL_REMEDIES), and the only
+#: one whose answer contains a command.
+#:
+#: ONE ENTRY, AND THE ABSENCE OF THE OTHER TWO IS DELIBERATE (rule 17, the same way
+#: _REFUSAL_REMEDIES comments its missing BTC/LTC 401 rows). A `403` is settled by editing
+#: rpcallowip and re-asking, which is the remedy itself rather than a separate command. A
+#: `refused` needs the daemon started, and this tree refuses to automate starting a
+#: Gridcoin one at all -- its wallet is a staking wallet -- so there is no command to name
+#: that would not be a worse answer than the sentence already there.
+#:
+#: A FUNCTION PER SHAPE RATHER THAN A STRING, because the command names the chain and the
+#: Gridcoin-only opt-in flag. The sentence itself lives in chains/credential_match.py,
+#: which is the leaf regtest/daemons.py can import too -- see that function's header for
+#: why it is there and not spelled in either caller.
+SHAPE_COMMANDS = {"401": how_to_settle_a_401}
+
+
 def refusal_remedy(asset: str, detail: str) -> str:
     """What to DO about this chain answering this way. "" when nothing is recorded.
 
@@ -1132,6 +1153,14 @@ def refusal_remedy(asset: str, detail: str) -> str:
     ) if note]
     if means:
         matched = [means, *matched]
+    # AND WHAT TO RUN, LAST, because it is only actionable once a reader knows which file
+    # the credentials belong in -- which is what the recorded remedy above says. Added
+    # 2026-10-13: the operator had this whole paragraph on screen three times in one
+    # command and the two commands that settle a 401 were in neither table, so they
+    # reached them only through a chat message.
+    command = SHAPE_COMMANDS.get(shape)
+    if command is not None:
+        matched.append(command(asset))
     # NUMBERED ONLY WHEN THERE IS MORE THAN ONE, because "1." in front of a lone
     # paragraph implies a second step the reader goes looking for (rule 14: state what
     # the thing means, and do not imply what it does not).
