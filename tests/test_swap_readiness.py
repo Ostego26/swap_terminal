@@ -16,7 +16,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "swap_terminal"))
 
-from conftest import UNTRADED_ASSET, unallowed_directions
+from conftest import UNTRADED_ASSET, root_entry_point, unallowed_directions
 from network_target import UNCONFIGURED_PORT
 from regtest.daemons import GRC_CREDENTIALS_ARE_PER_NETWORK, why_nothing_answered
 from services.payout_service import WALLET_UNLOCK_ENV_VAR
@@ -1086,14 +1086,49 @@ def test_the_two_401_messages_carry_the_same_sentence():
 def test_the_401_guidance_names_a_path_and_never_a_value():
     """It tells you WHERE to look. Nothing here reads that file or echoes a secret.
 
-    chains/daemon_conf.CONF_FALLBACK_NETWORK excludes GRC deliberately -- its conf
-    is shared by a live staking wallet -- so naming the path is the most this may
-    do, and it must not drift into reading it.
+    chains/daemon_conf.CONF_FALLBACK_NETWORK excludes GRC deliberately -- the default
+    datadir's conf belongs to a live staking wallet, and no table can name which of
+    this host's three Gridcoin datadirs a given daemon read -- so naming the path is
+    the most this guidance may do, and it must not drift into reading it. The tools
+    that DO read one take the path as an argument: credential_check.py requires it and
+    configure_env.py takes --conf.
     """
     assert "rpcpassword=" not in GRC_CREDENTIALS_ARE_PER_NETWORK
     assert "rpcuser=" not in GRC_CREDENTIALS_ARE_PER_NETWORK
     # The variable NAMES are fine to print; a value or an = assignment is not.
     assert "GRC_RPC_PASS" in GRC_CREDENTIALS_ARE_PER_NETWORK
+
+
+def test_the_401_guidance_recommends_a_check_that_answers_the_right_question():
+    """The remedy it used to name tested PRESENCE where the open question was EQUALITY.
+
+    Until 2026-10-12 this sentence ended: `grep -cE '^(rpcuser|rpcpassword)'` over both
+    conf files -- "a 0 for the testnet file is the whole answer." Run on the operator's
+    host it returned 2 AND 2 and answered nothing, because the sentence directly above it
+    already said the two files carry DIFFERENT credentials. Presence was never in doubt,
+    so the check's only informative outcome could not occur.
+
+    THE ARGUMENTS ARE CHECKED AGAINST THE REAL PARSERS, not just spelled in the prose. A
+    remedy naming a flag that no longer exists is the wrong-comment bug (rule 16) in the
+    one sentence an operator acts on while already stuck on a 401 -- and the whole point
+    of the correction was that the previous remedy sent them somewhere useless.
+    """
+    assert "credential_check.py" in GRC_CREDENTIALS_ARE_PER_NETWORK
+    assert "grep -cE" not in GRC_CREDENTIALS_ARE_PER_NETWORK, (
+        "the presence check is back; it returned 2 and 2 and answers nothing"
+    )
+
+    checker = root_entry_point("credential_check.py", "credential_check_guidance")
+    configurer = root_entry_point("configure_env.py", "configure_env_guidance")
+    for flag in ("--asset", "--conf"):
+        assert flag in checker.build_parser().format_help(), (
+            f"the guidance names {flag} and credential_check.py does not take it"
+        )
+    configure_help = configurer.build_parser().format_help()
+    for flag in ("--read-daemon-confs", "--read-gridcoin-conf", "--conf"):
+        assert flag in configure_help, (
+            f"the guidance names {flag} and configure_env.py does not take it"
+        )
 
 
 # --- a locked wallet is the CORRECT resting state, not a blocker ----------------

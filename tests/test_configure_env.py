@@ -1042,11 +1042,19 @@ def test_a_testnet_port_prefers_the_operators_own_conf():
 def test_a_chain_the_harness_does_not_run_gets_one_candidate():
     """GRC has no CHAIN_DEFAULTS entry, and that is correct rather than a gap.
 
-    The regtest harness runs Bitcoin and Litecoin. Gridcoin's conf lives in
-    ~/.GridcoinResearch and is shared by mainnet and testnet both, which is why
-    chains/daemon_conf.CONF_FALLBACK_NETWORK excludes it entirely and why this tool needs
-    a separate flag to read it at all. A second candidate invented for it would be a path
-    that does not exist on any host.
+    The regtest harness runs Bitcoin and Litecoin. Gridcoin's conventional conf lives in
+    ~/.GridcoinResearch, which belongs to whichever wallet runs on the DEFAULT datadir --
+    typically the mainnet staking one -- which is why chains/daemon_conf.
+    CONF_FALLBACK_NETWORK excludes it entirely and why this tool needs a separate flag to
+    read it at all. A second candidate invented for it would be a path that does not
+    exist on any host.
+
+    THIS DOCSTRING SAID THE FILE WAS "shared by mainnet and testnet both" until
+    2026-10-12. It is not: a testnet daemon keeps its credentials in `<its own
+    datadir>/testnet/gridcoinresearch.conf` with DIFFERENT values, measured on the
+    operator's host, and configure_env.GRIDCOIN_CONF_HAZARD carries both measurements.
+    The fallout is in that comment; what matters here is that no table can name the right
+    file, which is what --conf is for and what the two tests below cover.
     """
     assert "GRC" not in CHAIN_DEFAULTS, "the harness grew a Gridcoin entry; this test must be revisited"
 
@@ -1056,6 +1064,67 @@ def test_a_chain_the_harness_does_not_run_gets_one_candidate():
     assert candidates[0] == pathlib.Path(configure_env.conventional_conf("GRC")).expanduser()
     # And a chain in neither table gets nothing rather than a crash.
     assert configure_env.conf_candidates("DOGE", 0) == []
+
+
+def test_a_stated_conf_replaces_the_candidate_list_rather_than_leading_it():
+    """An override with a fallback behind it is the defect, not the feature.
+
+    If the stated path were merely FIRST, a typo in a datadir would fall through to the
+    conventional file -- which for GRC on this host is a different wallet with different
+    credentials -- and the run would report success having read the wrong one. That is
+    precisely the quiet substitution the argument exists to end, so the assertion is on
+    the LENGTH as much as on the contents.
+    """
+    stated = {"GRC": pathlib.Path("/desk/.GridcoinResearch-desk/testnet/gridcoinresearch.conf")}
+
+    assert configure_env.conf_candidates("GRC", 25715, stated) == [stated["GRC"]]
+    # LTC is unaffected: an override names one chain and leaves the others to the tables.
+    assert configure_env.conf_candidates("LTC", 19332, stated)[0] == pathlib.Path(
+        configure_env.conventional_conf("LTC")).expanduser()
+    # And a regtest-port chain keeps the harness-first ordering it had.
+    assert configure_env.conf_candidates("LTC", 19443, stated)[0] != pathlib.Path(
+        configure_env.conventional_conf("LTC")).expanduser()
+
+
+@pytest.mark.parametrize("assignment,fragment", [
+    ("GRC", "has no `=`"),
+    ("GRC=", "was given no path"),
+    ("GRC=  ", "was given no path"),
+    ("SOL=/x/sol.conf", "names a chain whose conf this tool does not read"),
+    ("DOGE=/x/doge.conf", "names a chain whose conf this tool does not read"),
+])
+def test_a_malformed_conf_argument_is_refused_by_name(assignment, fragment):
+    """REFUSED rather than dropped, because a dropped argument reads as an accepted one.
+
+    An operator who typo'd --conf would otherwise get a run that read the conventional
+    file and said so in a line they had no reason to re-read. SOL is in the list because
+    it is a chain this tool DOES configure -- it just has no conf to read -- so the
+    refusal has to distinguish "no such chain" from "no conf for that chain" in words.
+    """
+    stated, refusals = configure_env.stated_confs([assignment])
+
+    assert stated == {}, "nothing may be stated from an argument that was refused"
+    assert len(refusals) == 1
+    assert fragment in refusals[0], refusals[0]
+
+
+def test_a_stated_conf_expands_a_tilde_and_takes_the_last_word_of_a_path():
+    """~ is expanded here because an operator types the path and the shell may not see it.
+
+    A path beginning with a literal `~` directory exists on no host, so an unexpanded one
+    is always the wrong file -- and `no conf at ~/...` is a message that looks correct
+    while naming a path nothing could ever be at.
+    """
+    stated, refusals = configure_env.stated_confs(
+        ["GRC=~/.GridcoinResearch-desk/testnet/gridcoinresearch.conf", "ltc = /spaced/path.conf "]
+    )
+
+    assert refusals == []
+    assert not str(stated["GRC"]).startswith("~"), "the tilde survived, so this names a path with no file"
+    assert stated["GRC"].name == "gridcoinresearch.conf"
+    # LOWERCASE AND SPACES ARE ACCEPTED, because `--conf ltc = path` is what a person
+    # types and refusing it teaches nothing. The chain is uppercased and the path stripped.
+    assert stated["LTC"] == pathlib.Path("/spaced/path.conf")
 
 
 def test_the_missing_conf_message_names_every_path_it_looked_in(env_file, monkeypatch, capsys):
@@ -1142,6 +1211,79 @@ def test_a_credential_is_written_and_NEVER_printed(litecoin_conf, env_file, monk
     assert "NOT shown" in printed
 
 
+def test_a_stated_conf_is_the_file_actually_read_and_its_value_is_still_never_printed(
+    tmp_path, litecoin_conf, env_file, monkeypatch, capsys,
+):
+    """THE END-TO-END ONE: --conf decides which file, and the password still cannot leak.
+
+    SEEDED SO THE TWO FILES DISAGREE, which is the operator's host in miniature: a
+    conventional path holding one credential and a per-datadir testnet path holding
+    another. A run that read the conventional file would write `wrong-wallet-user`, so
+    the assertion on what reached .env distinguishes the two outcomes rather than merely
+    observing that something was written.
+
+    AND THE LEAK ASSERTION IS REPEATED HERE ON PURPOSE, not left to the test above. The
+    override is a new path into the same write, and the one property that must hold on
+    every path into it is that the value reaches .env and nothing else -- a second path
+    for a credential is a second chance to print one, which is what
+    credentials_from_confs()'s own comment says about merging into `discovered`.
+    """
+    conventional = tmp_path / "gridcoinresearch.conf"
+    conventional.write_text("rpcuser=wrong-wallet-user\nrpcpassword=wrong-wallet-password\n")
+    desk = tmp_path / "desk" / "testnet"
+    desk.mkdir(parents=True)
+    stated = desk / "gridcoinresearch.conf"
+    stated.write_text(f"rpcuser=desk-testnet-user\nrpcpassword={LEAK_SENTINEL}\n")
+
+    monkeypatch.setattr(configure_env, "DAEMON_CONFS",
+                        {"GRC": (str(conventional), "GRC_RPC_USER", "GRC_RPC_PASS")})
+    monkeypatch.setattr("sys.argv", [
+        "configure_env.py", "--apply", "--read-daemon-confs", "--read-gridcoin-conf",
+        "--conf", f"GRC={stated}",
+    ])
+    monkeypatch.setenv("ST_ANSWERS", "")
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+    written = env_file.read_text()
+
+    assert "GRC_RPC_USER='desk-testnet-user'" in written, (
+        "the stated conf was not the file read -- this is the wrong-wallet failure the "
+        "argument exists to stop"
+    )
+    assert "wrong-wallet-user" not in written
+    assert "wrong-wallet-password" not in written
+    assert LEAK_SENTINEL in written, "the stated conf's rpcpassword was not stored"
+    assert LEAK_SENTINEL not in printed, "the rpcpassword was printed to stdout"
+    # THE PATH IS ECHOED, because it is the parameter that decided whose credentials
+    # those are and an operator cannot check a datadir they were not shown (rule 14).
+    assert str(stated) in printed
+    assert "CONF PATHS YOU STATED" in printed
+    assert str(conventional) not in printed, (
+        "the conventional path was named, so the output does not say unambiguously which "
+        "file was read"
+    )
+
+
+def test_stating_no_conf_says_the_tables_decide_rather_than_printing_nothing(
+    litecoin_conf, env_file, monkeypatch, capsys,
+):
+    """`(none)` is a result, and here it carries the warning that the default is wrong for GRC.
+
+    A blank gap is ambiguous between "no override" and "the override block broke", and
+    the operator reading this block is the one who has to notice that a Gridcoin run with
+    no --conf is pointed at the conventional datadir.
+    """
+    monkeypatch.setattr("sys.argv", ["configure_env.py", "--read-daemon-confs"])
+
+    configure_env.main()
+    printed = capsys.readouterr().out
+
+    assert "CONF PATHS YOU STATED" in printed
+    assert "(none)" in printed
+    assert "CONVENTIONAL" in printed, "the block does not say what decides in the absence of an override"
+
+
 def test_the_section_comes_from_the_probed_port_not_a_fixed_default(litecoin_conf, env_file, monkeypatch, capsys):
     """MUTATION: pass network="regtest" as chains/daemon_conf.CONF_FALLBACK_NETWORK does.
 
@@ -1164,9 +1306,9 @@ def test_the_section_comes_from_the_probed_port_not_a_fixed_default(litecoin_con
 def test_gridcoin_is_refused_without_its_own_flag(tmp_path, env_file, monkeypatch, capsys):
     """chains/daemon_conf.py excludes Gridcoin from conf resolution, and the reason is money.
 
-    Its conf is shared by mainnet and testnet, and a Gridcoin mainnet wallet is typically a
-    live staking wallet. A single --read-daemon-confs would let an operator accept that
-    without reading it, so the hazard has its own flag.
+    Its conventional conf belongs to the wallet on the DEFAULT datadir, and a Gridcoin
+    mainnet wallet is typically a live staking wallet. A single --read-daemon-confs would
+    let an operator accept that without reading it, so the hazard has its own flag.
     """
     conf = tmp_path / "gridcoinresearch.conf"
     conf.write_text(f"rpcuser=grcuser\nrpcpassword={LEAK_SENTINEL}\n")
@@ -1209,19 +1351,41 @@ def test_gridcoin_is_read_when_its_flag_is_passed(tmp_path, env_file, monkeypatc
     assert LEAK_SENTINEL not in capsys.readouterr().out
 
 
-def test_the_gridcoin_flag_alone_does_nothing_and_says_so(env_file, monkeypatch, capsys):
+@pytest.mark.parametrize("argv,named", [
+    (["--read-gridcoin-conf"], ["--read-gridcoin-conf"]),
+    (["--conf", "GRC=/tmp/x.conf"], ["--conf", "1 stated"]),
+    (["--read-gridcoin-conf", "--conf", "GRC=/tmp/x.conf", "--conf", "LTC=/tmp/y.conf"],
+     ["--read-gridcoin-conf", "--conf", "2 stated"]),
+])
+def test_a_conf_reading_flag_without_the_read_does_nothing_and_names_itself(
+    argv, named, env_file, monkeypatch, capsys,
+):
     """A flag that silently did nothing would be the worst of the three outcomes.
 
-    An operator who passes only --read-gridcoin-conf has stated an intent; the tool cannot
-    act on it without the other flag, so it says that rather than appearing to comply.
+    An operator who passes only --read-gridcoin-conf, or only --conf, has stated an
+    intent; the tool cannot act on it without --read-daemon-confs, so it says so rather
+    than appearing to comply (rule 13: "skipped" and "success" in the same output is a
+    defect in the output).
+
+    --conf IS COVERED HERE AND NOT JUST THE GRIDCOIN FLAG, because a stated conf path
+    that was never opened is the state an operator is most likely to read as "it used my
+    file" -- and the stated COUNT is asserted, so a run that ignored one of two paths
+    cannot report the same sentence as a run that ignored one.
+
+    THE PHRASE THIS ASSERTED USED TO BE "DOES NOTHING ON ITS OWN", which was accurate
+    for one flag and became ambiguous for two: "on its own" reads as "without the other
+    one" when there are two others. It names the flag that was missing now.
     """
-    monkeypatch.setattr("sys.argv", ["configure_env.py", "--read-gridcoin-conf"])
+    monkeypatch.setattr("sys.argv", ["configure_env.py", *argv])
 
     configure_env.main()
     printed = capsys.readouterr().out
 
-    assert "DOES NOTHING ON ITS OWN" in printed
+    assert "DOES NOTHING WITHOUT --read-daemon-confs" in printed
+    for fragment in named:
+        assert fragment in printed, f"{fragment!r} is missing, so the output does not say what was ignored"
     assert "READING CREDENTIALS" not in printed
+    assert "NO CONF WAS OPENED" in printed
 
 
 def test_a_missing_conf_is_a_reported_result_not_a_crash(tmp_path, env_file, monkeypatch, capsys):

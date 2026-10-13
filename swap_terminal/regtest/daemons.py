@@ -610,9 +610,27 @@ GRC_CREDENTIALS_ARE_PER_NETWORK = (
     "of the daemon's own startup log -- it prints `Using data directory <datadir>/testnet` every run. "
     "Reading them out of the mainnet conf is the cause this project has actually measured for this 401 "
     "(2026-09-29), so check WHICH FILE before retyping anything. To compare without printing a "
-    "secret: `grep -cE '^(rpcuser|rpcpassword)' <datadir>/gridcoinresearch.conf "
-    "<datadir>/testnet/gridcoinresearch.conf` -- a 0 for the testnet file is the whole answer."
+    "secret: `python3 credential_check.py --asset GRC --conf <datadir>/testnet/gridcoinresearch.conf`, "
+    "which prints SAME or DIFFERENT per field and has no field a value could occupy. Then "
+    "`python3 configure_env.py --read-daemon-confs --read-gridcoin-conf --conf "
+    "GRC=<datadir>/testnet/gridcoinresearch.conf --apply` copies them into .env on your own host "
+    "without printing either."
 )
+
+# THE CHECK THIS SENTENCE USED TO RECOMMEND WAS THE WRONG ONE, and it is replaced rather
+# than removed because the replacement only makes sense beside what it replaced.
+#
+# It said: `grep -cE '^(rpcuser|rpcpassword)' <datadir>/gridcoinresearch.conf
+# <datadir>/testnet/gridcoinresearch.conf` -- "a 0 for the testnet file is the whole
+# answer." Run on the operator's host 2026-10-12 it came back 2 AND 2, and answered
+# nothing: it tests whether the net-specific file HAS credentials, where the open
+# proposition is whether they MATCH the ones this process would send. The sentence
+# directly above it already said the testnet file "carries DIFFERENT credentials from the
+# mainnet file beside it" -- so presence was never in doubt, and a check whose only
+# informative outcome was a 0 could not fire.
+#
+# Equality cannot be checked by eye without reading a password out loud, which is why
+# chains/credential_match.py exists and why it can hold a value and never report one.
 
 
 def why_nothing_answered(reasons: list[str]) -> str:

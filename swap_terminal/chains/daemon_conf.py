@@ -199,10 +199,22 @@ def describe(path: Path, settings: dict, *, network: str = "") -> str:
 #: under. Every entry must also be in regtest.daemons.CHAIN_DEFAULTS, which is where
 #: the datadir and conf name come from.
 #:
-#: GRC IS DELIBERATELY ABSENT. Its conf lives in ~/.GridcoinResearch, shared by
-#: mainnet and testnet both, and the operator's mainnet wallet is a live staking
-#: wallet holding real coins. Picking a connection out of that file is how a reader
-#: -- or worse, a driver that sends -- ends up pointed at it. The network check
+#: GRC IS DELIBERATELY ABSENT, and the reason is that there is no file to resolve
+#: FROM. ~/.GridcoinResearch is the DEFAULT datadir, and on the operator's host that
+#: is a live staking wallet holding real coins; their testnet daemon runs on a
+#: different datadir entirely and keeps its own credentials in that datadir's
+#: `testnet/` subdirectory, with DIFFERENT values (measured 2026-10-12; configure_env.
+#: GRIDCOIN_CONF_HAZARD carries both measurements). Three Gridcoin wallets run there
+#: (OPEN_FINDINGS finding 2), so a table cannot name the right one -- which is why
+#: configure_env.py takes the path as --conf and credential_check.py requires it.
+#:
+#: THIS SAID THE FILE WAS "shared by mainnet and testnet both" UNTIL 2026-10-12. That
+#: reads as "either file will do", and the consequence of acting on it is credentials
+#: from a different wallet, which authenticate against nothing and produce a 401 with
+#: a sentence pointing away from the cause.
+#:
+#: Picking a connection out of the default datadir's file is how a reader -- or worse,
+#: a driver that sends -- ends up pointed at the staking wallet. The network check
 #: would still refuse a mainnet answer, but the place to not make that mistake is
 #: before the call. Gridcoin stays explicit: GRC_RPC_PORT is set by hand, or GRC is
 #: not reached at all.

@@ -101,6 +101,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import NamedTuple
 
@@ -247,8 +248,30 @@ def conventional_conf(chain: str) -> str:
     return entry[0] if entry else ""
 
 
-def conf_candidates(chain: str, port: int) -> list[Path]:
+def conf_candidates(chain: str, port: int, overrides: Mapping[str, Path] | None = None) -> list[Path]:
     """Where to look for `chain`'s conf, best first, given the port it answers on.
+
+    AN OVERRIDE IS THE WHOLE LIST AND NOT THE HEAD OF IT. If the operator has said which
+    file the daemon read, the tables have nothing to add: a fallback behind a stated path
+    would quietly read a different wallet's conf when the stated one is missing, and
+    "quietly read a different wallet's conf" is the failure this argument exists to end.
+    Missing means missing, and the caller says so by name.
+
+    WHY IT EXISTS, measured 2026-10-12 on the operator's host. Their Gridcoin desk daemon
+    runs with `-datadir=$HOME/.GridcoinResearch-desk` and keeps its testnet credentials in
+    that datadir's `testnet/` subdirectory. DAEMON_CONFS knows ONE Gridcoin path,
+    `~/.GridcoinResearch/gridcoinresearch.conf`, which on this host is the MAINNET staking
+    wallet -- a different wallet with different credentials. So --read-daemon-confs could
+    only ever have read the wrong file for GRC, and reading the mainnet conf is the cause
+    this project has already measured for this exact 401 (regtest/daemons.
+    GRC_CREDENTIALS_ARE_PER_NETWORK, 2026-09-29).
+
+    A TABLE CANNOT FIX THAT, which is why this is an argument rather than a fourth entry
+    in DAEMON_CONFS. The datadir is chosen by whoever typed the launch command, three
+    Gridcoin wallets run on this host (OPEN_FINDINGS finding 2), and the only reliable
+    source for which one a daemon read is its own startup log -- it prints `Using data
+    directory <datadir>/testnet` every run. credential_check.py takes the path as a
+    required argument for the same reason and says so in its header.
 
     THE HARNESS PATH COMES FROM CHAIN_DEFAULTS and is never spelled here, which is the
     whole point of the function. GRC has no CHAIN_DEFAULTS entry -- the harness does not
@@ -259,6 +282,9 @@ def conf_candidates(chain: str, port: int) -> list[Path]:
     output does not report looking in the same file twice (rule 14: output that
     contradicts itself about what it did is a defect in the output).
     """
+    stated = (overrides or {}).get(chain)
+    if stated is not None:
+        return [stated]
     harness = CHAIN_DEFAULTS.get(chain)
     harness_path = (Path(harness["datadir"]).expanduser() / harness["conf_name"]) if harness else None
     conventional = conventional_conf(chain)
@@ -428,14 +454,14 @@ def _named_sections(names: list[str]) -> str:
 #: GRC IS REFUSED BY DEFAULT AND NEEDS ITS OWN FLAG, and the reason is quoted from
 #: chains/daemon_conf.CONF_FALLBACK_NETWORK, which excludes Gridcoin entirely:
 #:
-#:     "Its conf lives in ~/.GridcoinResearch, shared by mainnet and testnet both, and
-#:      the operator's mainnet wallet is a live staking wallet holding real coins.
-#:      Picking a connection out of that file is how a reader -- or worse, a driver that
-#:      sends -- ends up pointed at it."
+#:     "~/.GridcoinResearch is the DEFAULT datadir, and on the operator's host that is a
+#:      live staking wallet holding real coins [...] Picking a connection out of the
+#:      default datadir's file is how a reader -- or worse, a driver that sends -- ends
+#:      up pointed at the staking wallet."
 #:
 #: THIS TOOL'S CASE IS NARROWER THAN THE ONE THAT TABLE REFUSES, which is why a separate
 #: opt-in is defensible rather than an override: that table picks a whole CONNECTION,
-#: port included, out of the shared file. Here GRC_RPC_PORT has already been established
+#: port included, out of a file nothing told it to read. Here GRC_RPC_PORT has already been established
 #: by probing -- 25715 on the operator's host, which network_target.classify() calls TEST
 #: -- so only the credentials come from the conf and the port decides which daemon they
 #: reach. chains/daemon_network.test_network_verdict() is still the backstop that refuses
@@ -445,13 +471,37 @@ def _named_sections(names: list[str]) -> str:
 #: different in kind, and a single flag would let an operator accept it without reading
 #: this.
 GRIDCOIN_CONF_HAZARD = (
-    "~/.GridcoinResearch/gridcoinresearch.conf is shared by MAINNET and testnet, and a "
-    "Gridcoin mainnet wallet is typically a live staking wallet holding real coins. "
-    "chains/daemon_conf.py excludes Gridcoin from conf resolution for exactly that reason. "
-    "Reading only the CREDENTIALS is narrower -- GRC_RPC_PORT is established by probing, so "
-    "the port decides which daemon they reach -- but it is still your decision, not this "
-    "tool's. Pass --read-gridcoin-conf to accept it."
+    "~/.GridcoinResearch/gridcoinresearch.conf belongs to the wallet running on the DEFAULT "
+    "datadir, and a Gridcoin mainnet wallet is typically a live staking wallet holding real "
+    "coins. chains/daemon_conf.py excludes Gridcoin from conf resolution for exactly that "
+    "reason. Reading only the CREDENTIALS is narrower -- GRC_RPC_PORT is established by "
+    "probing, so the port decides which daemon they reach -- but it is still your decision, "
+    "not this tool's. Pass --read-gridcoin-conf to accept it. AND IT IS PROBABLY NOT THE FILE "
+    "YOU WANT: this host runs three Gridcoin wallets, a testnet daemon keeps its credentials "
+    "in `<its own datadir>/testnet/gridcoinresearch.conf`, and those differ from the file "
+    "beside them. Pass --conf GRC=<that path> as well; the daemon prints `Using data directory "
+    "<datadir>/testnet` in its startup log."
 )
+
+#: THIS SENTENCE SAID THE CONVENTIONAL FILE WAS "shared by MAINNET and testnet" until
+#: 2026-10-12, and the correction is the reason --conf exists.
+#:
+#: What is measured: the operator's desk daemon runs with
+#: `-datadir=$HOME/.GridcoinResearch-desk`, BOTH `<datadir>/gridcoinresearch.conf` and
+#: `<datadir>/testnet/gridcoinresearch.conf` carry rpcuser and rpcpassword (grep -c
+#: returned 2 and 2 on 2026-10-12), and regtest/daemons.GRC_CREDENTIALS_ARE_PER_NETWORK
+#: records from a measured 401 on 2026-09-29 that the two files hold DIFFERENT values.
+#:
+#: So "shared" was the wrong word in the way that matters: it reads as "either file will
+#: do", and the file this tool reaches for by default is a DIFFERENT WALLET'S -- not a
+#: second view of the same one. An operator who accepted the hazard got credentials that
+#: cannot authenticate against their testnet daemon, which is a 401 with a sentence
+#: pointing away from the cause.
+#:
+#: WHAT IS NOT CLAIMED HERE, because it has not been measured from here: the order in
+#: which gridcoinresearchd itself resolves those two files on a testnet run. That is why
+#: the remedy is the daemon's own `Using data directory` line rather than a rule about
+#: conf precedence -- rule 17, and the reason credential_check.py refuses to guess a path.
 
 #: THE SHARED DEPOSIT ACCOUNT VARIABLE FOR EACH CHAIN THAT HAS ONE, and this table is
 #: narrow for a reason that would cost a customer their money if it were widened.
@@ -955,7 +1005,110 @@ def accounts_from_the_database(already: dict) -> dict[str, tuple[str, str]]:
     return found
 
 
-def credentials_from_confs(discovered: dict, already: dict, *, gridcoin: bool) -> dict[str, tuple[str, str]]:
+def inert_read_flags(args) -> str:
+    """Which conf-reading flags were passed WITHOUT --read-daemon-confs, as prose, or "".
+
+    BOTH FLAGS ARE INERT WITHOUT THE READ, and saying which is the difference between a
+    run that did nothing and a run that REPORTS it did nothing -- rule 13: "skipped" and
+    "success" in the same output is a defect in the output. --conf is named here and not
+    only --read-gridcoin-conf, because a stated path that was never opened is exactly the
+    state an operator would read as "it used my file."
+
+    A FUNCTION BECAUSE IT IS A DECISION. It went inline first and took main() past
+    ruff's PLR0915, which rule 12 reads as orchestration having swallowed one: "the fix
+    is to extract the decision so it can be called with seeded inputs, not to raise the
+    ceiling." Seeded inputs is also the only way the two-flag wording gets asserted
+    without a conf file anywhere.
+    """
+    if args.read_daemon_confs:
+        return ""
+    return " and ".join(
+        part for part in (
+            "--read-gridcoin-conf" if args.read_gridcoin_conf else "",
+            f"--conf ({len(args.conf_paths)} stated)" if args.conf_paths else "",
+        ) if part
+    )
+
+
+def say_inert_read_flags(unused: str) -> None:
+    """Say that nothing was opened. Separate from the decision so the words are testable."""
+    say(f"  {unused} DOES NOTHING WITHOUT --read-daemon-confs, so NO CONF WAS OPENED and")
+    say("  no credential was read from one. Pass --read-daemon-confs as well, or neither.")
+    say("")
+
+
+def stated_confs(assignments: list[str]) -> tuple[dict[str, Path], list[str]]:
+    """Parse --conf ASSET=PATH into {chain: Path}, plus a refusal per malformed one.
+
+    THE DECISION IS "WHICH FILE", AND IT IS THE OPERATOR'S. This function only reads what
+    they said; it opens nothing. It is separate from the read so it can be called with a
+    seeded list and asserted on without a conf file existing anywhere (rule 10), and so
+    that a typo in a path is reported as a typo rather than as "no conf at ...".
+
+    REFUSED, NOT DROPPED. An ASSET this tool has no DAEMON_CONFS entry for cannot have
+    its conf read no matter what path is given, so silently ignoring the argument would
+    produce a run that read the conventional file while the operator believed it read
+    theirs -- the same class of quiet substitution the override exists to stop. Every
+    refusal names the thing to fix.
+
+    ~ IS EXPANDED HERE because an operator types the path, and `--conf
+    GRC=~/.GridcoinResearch-desk/testnet/gridcoinresearch.conf` reaches argv unexpanded
+    when it is quoted or when the shell is not involved. A path beginning with a literal
+    `~` directory does not exist on this host and the expansion is what was meant.
+
+    NOT CHECKED FOR EXISTENCE. That is the read's business and it already names the file
+    it could not open; checking twice would report the same problem in two voices, and
+    the second one would be the one that goes stale.
+    """
+    stated: dict[str, Path] = {}
+    refusals: list[str] = []
+    for assignment in assignments:
+        if "=" not in assignment:
+            refusals.append(
+                f"--conf {assignment} has no `=`. The form is ASSET=PATH, e.g. "
+                f"--conf GRC=~/.GridcoinResearch-desk/testnet/gridcoinresearch.conf"
+            )
+            continue
+        chain, _, raw = assignment.partition("=")
+        chain = chain.strip().upper()
+        if not raw.strip():
+            refusals.append(f"--conf {chain}= was given no path, so nothing was stated for {chain}")
+        elif chain not in DAEMON_CONFS:
+            refusals.append(
+                f"--conf {chain}=... names a chain whose conf this tool does not read. It reads "
+                f"{', '.join(sorted(DAEMON_CONFS))} -- the three that keep rpcuser and rpcpassword "
+                f"in a daemon conf. SOL, XRP and ICP have no conf to read."
+            )
+        else:
+            stated[chain] = Path(raw.strip()).expanduser()
+    return stated, refusals
+
+
+def say_stated_confs(stated: dict[str, Path], refusals: list[str]) -> None:
+    """What --conf was taken to mean, before anything is opened. `(none)` is a result.
+
+    SAID BEFORE THE READ, because the path is the one input that decides whose credentials
+    get written into .env, and an operator who mistyped a datadir needs to see it on the
+    line above the result rather than infer it from a 401 an hour later (rule 14:
+    announce before, not only after; echo the parameters that decide the answer).
+    """
+    say("  CONF PATHS YOU STATED")
+    if not stated and not refusals:
+        say("    (none)  <- the tables below decide, which for GRC means the CONVENTIONAL path")
+        say("            and on a host with several Gridcoin datadirs that is the wrong wallet")
+        return
+    for chain in sorted(stated):
+        say(f"    {chain:26} <- {stated[chain]}")
+    for refusal in refusals:
+        # ONE SPELLING OF A REFUSAL LINE IN THIS FILE, which is say_set_result()'s
+        # `REFUSED: ` and not a wrapped block: these sentences are long, and a second
+        # indent convention in the same output is the thing a reader notices instead of
+        # the refusal.
+        say(f"    REFUSED: {refusal}")
+
+
+def credentials_from_confs(discovered: dict, already: dict, *, gridcoin: bool,
+                           stated: Mapping[str, Path] | None = None) -> dict[str, tuple[str, str]]:
     """rpcuser and rpcpassword out of each daemon's own conf. NO VALUE IS EVER PRINTED.
 
     =========================================================================
@@ -1014,7 +1167,7 @@ def credentials_from_confs(discovered: dict, already: dict, *, gridcoin: bool) -
         # port is the operator's and its conf is the conventional one. Both facts were
         # already measured by discovery; nothing new is probed here.
         port = _probed_port(chain, discovered, already)
-        candidates = conf_candidates(chain, port)
+        candidates = conf_candidates(chain, port, stated)
         path = next((candidate for candidate in candidates if candidate.is_file()), None)
         if path is None:
             # EVERY PLACE LOOKED IS NAMED, not just the first. An operator told "no conf
@@ -1900,14 +2053,20 @@ def say_what_was_written(values: dict, already: dict) -> None:
     say("                       docker compose exec -T web printenv | grep -c '^BTC_RPC_PORT='")
 
 
-def main() -> int:
-    """Discover, ask, write. ORCHESTRATION ONLY -- every decision is in a function above.
+def build_parser() -> argparse.ArgumentParser:
+    """Every flag this tool takes. SEPARATE FROM main() so the help text is testable.
 
-    ruff's C901 took this to 12 when it held the banner, the discovery report, the dry
-    run and the ask loop inline, and rule 12 reads that as orchestration having swallowed
-    decisions: "the fix is to extract the decision so it can be called with seeded inputs,
-    not to raise the ceiling." Each extracted piece is now callable with a seeded dict,
-    which is what lets the output be asserted on without a terminal.
+    It was inline until 2026-10-12, and the reason it moved is a sentence somewhere
+    else: regtest/daemons.GRC_CREDENTIALS_ARE_PER_NETWORK now tells an operator to run
+    `configure_env.py --read-daemon-confs --read-gridcoin-conf --conf GRC=<path>`, and a
+    remedy naming a flag that does not exist is the wrong-comment bug in the one
+    sentence somebody acts on while already stuck on a 401. The gate that stops that is
+    tests/test_swap_readiness.test_the_401_guidance_recommends_a_check_that_answers_the_right_question(),
+    which greps this parser's own help -- and it could not be written while the parser
+    only existed inside a function that also writes .env.
+
+    credential_check.py already had build_parser() for the same reason. Two tools whose
+    flags are named in prose, one spelling of "where the flags live" (rule 8).
     """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--apply", action="store_true",
@@ -1919,10 +2078,21 @@ def main() -> int:
               "read and not shown. Gridcoin needs --read-gridcoin-conf as well; see its hazard."),
     )
     parser.add_argument(
+        "--conf", metavar="ASSET=PATH", action="append", default=[], dest="conf_paths",
+        help=("The conf file a daemon ACTUALLY read, for one chain. Repeatable. An override is "
+              "the whole list for that chain -- there is no fallback behind it. Needed whenever "
+              "a daemon was started with a -datadir that is not the conventional one, which on "
+              "this host is every Gridcoin daemon: the credentials live in that datadir's "
+              "`testnet/` subdirectory and differ from the mainnet file. The daemon prints "
+              "`Using data directory <datadir>/testnet` in its own startup log."),
+    )
+    parser.add_argument(
         "--read-gridcoin-conf", action="store_true",
         help=("Also read Gridcoin's credentials. SEPARATE because the hazard differs in kind: "
-              "~/.GridcoinResearch/gridcoinresearch.conf is shared by mainnet and testnet, and a "
-              "Gridcoin mainnet wallet is typically a live staking wallet. Requires "
+              "~/.GridcoinResearch/gridcoinresearch.conf belongs to the wallet on the DEFAULT "
+              "datadir, and a Gridcoin mainnet wallet is typically a live staking wallet. Pair it "
+              "with --conf GRC=<your datadir>/testnet/gridcoinresearch.conf, which is where a "
+              "testnet daemon's credentials live and where they differ. Requires "
               "--read-daemon-confs."),
     )
     parser.add_argument(
@@ -1945,6 +2115,19 @@ def main() -> int:
               "the overlay's own required variable is unset, because compose would then fail every "
               "command in the project rather than just that chain's payout."),
     )
+    return parser
+
+
+def main() -> int:
+    """Discover, ask, write. ORCHESTRATION ONLY -- every decision is in a function above.
+
+    ruff's C901 took this to 12 when it held the banner, the discovery report, the dry
+    run and the ask loop inline, and rule 12 reads that as orchestration having swallowed
+    decisions: "the fix is to extract the decision so it can be called with seeded inputs,
+    not to raise the ceiling." Each extracted piece is now callable with a seeded dict,
+    which is what lets the output be asserted on without a terminal.
+    """
+    parser = build_parser()
     args = parser.parse_args()
 
     secrets = secret_names()
@@ -1975,17 +2158,19 @@ def main() -> int:
     # write -- a second path for them would be a second chance to print one.
     if args.read_daemon_confs:
         say("  READING CREDENTIALS FROM EACH DAEMON'S OWN CONF")
-        from_confs = credentials_from_confs(discovered, already, gridcoin=args.read_gridcoin_conf)
+        stated, conf_refusals = stated_confs(args.conf_paths)
+        say_stated_confs(stated, conf_refusals)
+        from_confs = credentials_from_confs(
+            discovered, already, gridcoin=args.read_gridcoin_conf, stated=stated,
+        )
         for variable, (_value, why) in sorted(from_confs.items()):
             say(f"    {variable:26} <- {why}")
         if not from_confs:
             say("    (none)  <- nothing was read; every line above says why")
         discovered.update(from_confs)
         say("")
-    elif args.read_gridcoin_conf:
-        say("  --read-gridcoin-conf DOES NOTHING ON ITS OWN, so nothing was read. Pass it WITH")
-        say("  --read-daemon-confs, or neither.")
-        say("")
+    elif unused_flags := inert_read_flags(args):
+        say_inert_read_flags(unused_flags)
 
     values = {name: value for name, (value, _why) in discovered.items() if not already.get(name)}
     # `name not in values` IS THE THIRD CLAUSE AND IT WAS MISSING, which produced output
