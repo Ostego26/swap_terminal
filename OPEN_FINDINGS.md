@@ -1284,6 +1284,63 @@ wrote. **CLAUDE.md's rule 18 count is wrong today and should be corrected to thi
 measurement when that lands**, in the same self-correcting style the file already
 uses twice.
 
+### 25. A report named a variable that does not exist, and my own test's `or` let it through — CLOSED
+
+**2026-10-12.** `credential_check.py` answered the GRC 401 completely on its first real
+run -- `rpcuser DIFFERENT`, `rpcpassword DIFFERENT`, which is sufficient on its own --
+and the line telling the operator **what to change** named a variable this tree does not
+read:
+
+    rpcpassword     DIFFERENT  <- the RPC password: GRC_RPC_PASSWORD vs rpcpassword in that file
+
+`config.py` reads `_env("GRC_RPC_PASS", "")`. An operator who exported the printed name
+would have changed nothing, re-run, seen the same 401, and had **no reason to doubt the
+name** -- the diagnostic that was right about the cause was wrong about the remedy, which
+is the worse of the two places to be wrong.
+
+**The construction was `f"{asset}_RPC_{verdict.env_key.upper()}"`** over the `Config.RPC`
+dict key `password`. It is wrong for all three Bitcoin-derived chains for one reason: the
+variable is `PASS` and the dict key is `password`.
+
+**This is the 2026-09-26 incident a second time.** `registry.why_unconfigured()`'s own
+docstring records it -- the operator's value sat under `GRC_TESTNET_RPC_PASS` while a
+message named a different variable -- and the fix then was to stop deriving names by
+convention and put them in `_REQUIRED_SETTINGS`. A derivation-by-convention grew back
+**four lines from the table that exists to stop it**, in a file written the same week.
+
+`chains/registry.setting_variable(asset, key)` is now the only way to ask that table for
+one key's name, `missing_settings()` reads through it so there is one derivation rather
+than two readers of the same tuple, and
+`tests/test_offline_reason_names_the_variables.py` already greps `config.py` for every
+name in it -- so a rename there fails a test. A constructed name had no test that could
+fail.
+
+**AND MY OWN TEST LET IT THROUGH, which is the more useful half:**
+
+    assert "GRC_RPC_PASSWORD" in printed or "GRC_RPC_PASS" in printed
+
+An `or` over the right name and the wrong one passes on either, so it asserted only that
+**some** name was printed. A disjunction between a correct value and an incorrect one is
+not a check, it is the shape of a check -- and it was written in the same commit as the
+code it failed to check, by someone who had just read `config.py` to get the name right.
+
+The replacement asserts both separately, and **the absence assertion is the one doing the
+work**: `GRC_RPC_PASS` is a substring of `GRC_RPC_PASSWORD`, so pinning the right name
+without excluding the wrong one would have let the identical defect through again. Proven
+by reverting the fix: the test fails with `'GRC_RPC_PASSWORD' is contained here`.
+
+**What it cost and what it did not.** Nothing moved: the report prints verdicts only and
+that constraint held throughout -- no value from either side reached the output, on this
+path or any other. What it cost was the remedy, which is the whole output of a
+diagnostic.
+
+**Still the operator's, and the only thing left on the GRC 401:** setting `GRC_RPC_USER`
+and `GRC_RPC_PASS` to match the testnet conf. `configure_env.py --read-daemon-confs
+--read-gridcoin-conf --conf GRC=<the daemon's datadir>/testnet/gridcoinresearch.conf
+--apply` does it on their host without printing either value; `--conf` was added in the
+same pass because without it that tool could only ever have read the default datadir's
+file, which is a different wallet.
+
 ### 24. Finding 6b happened three more times, in my own commits, on 2026-10-12
 
 **The mechanism was built and I went around it.** Finding 6b records three commit
@@ -1433,6 +1490,8 @@ number (rule 4).
 | C24 | `choices=("status", "up", "down")` and the dispatch dict were two hand-written spellings of the action list, 26 lines apart. Nothing had failed because nobody had yet added an action to one and not the other — rule 8's "they agree on the day they are written". `choices` is now derived from `ACTIONS` | `this commit` |
 | C19 | `up` step 7 could never read the endpoint it asks. `/api/admin/chains` has always answered with an envelope (`probed_at`, `adapters_configured`, `probes_attempted`, `chains`) and `static/admin.js:107` has always read `data.chains`; the host-side reader expected the rows to BE the body, so its first live run printed `COULD NOT ASK ... got dict, which is what an error page parses to` on a WORKING probe and sent the operator looking for an error page that does not exist. Four pure tests were green throughout because every one fabricated the body it tested against — the same defect as `3e41ad1`, one file over. Builder and extractor now share `CHAIN_PROBE_ROWS_KEY`; the test helper builds through the real producer; a behavioral test feeds the route's own body to the reader | `this commit` |
 | C20 | `swap_stack.py:731` carried an unsuppressed `S310` on `HEAD` — a lint error I committed. The comment beside it claimed "the URL is never input", true of both callers and not a constraint: a third caller passing `file:///` would have been read off local disk with the comment still reading true. Now a guard, so the `noqa` is backed by the line above it | `this commit` |
+| C21 | `credential_check.py` named `GRC_RPC_PASSWORD` where this tree reads `GRC_RPC_PASS` — the one line in the report that says what to change, built by f-string from a dict key four lines from the table that owns the name. Finding 25, and the 2026-09-26 incident a second time | `this commit` |
+| C22 | My own test for C21 asserted `"GRC_RPC_PASSWORD" in printed or "GRC_RPC_PASS" in printed` — an `or` over the right name and the wrong one passes on either, so it checked only that some name was printed. The right name is also a SUBSTRING of the wrong one, so the absence assertion is the only one that discriminates | `this commit` |
 | C1 | Candid links pointed at the default identity's wallet canister | `4d82caf` |
 | C2 | No output said which commit produced it | `697c1db` |
 | C3 | Four canister lookups announced as three | `764ec96` |
