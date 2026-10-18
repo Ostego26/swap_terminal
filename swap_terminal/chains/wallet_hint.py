@@ -34,7 +34,6 @@ from pathlib import Path
 # WHAT THIS CHAIN ACTUALLY HAS. See the listing_rpc check below for the wrong
 # advice this removed (a `createwallet` suggestion on a daemon with no such method).
 from chains import rpc_matrix
-from chains.daemon_conf import CONF_FALLBACK_NETWORK
 from regtest.daemons import CHAIN_DEFAULTS
 
 # What to CALL a wallet this suggests creating. The same name the HTLC harness
@@ -72,8 +71,40 @@ def which_wallets_are_on_disk(adapter, chain: str) -> str:
     """
     cli = CHAIN_DEFAULTS.get(chain, {}).get("cli", "")
     datadir = CHAIN_DEFAULTS.get(chain, {}).get("datadir", "")
-    network = CONF_FALLBACK_NETWORK.get(chain, "")
-    prefix = (f"{cli} -datadir={Path(datadir).expanduser()} -{network} " if cli and network else "")
+    # NO CHAIN FLAG, AND THE OPERATOR'S TERMINAL IS WHY (2026-10-18).
+    #
+    # This built `-{CONF_FALLBACK_NETWORK[chain]}` -- "regtest" for BTC and LTC -- so the
+    # command it handed over was
+    #
+    #     litecoin-cli -datadir=/home/mpjones26/regtest/ltc -regtest createwallet <name>
+    #
+    # and running it produced, from Litecoin itself:
+    #
+    #     EXCEPTION: St13runtime_error
+    #     Invalid combination of -regtest, -signet, -testnet and -chain. Can use at most one.
+    #
+    # because the conf IN that datadir already declares its chain. The 2026-10-10
+    # migration moved these daemons from regtest to TESTNET and kept the ports
+    # (OPEN_FINDINGS finding 2), so the directory is still named `regtest/ltc` while the
+    # chain in it is `test`. A hint that pastes a flag the conf contradicts does not
+    # merely mislead -- the daemon refuses to start at all.
+    #
+    # AND THIS TREE ALREADY KNEW THE TABLE WAS WRONG HERE. configure_env.py's own comment
+    # says CONF_FALLBACK_NETWORK "hardcodes regtest for BTC and LTC; the operator's
+    # litecoind answers on 19332, which is TESTNET, so a fixed 'regtest' would read the
+    # wrong section of their real conf" -- which is why configure_env derives the section
+    # instead. That knowledge sat one import away from this line.
+    #
+    # THE PORT CANNOT DECIDE IT EITHER, so this does not swap one guess for another.
+    # 19443 is Litecoin's conventional REGTEST RPC port and on this host it serves
+    # TESTNET; configure_env.CONF_SECTION_FOR_PORT says regtest for it and is wrong here
+    # for the same reason.
+    #
+    # SO IT NAMES NO CHAIN. `-datadir` plus the conf inside it determines the chain
+    # completely -- that is how the Gridcoin desk daemon is started and how this LTC
+    # daemon has to be -- and a flag can only conflict with it or silently override it.
+    # Omitting it is not a weaker hint; it is the only correct one.
+    prefix = (f"{cli} -datadir={Path(datadir).expanduser()} " if cli else "")
     # A CHAIN WITH NO MULTI-WALLET RPC GETS NO MULTI-WALLET ADVICE, checked before the
     # call rather than after it fails. Added 2026-10-12, when chains/rpc_matrix.py found
     # that listwalletdir, createwallet and loadwallet are ALL absent from Gridcoin

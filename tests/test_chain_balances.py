@@ -40,8 +40,29 @@ sys.path.insert(0, str(SOURCE.parent))
 import chain_balances  # noqa: E402 -- checked: the sys.path.insert above is what makes this importable, and moving it earlier would import the module before its own directory is on the path. Same idiom and same reason as tests/test_xrp_chain_check_units.py:28.
 import regtest_htlc_verify  # noqa: E402 -- checked: same path insert, same reason. Imported for WALLET_NAME only; it is a module-level constant and this module's import has no side effects.
 
+
 # Every RPC method this script may call. All five are reads, and getwalletinfo is
 # reached through chains/wallet_lock.encryption_state() rather than directly.
+class _RefusingAdapter:
+    """An adapter whose every call raises, which is the down-daemon case these hints
+    are written for. Narrower than the real one on purpose: `call` is all they use."""
+
+    asset = "LTC"
+
+    def call(self, *_args, **_kwargs):
+        raise ConnectionError("Connection refused")
+
+
+#: WHAT what_to_do_about_it() TAKES -- a network READING as a string, not an exception.
+#: Read off its signature after a first draft passed an exception and got
+#: `TypeError: argument of type 'ConnectionError' is not iterable`. It must contain
+#: chain_balances.NOTHING_LISTENING for the down-daemon branch to be the one taken.
+_CONNECTION_REFUSED = (
+    "unknown (getblockchaininfo: ConnectionError: HTTPConnectionPool("
+    "host='127.0.0.1', port=19443): Max retries exceeded)"
+)
+
+
 READ_ONLY_METHODS = frozenset({"getblockchaininfo", "getinfo", "getblockcount",
                                "getbalance", "getbalances", "getwalletinfo",
                                # listwalletdir READS the wallet directory. loadwallet
@@ -514,7 +535,14 @@ def test_a_daemon_that_is_NOT_RUNNING_gets_the_command_that_starts_it():
         f"a daemon that is not answering was still asked {adapter.asked}"
     )
     assert "nothing is listening" in out and "no LTC daemon is running" in out, out
-    assert "litecoind" in out and "-regtest" in out and "-daemon" in out, (
+    # `-datadir` AND `-daemon`, AND DELIBERATELY NOT A CHAIN FLAG. This required
+    # "-regtest" until 2026-10-18, so it was pinning the defect: the flag came from
+    # CONF_FALLBACK_NETWORK, which hardcodes regtest for LTC, while that datadir has run
+    # TESTNET since the 2026-10-10 migration. The operator pasted the command and
+    # Litecoin aborted -- "Invalid combination of -regtest, -signet, -testnet and
+    # -chain. Can use at most one." -- because the conf in the datadir already names its
+    # chain. A test can hold a wrong command in place as easily as a wrong sentence.
+    assert "litecoind" in out and "-datadir=" in out and "-daemon" in out, (
         f"the command that starts it is the actionable part and is absent:\n{out}"
     )
     assert "will NOT start it for you" in out, (
@@ -662,3 +690,65 @@ def test_an_unlistable_wallet_directory_still_names_a_command():
     line = wallet_hint.which_wallets_are_on_disk(_NoListing([]), "LTC")
     assert "could not list" in line and "-32601" in line, line
     assert "createwallet" in line, f"no names is not a reason to name no command:\n{line}"
+
+
+# --- no pasteable command may carry a chain flag the conf contradicts -----------
+
+
+def test_no_hint_hands_over_a_testnet_or_regtest_flag(monkeypatch):
+    """THE COMMAND THE OPERATOR PASTED, AND WHAT LITECOIN SAID BACK (2026-10-18).
+
+    swap_readiness.py printed, via chains/wallet_hint.which_wallets_are_on_disk():
+
+        litecoin-cli -datadir=/home/mpjones26/regtest/ltc -regtest createwallet <a name>
+
+    and running it produced, from Litecoin itself:
+
+        EXCEPTION: St13runtime_error
+        Invalid combination of -regtest, -signet, -testnet and -chain. Can use at most one.
+        litecoind: chainparamsbase.cpp:36 ... Assertion `globalChainBaseParams' failed.
+        Aborted (core dumped)
+
+    The conf IN that datadir already declares its chain. The 2026-10-10 migration moved
+    these daemons from regtest to TESTNET and kept both the ports and the directory name
+    (OPEN_FINDINGS finding 2), so `regtest/ltc` holds a `test` chain -- and a flag the
+    conf contradicts does not mislead, it aborts.
+
+    AND THE PORT CANNOT DECIDE IT EITHER: 19443 is Litecoin's conventional regtest RPC
+    port and serves TESTNET here. Both CONF_FALLBACK_NETWORK and
+    configure_env.CONF_SECTION_FOR_PORT say regtest for it and are wrong on this host.
+    So the assertion is that NO chain flag appears -- deriving one differently would be
+    swapping one guess for another.
+    """
+    sentences = [
+        wallet_hint.which_wallets_are_on_disk(_RefusingAdapter(), "LTC"),
+        wallet_hint.which_wallets_are_on_disk(_RefusingAdapter(), "BTC"),
+        chain_balances.what_to_do_about_it("LTC", _CONNECTION_REFUSED),
+        chain_balances.what_to_do_about_it("BTC", _CONNECTION_REFUSED),
+    ]
+
+    # QUOTING THE BANNED FLAG IS THE OTHER WAY TO FAIL THIS, and it happened on the
+    # first run: chain_balances' explanatory tail read "no -testnet or -regtest flag
+    # belongs here" and this caught its own explanation. Prose-as-code, occurrence
+    # fifteen in this tree. The sentence names no flag now -- a line that bans a flag
+    # should not spell it -- which keeps the assertion a flat substring check rather
+    # than a parse of where the command ends.
+    for sentence in sentences:
+        for flag in ("-regtest", "-testnet", "-signet", "-chain="):
+            assert flag not in sentence, (
+                f"{flag!r} is in a command an operator pastes: {sentence!r}. The conf in the "
+                f"datadir decides the chain; a flag can only conflict with it."
+            )
+
+
+def test_the_hints_still_name_the_datadir_which_is_the_part_that_decides():
+    """Dropping the flag must not drop the thing that makes the command correct.
+
+    `-datadir` plus the conf inside it determines the chain completely -- that is how
+    the Gridcoin desk daemon is started. A command without it would default to the
+    conventional directory, which on this host is a different wallet entirely.
+    """
+    sentence = wallet_hint.which_wallets_are_on_disk(_RefusingAdapter(), "LTC")
+
+    assert "-datadir=" in sentence, "the one argument that decides the chain is gone"
+    assert "createwallet" in sentence, "the command it is supposed to hand over is gone"

@@ -156,9 +156,16 @@ def what_to_do_about_it(chain: str, network: str) -> str:
         return (f"nothing is listening on that host and port, so no {chain} daemon is running there. "
                 f"Start yours, or point {chain}_RPC_PORT at the one that is.")
     datadir = Path(spec["datadir"]).expanduser()
+    # NO CHAIN FLAG -- see chains/wallet_hint.which_wallets_are_on_disk() for the
+    # measurement. The same `-{CONF_FALLBACK_NETWORK[chain]}` here produced "Invalid
+    # combination of -regtest, -signet, -testnet and -chain" on the operator's host on
+    # 2026-10-18, because the conf in that datadir declares its own chain and these
+    # daemons moved to testnet on 2026-10-10 while the directory kept its name.
     return (f"nothing is listening on that host and port, so no {chain} daemon is running there. "
             f"Start it and re-run this:  {spec['daemon']} -datadir={datadir} "
-            f"-{CONF_FALLBACK_NETWORK[chain]} -daemon    (this script will NOT start it for you)")
+            f"-daemon    (this script will NOT start it for you; the conf in that datadir "
+            f"decides the chain, so NO chain flag belongs on this line -- adding one makes two "
+            f"and the daemon refuses to start)")
 
 
 def whole_wallet_balance(adapter) -> tuple[float | None, str]:
