@@ -4,7 +4,51 @@
 # deployment does not install a test runner and a linter onto a host that holds
 # wallet RPC credentials. Install both on a development machine:
 #
-#     pip install -r swap_terminal/requirements.txt -r requirements-dev.txt
+#     pip install -r requirements.txt -r requirements-dev.txt
+#
+# THAT LINE NAMED swap_terminal/requirements.txt UNTIL 2026-11-21, AND FOLLOWING IT
+# COULD NOT PASS THIS REPOSITORY'S OWN SHIP GATE. Measured that day, in a clean venv
+# built by running exactly the command this file used to print:
+#
+#     24 failed, 5513 passed, 17 skipped
+#     regressed 24   disappeared 329   newly skipped 2   exit 1
+#
+# There are TWO runtime requirements files and they disagree. The root
+# requirements.txt declares 13 packages; swap_terminal/requirements.txt declares 11
+# and is missing xrpl-py, PyNaCl and httpx. The 329 vanish because the SOL and XRP
+# test modules guard themselves with `pytest.importorskip`, which is the correct
+# mechanism and is why nothing errored -- the suite got quietly smaller and exited 0
+# at collection. The 24 FAILURES are the half that is not merely smaller: a test
+# like test_the_XRP_PAYOUT_BLOCKER_IS_NOT_THE_RESERVE asserts WHY a payout is
+# blocked, and with the library absent the reason changes.
+#
+# THE ROOT FILE IS NAMED HERE BECAUSE IT IS ALSO WHAT EVERY IMAGE INSTALLS. Measured:
+# docker-compose.web.yml, docker-compose.icp.yml, docker-compose.grc-desk.yml and
+# docker-compose.yml all build with `context: .`, and web.Dockerfile and
+# harness.Dockerfile do `COPY requirements.txt ./` -- which resolves to the ROOT file.
+# So the old line pointed a developer at a dependency set that nothing in production
+# uses, and the two answers drifted without anything failing.
+#
+# WHY THE THREE WENT MISSING, from swap_terminal/requirements.txt's own header: that
+# list was built by "walking the AST of every .py file ... collecting every top-level
+# import". Measured 2026-11-21: base58, bech32 and ecdsa are imported at MODULE level
+# and are all declared; xrpl, nacl and httpx are imported ONLY inside functions, in
+# chains/xrp.py, chains/xrp_submit.py and chains/xrp_signing.py, and none of the three
+# is declared there. The imports are function-local on purpose, so a deployment with
+# no XRP configured refuses cleanly instead of failing at import -- and that same
+# choice made them invisible to the audit that was supposed to find them. A top-level
+# walk cannot see a dependency that is deliberately not top-level.
+#
+# tests/test_declared_dependencies_cover_every_import.py is the check that would have
+# caught it: it walks EVERY import at any nesting depth and asserts the file named in
+# the command above declares all of them.
+#
+# STILL TWO FILES, AND THAT IS THE OPERATOR'S CALL (rule 16). Consolidating them
+# changes which packages a production host installs, on a host that holds wallet RPC
+# credentials, so this change only corrects the documented path and the gate; it does
+# not reconcile the lists. swap_terminal/requirements.txt remains missing three
+# packages the application imports, and nothing installs it any more except
+# swap_terminal/README.md's own `pip install -r requirements.txt`.
 #
 # These two are what CLAUDE.md rule 12 names as the declared standard, so
 # neither is optional for anyone changing code here:
