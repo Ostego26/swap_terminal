@@ -31,6 +31,7 @@ REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "swap_terminal"))
 sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from chains import daemon_conf  # noqa: E402  path shims above
 from modules.atomic_htlc_scripts import p2sh_script_for  # noqa: E402  path shims above
 from modules.htlc_timelock import (  # noqa: E402  same
     ROLE_INITIATOR,
@@ -246,7 +247,7 @@ def test_every_refusal_says_nothing_was_funded_and_means_it():
     )
 
 
-def test_client_for_refuses_when_NO_ROUTE_addresses_the_chain_and_names_every_one():
+def test_client_for_refuses_when_NO_ROUTE_addresses_the_chain_and_names_every_one(monkeypatch, tmp_path):
     """It will not invent a credential. It will still guess a PORT -- out loud.
 
     FOUR ROUTES IN ORDER as of 2026-09-29: {ASSET}_RPC_URL, then Config.RPC's
@@ -264,6 +265,28 @@ def test_client_for_refuses_when_NO_ROUTE_addresses_the_chain_and_names_every_on
     A refusal therefore means NO route worked, including the default, and it names
     all four.
     """
+    # THE CONF ROUTE IS POINTED AT AN EMPTY DIRECTORY, because this test asserts
+    # that it did NOT supply a connection and otherwise reads whatever conf is on
+    # the machine. Measured 2026-11-21: installing the regtest daemons in this
+    # container -- writing ~/regtest/{btc,ltc}/*.conf, which the harness refuses to
+    # write itself -- made this fail within the minute, because for BTC and LTC the
+    # conf route then SUCCEEDED and "conf did not supply one" was no longer in the
+    # message. The message was right and the test was reading the host.
+    #
+    # THIRD INSTANCE OF ONE DEFECT. tests/test_chain_balances.py's `no_conf_route`
+    # fixture carries the long version and the same two-line reasoning; a reader who
+    # finds one of these must be told the other exists (rule 8). The shape is: green
+    # on a fresh checkout, red on exactly the machine an operator builds to prove a
+    # swap with regtest_htlc_verify.py -- so it fails where it matters and passes
+    # where it does not.
+    #
+    # setattr on daemon_conf, NOT setitem on CHAIN_DEFAULTS, because that dict is the
+    # same object regtest.daemons exports and mutating it would reach the harness's
+    # own config builder for the duration of the test.
+    monkeypatch.setattr(daemon_conf, "CHAIN_DEFAULTS", {
+        chain: {**spec, "datadir": str(tmp_path / chain.lower())}
+        for chain, spec in daemon_conf.CHAIN_DEFAULTS.items()
+    })
     keys = [f"{asset}_RPC_{suffix}" for asset in ASSETS
             for suffix in ("PASS", "URL", "PORT", "USER", "HOST")]
     saved = {key: os.environ.pop(key, None) for key in keys}

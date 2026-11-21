@@ -1146,7 +1146,48 @@ def test_a_stated_conf_expands_a_tilde_and_takes_the_last_word_of_a_path():
     assert stated["LTC"] == pathlib.Path("/spaced/path.conf")
 
 
-def test_the_missing_conf_message_names_every_path_it_looked_in(env_file, monkeypatch, capsys):
+@pytest.fixture
+def no_harness_conf(monkeypatch, tmp_path):
+    """Point the HARNESS conf candidate at a directory that does not exist.
+
+    conf_candidates() returns TWO paths per chain -- the conventional one from
+    DAEMON_CONFS and the harness one from regtest.daemons.CHAIN_DEFAULTS -- so a test
+    that patches only the first still reads whatever the second finds on the real
+    machine. Measured 2026-11-21: installing the regtest daemons in this container wrote
+    ~/regtest/{btc,ltc}/*.conf (which the harness refuses to write itself), and two tests
+    here went red within the minute:
+
+        assert '/nowhere/conventional/bitcoin.conf' in '    BTC: /root/regtest/btc/
+        bitcoin.conf: [regtest] is the only BTC network section in this conf; port 0
+        does not name a network on its own'
+
+    THE OUTPUT WAS CORRECT. A conf really was there and really was read; the tests were
+    asserting a property of the host. Both were green on a fresh checkout and red on
+    exactly the machine an operator builds in order to prove a swap with
+    regtest_htlc_verify.py -- failing where it matters and passing where it does not.
+
+    FIFTH AND LAST INSTANCE OF ONE DEFECT, and the count is the point (rule 19: when you
+    find N, fix all N). The same shape broke two tests in tests/test_chain_balances.py,
+    whose `no_conf_route` fixture is this one's sibling -- that one empties the route
+    entirely because those tests assert a chain is UNCONFIGURED, where these two assert
+    on the search's own report and so need the candidate to stay in the list.
+
+    RETURNS THE PATCHED MAPPING, because a caller that asserts the harness path was NAMED
+    has to be told which path that now is: reading the unpatched module-level
+    CHAIN_DEFAULTS would compare against the real path while configure_env looked at this
+    one, which is a test that passes for the wrong reason on this host and fails on a
+    host where ~/regtest does not exist.
+    """
+    absent = tmp_path / "no-such-datadir"
+    empty = {
+        chain: {**spec, "datadir": str(absent / chain.lower())}
+        for chain, spec in CHAIN_DEFAULTS.items()
+    }
+    monkeypatch.setattr(configure_env, "CHAIN_DEFAULTS", empty)
+    return empty
+
+
+def test_the_missing_conf_message_names_every_path_it_looked_in(no_harness_conf, env_file, monkeypatch, capsys):
     """MUTATION: name only the first candidate.
 
     An operator told "no conf at ~/.bitcoin/bitcoin.conf" goes and creates one there. The
@@ -1162,7 +1203,10 @@ def test_the_missing_conf_message_names_every_path_it_looked_in(env_file, monkey
     printed = capsys.readouterr().out
 
     assert "/nowhere/conventional/bitcoin.conf" in printed
-    harness = pathlib.Path(CHAIN_DEFAULTS["BTC"]["datadir"]).expanduser() / CHAIN_DEFAULTS["BTC"]["conf_name"]
+    # THE PATCHED MAPPING, not the module-level one: no_harness_conf redirects the harness
+    # candidate, and comparing against the real ~/regtest path would assert on this host.
+    spec = no_harness_conf["BTC"]
+    harness = pathlib.Path(spec["datadir"]).expanduser() / spec["conf_name"]
     assert str(harness) in printed, "the harness path was not named, so half the search is invisible"
 
 
@@ -1407,7 +1451,7 @@ def test_a_conf_reading_flag_without_the_read_does_nothing_and_names_itself(
     assert "NO CONF WAS OPENED" in printed
 
 
-def test_a_missing_conf_is_a_reported_result_not_a_crash(tmp_path, env_file, monkeypatch, capsys):
+def test_a_missing_conf_is_a_reported_result_not_a_crash(no_harness_conf, tmp_path, env_file, monkeypatch, capsys):
     """The operator's BTC case exactly: no conf, and bitcoind not running.
 
     A configuration tool that raised here would be unusable on precisely the host that
