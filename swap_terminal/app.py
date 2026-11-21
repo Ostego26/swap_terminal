@@ -232,16 +232,95 @@ def create_app() -> Flask:
     app.jinja_env.filters["coin"] = coin_amount_text
 
     app.teardown_appcontext(close_db)
-    # routes/ui.py owns the customer pages (`/`, `/swap/<id>`) and
-    # routes/admin.py owns the read-only operator surface (`/admin`). They are
-    # separate blueprints rather than one "pages" module because the two have
-    # different audiences and different exposure: see routes/admin.py's header
-    # for the authentication question, which is named rather than solved.
+    # routes/ui.py owns the per-swap customer pages -- `/swap-lookup`,
+    # `/swap/<id>` and `/swap/<id>/fragment`, which is every rule on this
+    # blueprint and nothing else -- and routes/admin.py owns the read-only
+    # operator surface (`/admin`). They are separate blueprints rather than one
+    # "pages" module because the two have different audiences and different
+    # exposure: see routes/admin.py's header for the authentication question,
+    # which is named rather than solved.
+    #
+    # THIS SAID ui.py OWNS "(`/`, `/swap/<id>`)" UNTIL 2026-11-21, and `/` has
+    # been routes/atm.py's since 9eff792 (2026-10-07). Corrected in the same pass
+    # as the comment below it, which was stale from the same commit and in the
+    # same direction: both were written while ui.py still had an index() at `/`,
+    # and neither was revisited when that view was deleted. Two wrong sentences
+    # four lines apart, about the same move, is what rule 16 means by a wrong
+    # comment being a bug -- a reader looking for who serves the landing page
+    # would have been sent to the wrong file by either one.
     app.register_blueprint(ui_bp)
-    # THE ATM FLOW, at /atm. It will become / in its own commit (143 tests across
-    # five files pin the current customer page, and one diff that both adds this
-    # and deletes that evidence leaves no way to tell a wizard bug from a test
-    # deletion). Registered after ui_bp so url_for('ui.index') keeps resolving.
+    # THE ATM FLOW, AND IT IS AT `/` -- the customer's landing page, GET and POST
+    # (routes/atm.py::start and ::advance).
+    #
+    # THIS COMMENT SAID SOMETHING ELSE, AND EVERY CLAUSE OF IT WAS WRONG.
+    # Corrected 2026-11-21; kept as a correction rather than overwritten because
+    # the drift is the point (rule 1). It read:
+    #
+    #     THE ATM FLOW, at /atm. It will become / in its own commit (143 tests
+    #     across five files pin the current customer page, and one diff that both
+    #     adds this and deletes that evidence leaves no way to tell a wizard bug
+    #     from a test deletion). Registered after ui_bp so url_for('ui.index')
+    #     keeps resolving.
+    #
+    # `/atm` has been registered nowhere since 9eff792 (2026-10-07), the commit
+    # that moved this flow to `/` and deleted routes/ui.index() and
+    # templates/index.html with it -- hours after b4eb3e67 (2026-10-07) wrote the
+    # sentence above. So the split-commit plan it describes in the future tense is
+    # spent, and the half still worth knowing -- why the flow staged at `/atm`
+    # first, and which of those 143 tests moved rather than died -- is in
+    # routes/atm.py's own header, where one copy of it lives instead of two
+    # (rule 8).
+    #
+    # THE REASON GIVEN FOR THE ORDER IS GONE, AND IT NEVER HELD IN THE FIRST
+    # PLACE. Three measurements, taken 2026-11-21 against this tree:
+    #
+    #   `ui.index` DOES NOT EXIST. routes/ui.py registers exactly three rules --
+    #   ui.swap_lookup (/swap-lookup), ui.swap_page (/swap/<swap_id>) and
+    #   ui.swap_fragment (/swap/<swap_id>/fragment) -- and url_for('ui.index')
+    #   raises werkzeug.routing.BuildError ("Did you mean 'ui.swap_page'
+    #   instead?"). Nothing asks for it either: every occurrence of the string
+    #   `ui.index` in the tree is prose recording the deletion -- this comment,
+    #   routes/atm.py and stack_authority.py -- and not one of them is a
+    #   url_for() or an endpoint reference. Checked by grepping the NAME across
+    #   the whole tree including templates/, not the import graph (rule 2); the
+    #   count is deliberately not stated here, because this block is one of the
+    #   hits and would falsify its own number (rule 3).
+    #
+    #   THE ORDER DECIDES NOTHING TODAY. Registering atm_bp BEFORE ui_bp instead
+    #   of after yields a url map identical to the one create_app() builds here:
+    #   23 rules, the same path, endpoint and method set on every one of them,
+    #   the same url_for() output for each, and the same endpoint for every path
+    #   tried (/, /swap-lookup, /swap/<id>, /swap/<id>/fragment,
+    #   /swap/<id>/address-proof, /admin, /admin/controls, /api/health,
+    #   /static/<file>). That is because no rule string in this application is
+    #   shared by two blueprints -- the only three registered twice are the
+    #   GET/POST pairs inside ONE blueprint each (`/` is atm.start and
+    #   atm.advance, `/swap/<id>/address-proof` is grc_login's two, and
+    #   `/admin/controls` is kill_switch's two) -- and because no blueprint here
+    #   declares a url_prefix, a template_folder, a static_folder, or any
+    #   app-level hook (before_app_request, app_errorhandler,
+    #   app_context_processor), which are the other things registration order
+    #   could reach.
+    #
+    #   AND THE MECHANISM WAS NAMED WRONG EVEN ON 2026-10-07. url_for() builds
+    #   from the endpoint's OWN rule, so it cannot stop resolving because another
+    #   blueprint registered first. Measured in both orders with the rules the
+    #   tree actually had that day -- ui at `/` as ui.index, atm at `/atm` -- GET
+    #   / reached ui.index and url_for('ui.index') returned '/' either way,
+    #   because `/` and `/atm` never collided at all. What registration order can
+    #   break is DISPATCH, and only between two rules carrying the same path and
+    #   method: with both blueprints forced onto `/`, url_for('ui.index') STILL
+    #   returned '/' and it was GET / that changed hands to atm.start.
+    #
+    # THE LINE THEREFORE STAYS EXACTLY WHERE IT IS. This is a comment fix, not a
+    # reordering: there is nothing left to preserve by the order and nothing to
+    # win by changing it, and app.py is the application factory, where a reader is
+    # entitled to assume the sequence was deliberate until told otherwise. What a
+    # future reader needs to know is the conditional: if a second rule for `/` is
+    # ever added to another blueprint, THAT is the moment this order starts
+    # deciding which view answers the customer's landing page -- and the fix then
+    # is one rule for one path (rule 2), not a chosen registration order holding
+    # a collision at bay silently.
     app.register_blueprint(atm_bp)
     app.register_blueprint(admin_bp)
     # routes/grc_login.py owns the address-proof panel: a customer proves they
