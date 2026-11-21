@@ -25,7 +25,7 @@ import pathlib
 import sys
 
 import pytest
-from chains import wallet_hint
+from chains import daemon_conf, wallet_hint
 from chains.daemon_network import CHAIN_TEST_NETWORKS
 from conftest import TranscriptConsole
 from regtest.daemons import CHAIN_DEFAULTS
@@ -345,7 +345,55 @@ def test_an_unreadable_second_opinion_says_so_rather_than_claiming_agreement():
     )
 
 
-def test_an_unconfigured_chain_names_the_variable_that_is_missing():
+@pytest.fixture
+def no_conf_route(monkeypatch, tmp_path):
+    """Point the conf fallback at an EMPTY directory, so "neither route" is true.
+
+    =========================================================================
+    THESE TWO TESTS READ THE REAL HOST AND FAILED THE MOMENT REGTEST EXISTED
+    =========================================================================
+
+    Measured 2026-11-21. Both assert that a chain with no `<ASSET>_RPC_*` in the
+    environment is reported as having NEITHER route, and both read whatever conf
+    happens to be on the machine: chains/daemon_conf.conf_fallback_settings()
+    resolves `CHAIN_DEFAULTS[chain]["datadir"] / conf_name` with no seam, so on
+    this box they read /root/regtest/ltc/litecoin.conf.
+
+    Installing the regtest daemons in this container -- writing the two confs the
+    harness refuses to write itself -- made both tests fail within the minute:
+
+        assert 'LTC_RPC_*' in '    LTC: read rpcpassword, rpcport, rpcuser from
+        /root/regtest/ltc/litecoin.conf (top level plus [regtest]); ...'
+
+    The message was CORRECT. The conf route genuinely existed, so naming only the
+    environment route would have been the understatement the test was written to
+    catch. The test was wrong, not the code: it asserted a property of the HOST
+    while claiming to assert one of the reader.
+
+    AND THE FAILURE MODE IS THE EXPENSIVE DIRECTION. A test that passes only on a
+    machine where the regtest harness has never been set up is green on a fresh
+    checkout and red on exactly the machine an operator uses to prove a swap --
+    which is what this repository asks them to build (regtest_htlc_verify.py). It
+    would have failed on the operator's new box for the same reason, and read as a
+    regression in the balance reader rather than as a test that measured the wrong
+    thing.
+
+    tmp_path IS EMPTY AND STAYS EMPTY -- no conf is written into it. That is the
+    point: the fixture does not simulate "the conf said no", it makes the file
+    genuinely absent, which is the state the two tests describe.
+    """
+    empty = {
+        chain: {**spec, "datadir": str(tmp_path / chain.lower())}
+        for chain, spec in CHAIN_DEFAULTS.items()
+    }
+    # setattr ON daemon_conf, NOT setitem on CHAIN_DEFAULTS, because that dict is
+    # the SAME OBJECT regtest.daemons exports -- mutating it would reach the
+    # harness's own config builder for the duration of the test.
+    monkeypatch.setattr(daemon_conf, "CHAIN_DEFAULTS", empty)
+    return tmp_path
+
+
+def test_an_unconfigured_chain_names_the_variable_that_is_missing(no_conf_route):
     """Rule 14: "no adapter" is useless; which environment variable is actionable."""
     recorder = TranscriptConsole()
     spendable = chain_balances.report_chain(recorder, "BTC", {})
@@ -482,7 +530,7 @@ def test_every_chain_with_a_conf_fallback_has_a_datadir_in_the_harness_table():
         assert CHAIN_DEFAULTS[chain]["conf_name"], f"{chain} has an empty conf name"
 
 
-def test_a_chain_with_neither_route_names_BOTH_of_them():
+def test_a_chain_with_neither_route_names_BOTH_of_them(no_conf_route):
     """Rule 14: the failure line has to name every route that was tried.
 
     It said only "LTC_RPC_* in the environment" after the conf route existed,

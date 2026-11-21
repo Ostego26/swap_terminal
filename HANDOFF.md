@@ -58,9 +58,59 @@ Every swap today signs with a LOCAL key on the operator's host:
 | XRP | `ST_ADAPTOR_FUNDING_SEED` in the environment |
 | ICP | the desk dfx identity, **inside the replica container only** |
 
-`chains/icp.py` has `can_spend = False` because the process calls with
-`--identity anonymous`: reads work, `transfer` debits the caller. Moving custody to
-canister-derived addresses is armed state and the operator's call;
+> **CORRECTED 2026-11-21, in place and with the old claim kept, because the drift
+> is the point (rule 1).** This passage read, as written on 2026-10-10:
+>
+> > `chains/icp.py` has `can_spend = False` because the process calls with
+> > `--identity anonymous`: reads work, `transfer` debits the caller.
+>
+> **That was true as written from 2026-10-06 until 2026-10-11 and is FALSE AT
+> HEAD.** `can_spend` is no longer a literal and no longer says anything about
+> `--identity anonymous`. What settles it, measured at HEAD:
+>
+> - `swap_terminal/chains/icp.py:740` — `self.can_spend = payout_identity_is_present()`,
+>   derived per instance from the one variable `ICP_PAYOUT_IDENTITY`
+>   (`swap_terminal/chains/icp_payout_identity.py:113` and `:131`, read from
+>   `os.environ` at call time, returning a bool and never a value).
+>   `swap_terminal/chains/icp.py:743` sets `payout_refusal` to `""` when armed.
+> - `swap_terminal/chains/icp.py:662` still carries `can_spend = False`, but only as
+>   the fail-closed CLASS-LEVEL fallback, exactly as `chains/solana.py` and
+>   `chains/xrp.py` do — for anything that reads the class without constructing an
+>   adapter. Reading it as the verdict is the mistake this correction exists to stop.
+> - `swap_terminal/chains/registry.py:279-291` passes `payout_identity()` into
+>   `dfx_transport(...)` as its fourth argument. That argument is the whole fix: the
+>   parameter was added 2026-10-07 for the minting-account top-up, one day after ICP
+>   landed, and this call site went on passing three, so the transport defaulted to
+>   unsigned while `send_to_address()` was already complete. Commit `69568a8`,
+>   2026-10-11.
+> - `--identity anonymous` survives, but as the meaning of an EMPTY identity under
+>   the URL transport only (`swap_terminal/chains/icp.py:494`); under the compose
+>   transport empty means no `--identity` flag at all (`:504`), which selects the
+>   replica container's own default — the identity a `* -> ICP` payout must sign
+>   with. Neither is a hardcoded verdict any more.
+>
+> **WHY THIS CORRECTION IS NOT COSMETIC.** A reader trusting the old sentence
+> concludes ICP CANNOT pay out when it can — with `ICP_PAYOUT_IDENTITY` exported
+> (`docker-compose.web.armed-icp.yml` sets it to `default` and bind-mounts the
+> matching store read-only), the adapter is armed and the terminal offers ICP as a
+> payout destination. So the old sentence sends that reader past the arming check on
+> a chain that is live, or back to re-fix a bug that is fixed. That is the
+> wrong-comment bug rule 16 treats as seriously as wrong code, sitting in the
+> document a reader opens first.
+>
+> **WHAT HAS NOT CHANGED, and it is the half still owed a proof (rule 17): NO ICP
+> PAYOUT HAS EVER BEEN SIGNED OR BROADCAST BY THIS CODE, on any network.**
+> `can_spend` is the ARMING decision — whether the process believes it can pay, and
+> what it says when it cannot — and an identity NAME being present is not
+> correctness: a name with no PEM behind it, or a PEM whose principal is not
+> `ICP_OWNER_PRINCIPAL`, reads armed, reaches the ledger and has no coins, failing
+> after a deposit has been taken (`swap_terminal/chains/icp_payout_identity.py:131`
+> states that gap rather than papering over it). The ledger semantics in the old
+> sentence also still hold: `transfer` debits the CALLER and reads need no identity,
+> which is why `ICP -> *` worked while `* -> ICP` did not. What was wrong was the
+> conclusion that no identity could be supplied, not the arithmetic.
+
+Moving custody to canister-derived addresses is armed state and the operator's call;
 `icp_custody_addresses.py` exists read-only so the two columns can be compared
 first.
 

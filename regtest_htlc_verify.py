@@ -61,9 +61,51 @@ the day it was written: 8b refused `[policy] code=-26 non-mandatory-script-
 verify-flag (Locktime requirement not satisfied)`, 9a broadcast
 98a5c5716ab0577d..., and 9b skipped.
 
-GRCClient still has no refund, which is named at that client's own redeem site:
-Gridcoin has no node in this harness, and whether its interpreter even enforces
-OP_CHECKLOCKTIMEVERIFY has never been measured here.
+GRC WAS NAMED HERE AS THE REMAINING GAP, AND BOTH HALVES OF THAT SENTENCE ARE
+NOW FALSE. Until 2026-11-21 this paragraph read: "GRCClient still has no refund,
+which is named at that client's own redeem site: Gridcoin has no node in this
+harness, and whether its interpreter even enforces OP_CHECKLOCKTIMEVERIFY has
+never been measured here." It went stale in two steps, and the comment it cited
+as its authority was itself corrected on 2026-10-11 -- so the stale claim in this
+file outlived the stale claim it pointed at, which is rule 8's defect with the
+pointer still attached.
+
+  2026-09-27  GRCClient.refund_contract() was added -- keyword-only, over the
+              same modules/htlc_rpc.broadcast_refund() as the other two clients.
+              swap_terminal/modules/atomic_grc_client.py:874.
+  2026-09-29  CLTV was measured on Gridcoin, AND NOT BY THIS HARNESS. The tool
+              is grc_htlc_verify.py, run against the operator's Gridcoin TESTNET
+              daemon (`OK=11 FAIL=0 SKIP=0`), because Gridcoin has no regtest at
+              all and so cannot be stood up in a container the way bitcoind and
+              litecoind are below. Three spends of ONE outpoint
+              `a82a91327cde9642:0` under ONE 94-byte redeem script settle it:
+              step 6 refused a FINAL refund -- nLockTime 3296544 at tip 3296544
+              against a script locktime of 3296548 -- whose txid is
+
+      23148431f9d2be987d881fdeec98b92b2ba83d0ab7993805869a3d61d953fcfe
+
+              kept on one line because a txid wrapped mid-hex cannot be grepped
+              or pasted into an explorer. Step 8 then ACCEPTED the same
+              outpoint, script, signer and fee at nLockTime
+              3296548, `ee9dc216bf055b22...`, through the real
+              refund_contract() rather than a harness copy. At CONSENSUS level
+              rather than relay policy: the daemon logged `ConnectInputs() :
+              23148431f9 VerifySignature failed`, which Gridcoin's
+              `validation.cpp:656-669` reaches only after the spend has failed
+              re-verification under consensus flags ALONE. Graded in
+              docs/branch_coverage.md:49-50, and §5's gap b -- "the HTLC refund
+              branch has never run on Gridcoin" -- is struck DONE at :250.
+
+WHAT IS STILL TRUE IS THE ONLY REASON A GRC SENTENCE BELONGS IN THIS FILE AT
+ALL, AND IT IS A FACT ABOUT THIS HARNESS AND NOT ABOUT GRIDCOIN: --chain takes
+`btc`, `ltc` or `both`, Gridcoin has never been an option, and nothing added
+above changes that. docs/branch_coverage.md:48 still grades "refund after expiry,
+GRC" as NONE inside the section that describes THIS file, on exactly that ground;
+the GRC rows at :49-50 are grc_htlc_verify.py's evidence, not this harness's, and
+reading them as a green run here would be the overclaim this paragraph has
+already made once in the other direction. What remains unestablished anywhere is
+the PRODUCTION locktime: grc_htlc_verify.py used tip+6 and says so, where
+contract_locktime("GRC", ROLE_INITIATOR, tip) returns tip+1920.
 
 WHERE THE TEST HAS TO RUN, WHICH IS NOT OBVIOUS AND COST A ROUND TRIP.
 
