@@ -225,7 +225,86 @@ files side by side after the fix.
   returns secret_hash        no                  yes                 yes                 BTC
   rpc_call catches           Request/Value/all   RequestException    Request/Value/all   LTC
   balance fallback guarded   yes                 NO try around it    yes                 LTC
-  default creds in __main__  no                  YES, a literal      no                  LTC
+  default creds in __main__  ---- none: all three read os.environ[...] and refuse BY NAME (LTC's literal went 2026-11-21) ----
+  __init__ arity             3                   3                   4 (+passphrase)     GRC (wallet_passphrase; all four call sites pass 3, so it always defaults)
+  appends /wallet/<name>     YES                 no                  no                  BTC (BTC_RPC_WALLET, default LegacyWallet)
+  creds check spelling       if not a or not b   if not all([...])   if not a or not b   LTC (same outcome; message word order differs too)
+  extra class in the file    none                none                _WalletRpc          GRC (an RPCAdapter-convention shim, with no counterpart to diff it against)
+
+THE LAST FOUR ROWS WERE ADDED 2026-11-21 AND ALL FOUR HAD BEEN TRUE SINCE THESE
+FILES WERE WRITTEN. They are not new divergences; they are divergences this table
+never carried, and they were found by reading the three constructors side by side
+rather than by reading this page -- which is the same way the platform fee row
+below was found to be false. A divergence table is only worth what its last
+re-measurement is worth. Measured in all three files on that date, by reading the
+code and not this header:
+
+  __init__ arity         GRCClient.__init__ takes a FOURTH parameter,
+                         `wallet_passphrase: str | None = None`, and resolves it
+                         from chains/wallet_lock.passphrase_env_var("GRC") when it
+                         is None -- None meaning "read the environment" and "" a
+                         caller stating there is no passphrase, which is a
+                         distinction its own comment explains. BTCClient.__init__
+                         and LTCClient.__init__ take three. Benign at every call
+                         site TODAY, and that was checked rather than assumed:
+                         atomic_swap.client_for() constructs through
+                         `CLIENTS[asset](url, user, password)` on each of its three
+                         routes and atomic_swap_xrp.py through
+                         `SCRIPT_CLIENTS[chain](url, user, password)`, so all four
+                         pass three positional arguments and GRC's fourth always
+                         defaults. It is in the table because a reader comparing
+                         the three constructors meets an extra parameter with no
+                         sibling, and because the day someone passes a fourth
+                         argument generically is the day the asymmetry costs
+                         something.
+  appends /wallet/<name> BTCClient.__init__ REWRITES THE URL IT WAS HANDED:
+                         `if "/wallet/" not in self.rpc_url:` it appends `/wallet/`
+                         plus os.environ.get("BTC_RPC_WALLET", "LegacyWallet").
+                         LTCClient.__init__ and GRCClient.__init__ use the URL
+                         verbatim -- `/wallet/` appears nowhere in either file.
+                         Two consequences earn the row. BTC reads an environment
+                         variable the other two do not, which is why BTC_RPC_WALLET
+                         is in the BTC client's `Reads:` header and in neither of
+                         the others. And the default names a wallet that need not
+                         exist, so one base URL and one set of credentials can work
+                         for LTC and GRC while BTC's rewritten URL points at a
+                         wallet endpoint that is not there. REASONED, NOT MEASURED
+                         (rule 17): no daemon was queried for this row, so what is
+                         established is that the URL differs between the clients,
+                         not what a given node returns for a missing wallet name.
+  creds check spelling   One rule, three spellings. BTC and GRC:
+                         `if not rpc_url or not rpc_user or not rpc_pass:` raising
+                         "Missing BTC RPC credentials." / "Missing GRC RPC
+                         credentials." LTC: `if not all([rpc_url, rpc_user,
+                         rpc_pass])` raising "LTC RPC credentials missing." Same
+                         outcome on the same inputs -- read in all three, not
+                         inferred from one -- so this is rule 8's "they agree on
+                         the day they are written" rather than a live defect. The
+                         MESSAGE is the half that already costs something: the two
+                         word orders mean an operator grepping their logs for
+                         "Missing" finds two of the three chains and not the third,
+                         and no client names WHICH of the three values was empty
+                         (the `__main__` blocks do, which is why they refuse before
+                         constructing).
+  extra class            modules/atomic_grc_client.py defines `_WalletRpc` above
+                         GRCClient. The BTC and LTC files define exactly one class
+                         each. It is a six-line forwarding shim and its own
+                         docstring says why it exists: two calling conventions live
+                         in this tree -- `call(method, *params)` for
+                         chains/base.RPCAdapter, which chains/gridcoin_wallet_lock.py
+                         is written against, and `rpc_call(method, [params])` here --
+                         and the GRC wallet unlock needs the first. It is listed
+                         because a reader diffing the three files meets it with no
+                         counterpart to compare it to, which is exactly the case
+                         rule 8 says must be named at every site rather than at one.
+
+AND THE `default creds in __main__` ROW IS NOW A MERGED ONE rather than a
+divergence, for the reason the platform fee paragraph below gives: a table that
+reports a CLOSED divergence sends somebody to reconcile two things that already
+match. It read "no / YES, a literal / no / LTC" until 2026-11-21. What closed it is
+in the LTC client's header and at its `__main__` block. What did NOT close is that
+the literal is still in this repository's git history, introduced in `e48e81e`;
+rotate-then-purge is the operator's, and rule 4 allows exactly that one rewrite.
 
 THE PLATFORM FEE ROW SAID "none / 0.25% / 0.25% / BTC (charges nothing)" UNTIL
 2026-10-11, AND IT HAD BEEN FALSE SINCE 2026-09-27. Re-measured by reading the

@@ -13,15 +13,50 @@ Writes: nothing to disk. THE CHAIN AND THE WALLET: the best-effort watch-only
 Can move funds: YES. create_contract() sends coins to a P2SH address, and
        redeem_contract() signs and broadcasts a spend that pays TWO outputs --
        the user, and a platform fee address.
-Mainnet-safe: NO. Same testnet-only script derivation as the BTC client, and
-       the default platform fee address in redeem_contract() is a testnet
-       address (a `tltc1...` literal), so on mainnet the fee output would be
-       unspendable or rejected.
+Mainnet-safe: NO. Same testnet-only script derivation as the BTC client:
+       modules/atomic_htlc_scripts.py hardcodes TESTNET version bytes, so every
+       address this client derives is a testnet address. THE SECOND REASON THIS
+       FIELD USED TO GIVE WAS STALE and is corrected here rather than dropped,
+       because the verdict did not change but one of its two supports had gone
+       (rule 16, a wrong comment is a bug). It read "and the default platform fee
+       address in redeem_contract() is a testnet address (a `tltc1...` literal),
+       so on mainnet the fee output would be unspendable or rejected". Measured
+       2026-11-21: that default was removed on 2026-09-27 -- redeem_contract()
+       calls usable_platform_fee_address("LTC"), which returns None for an unset
+       OR unusable address and means CHARGE NO FEE, and the comment at that call
+       site already records the removal. The field's own answer is unaffected;
+       the burned-fee hazard it cited is not live.
 
-THE HARDCODED CREDENTIAL IN `__main__` IS NOT A SECRET WORTH ROTATING, BUT IT
-IS A HABIT WORTH STOPPING. The block at the bottom defaults LTC_RPC_PASS to a
-literal. It is the shape that put a live GRIDCOIN_RPC_PASSWORD into this
-repository's history (rule 2).
+THE HARDCODED CREDENTIAL IN `__main__` IS GONE AS OF 2026-11-21, and the
+paragraph that described it is corrected rather than deleted because the
+remediation is NOT finished. It read: "THE HARDCODED CREDENTIAL IN `__main__` IS
+NOT A SECRET WORTH ROTATING, BUT IT IS A HABIT WORTH STOPPING. The block at the
+bottom defaults LTC_RPC_PASS to a literal. It is the shape that put a live
+GRIDCOIN_RPC_PASSWORD into this repository's history (rule 2)." The block now
+reads `os.environ[...]` and refuses by name, exactly as the BTC and GRC demo
+blocks do -- the default URL and default RPC user went with the password, since
+all three were the same defect and only one of them looks like a secret.
+
+AND THE DEFAULT URL WAS THE WORST OF THE THREE, which the paragraph above does
+not say and which is why this one was added the same day. It read
+`http://127.0.0.1:19332`, and 19332 is not this desk's litecoind -- measured
+2026-11-21 against network_target.is_external_wallet(19332), which names it "the
+operator's litecoin-qt, an EXTERNAL Litecoin wallet for sending coins into a swap
+and receiving them out of it" (this desk's own node is 19443). The block below
+BROADCASTS a real funding transaction. So a demo run with LTC_RPC_URL unset did
+not fail to connect and did not fund from the stack's wallet: it defaulted to
+funding an HTLC out of the wallet the operator uses BY HAND, with a 0.1 LTC
+amount and hardcoded counterparty addresses. The credential literal is the part
+that looks like the defect and the part git history still carries; the URL is the
+part that could have moved coins. Both are gone, and `_missing` refuses by name
+rather than defaulting, because on this path a refusal is the only safe default.
+
+WHAT IS NOT FIXED: THE LITERAL IS STILL IN GIT HISTORY, introduced in `e48e81e`
+and found there by `git log -S`. A working tree with no literal in it is not a
+repository with no literal in it, and the difference is the whole lesson of
+rule 2's `.env.bak` story. Remediation is ROTATE, THEN PURGE, and it is the
+OPERATOR'S: rule 4 allows exactly one history rewrite and this is the kind of
+reason that earns it, with the operator running the force-push themselves.
 
 FOUR DEFECTS WERE FIXED ON 2026-09-25. ALL FOUR WERE IN ALL THREE CLIENTS.
 
@@ -135,7 +170,86 @@ files side by side after the fix.
   returns secret_hash        no                  yes                 yes                 BTC
   rpc_call catches           Request/Value/all   RequestException    Request/Value/all   LTC
   balance fallback guarded   yes                 NO try around it    yes                 LTC
-  default creds in __main__  no                  YES, a literal      no                  LTC
+  default creds in __main__  ---- none: all three read os.environ[...] and refuse BY NAME (LTC's literal went 2026-11-21) ----
+  __init__ arity             3                   3                   4 (+passphrase)     GRC (wallet_passphrase; all four call sites pass 3, so it always defaults)
+  appends /wallet/<name>     YES                 no                  no                  BTC (BTC_RPC_WALLET, default LegacyWallet)
+  creds check spelling       if not a or not b   if not all([...])   if not a or not b   LTC (same outcome; message word order differs too)
+  extra class in the file    none                none                _WalletRpc          GRC (an RPCAdapter-convention shim, with no counterpart to diff it against)
+
+THE LAST FOUR ROWS WERE ADDED 2026-11-21 AND ALL FOUR HAD BEEN TRUE SINCE THESE
+FILES WERE WRITTEN. They are not new divergences; they are divergences this table
+never carried, and they were found by reading the three constructors side by side
+rather than by reading this page -- which is the same way the platform fee row
+below was found to be false. A divergence table is only worth what its last
+re-measurement is worth. Measured in all three files on that date, by reading the
+code and not this header:
+
+  __init__ arity         GRCClient.__init__ takes a FOURTH parameter,
+                         `wallet_passphrase: str | None = None`, and resolves it
+                         from chains/wallet_lock.passphrase_env_var("GRC") when it
+                         is None -- None meaning "read the environment" and "" a
+                         caller stating there is no passphrase, which is a
+                         distinction its own comment explains. BTCClient.__init__
+                         and LTCClient.__init__ take three. Benign at every call
+                         site TODAY, and that was checked rather than assumed:
+                         atomic_swap.client_for() constructs through
+                         `CLIENTS[asset](url, user, password)` on each of its three
+                         routes and atomic_swap_xrp.py through
+                         `SCRIPT_CLIENTS[chain](url, user, password)`, so all four
+                         pass three positional arguments and GRC's fourth always
+                         defaults. It is in the table because a reader comparing
+                         the three constructors meets an extra parameter with no
+                         sibling, and because the day someone passes a fourth
+                         argument generically is the day the asymmetry costs
+                         something.
+  appends /wallet/<name> BTCClient.__init__ REWRITES THE URL IT WAS HANDED:
+                         `if "/wallet/" not in self.rpc_url:` it appends `/wallet/`
+                         plus os.environ.get("BTC_RPC_WALLET", "LegacyWallet").
+                         LTCClient.__init__ and GRCClient.__init__ use the URL
+                         verbatim -- `/wallet/` appears nowhere in either file.
+                         Two consequences earn the row. BTC reads an environment
+                         variable the other two do not, which is why BTC_RPC_WALLET
+                         is in the BTC client's `Reads:` header and in neither of
+                         the others. And the default names a wallet that need not
+                         exist, so one base URL and one set of credentials can work
+                         for LTC and GRC while BTC's rewritten URL points at a
+                         wallet endpoint that is not there. REASONED, NOT MEASURED
+                         (rule 17): no daemon was queried for this row, so what is
+                         established is that the URL differs between the clients,
+                         not what a given node returns for a missing wallet name.
+  creds check spelling   One rule, three spellings. BTC and GRC:
+                         `if not rpc_url or not rpc_user or not rpc_pass:` raising
+                         "Missing BTC RPC credentials." / "Missing GRC RPC
+                         credentials." LTC: `if not all([rpc_url, rpc_user,
+                         rpc_pass])` raising "LTC RPC credentials missing." Same
+                         outcome on the same inputs -- read in all three, not
+                         inferred from one -- so this is rule 8's "they agree on
+                         the day they are written" rather than a live defect. The
+                         MESSAGE is the half that already costs something: the two
+                         word orders mean an operator grepping their logs for
+                         "Missing" finds two of the three chains and not the third,
+                         and no client names WHICH of the three values was empty
+                         (the `__main__` blocks do, which is why they refuse before
+                         constructing).
+  extra class            modules/atomic_grc_client.py defines `_WalletRpc` above
+                         GRCClient. The BTC and LTC files define exactly one class
+                         each. It is a six-line forwarding shim and its own
+                         docstring says why it exists: two calling conventions live
+                         in this tree -- `call(method, *params)` for
+                         chains/base.RPCAdapter, which chains/gridcoin_wallet_lock.py
+                         is written against, and `rpc_call(method, [params])` here --
+                         and the GRC wallet unlock needs the first. It is listed
+                         because a reader diffing the three files meets it with no
+                         counterpart to compare it to, which is exactly the case
+                         rule 8 says must be named at every site rather than at one.
+
+AND THE `default creds in __main__` ROW IS NOW A MERGED ONE rather than a
+divergence, for the reason the platform fee paragraph below gives: a table that
+reports a CLOSED divergence sends somebody to reconcile two things that already
+match. It read "no / YES, a literal / no / LTC" until 2026-11-21. What closed it is
+in the LTC client's header and at its `__main__` block. What did NOT close is that
+the literal is still in this repository's git history, introduced in `e48e81e`;
+rotate-then-purge is the operator's, and rule 4 allows exactly that one rewrite.
 
 THE PLATFORM FEE ROW SAID "none / 0.25% / 0.25% / BTC (charges nothing)" UNTIL
 2026-10-11, AND IT HAD BEEN FALSE SINCE 2026-09-27. Re-measured by reading the
@@ -667,10 +781,42 @@ class LTCClient:
 
 if __name__ == "__main__":
     try:
+        # THE SAME REFUSAL AS THE BTC AND GRC DEMO BLOCKS, in the same words and for the same
+        # reason, and it removes THE LAST LITERAL CREDENTIAL IN THIS PACKAGE. Until 2026-11-21
+        # these three arguments were `os.environ.get(name, <literal>)` with a default RPC URL
+        # (loopback, Litecoin testnet port), a default RPC user, and a DEFAULT PASSWORD spelled
+        # out in source -- deliberately not requoted here, because requoting it would leave the
+        # string in the working tree that this change exists to take out of it.
+        #
+        # Why it mattered even though the password was almost certainly never a live one: the
+        # BTC and GRC blocks read `os.environ[...]` and fail loudly, so LTC alone would silently
+        # fall back to SOMEONE'S loopback daemon and BROADCAST A REAL FUNDING TRANSACTION
+        # against it. A literal default is not a credential leak until the day the literal is
+        # real, and it is the exact shape that put a live GRIDCOIN_RPC_PASSWORD into this
+        # repository's history (rule 2) -- the module header called it "a habit worth stopping".
+        #
+        # THE LITERAL IS STILL IN GIT HISTORY. It was introduced in `e48e81e` (found with
+        # `git log -S`), and removing it from the working tree does not remove it from the
+        # objects. Remediation is ROTATE THEN PURGE and it is the operator's: rule 4 allows
+        # exactly one history rewrite, for exactly this, and the operator runs the force-push
+        # themselves.
+        #
+        # SystemExit rather than ValueError, deliberately -- it is a BaseException, so the
+        # `except Exception` at the bottom of this block does not turn the refusal back into
+        # "Error during LTC contract creation:" with the diagnosis buried inside it. The
+        # identical three lines are in modules/atomic_btc_client.py and
+        # modules/atomic_grc_client.py; rule 8, and a reader who finds one is told of the others.
+        _missing = [name for name in ("LTC_RPC_URL", "LTC_RPC_USER", "LTC_RPC_PASS")
+                    if not os.environ.get(name)]
+        if _missing:
+            raise SystemExit(
+                f"not set: {', '.join(_missing)}  <- this demo block BROADCASTS a real funding "
+                f"transaction, so it refuses rather than guessing. Export all three and re-run."
+            )
         client = LTCClient(
-            os.environ.get("LTC_RPC_URL", "http://127.0.0.1:19332"),
-            os.environ.get("LTC_RPC_USER", "litecoinrpc"),
-            os.environ.get("LTC_RPC_PASS", "litec0inPass123")
+            os.environ["LTC_RPC_URL"],
+            os.environ["LTC_RPC_USER"],
+            os.environ["LTC_RPC_PASS"]
         )
         # Replace these with valid testnet addresses and values.
         contract = client.create_contract(
