@@ -66,6 +66,7 @@ from modules.address_network import (
     P2SH_VERSIONS,
     TESTNET,
 )
+from param_ids import short_param_id
 from valid_addresses import (
     LTC_P2SH_SCRIPT_ADDRESS2,
     LTC_P2SH_TESTNET,
@@ -107,7 +108,7 @@ LTC_ADDRESS_FORMS = (
 )
 
 
-@pytest.mark.parametrize(("form", "address", "produced_by"), LTC_ADDRESS_FORMS)
+@pytest.mark.parametrize(("form", "address", "produced_by"), LTC_ADDRESS_FORMS, ids=short_param_id)
 def test_every_LTC_address_form_is_VALID_as_a_payout_destination(form, address, produced_by):
     """The payout leg. A refusal here is a customer who cannot be paid.
 
@@ -136,7 +137,7 @@ def test_every_LTC_address_form_is_VALID_as_a_payout_destination(form, address, 
     )
 
 
-@pytest.mark.parametrize(("form", "address", "produced_by"), LTC_ADDRESS_FORMS)
+@pytest.mark.parametrize(("form", "address", "produced_by"), LTC_ADDRESS_FORMS, ids=short_param_id)
 def test_every_LTC_address_form_is_VALID_as_a_deposit_address_on_testnet(form, address, produced_by):
     """The deposit leg, where the NETWORK half of the check runs as well.
 
@@ -158,7 +159,7 @@ def test_every_LTC_address_form_is_VALID_as_a_deposit_address_on_testnet(form, a
     assert not verdict.refuses, f"{form} is refused on the receive path: {verdict.why}"
 
 
-@pytest.mark.parametrize(("form", "address", "produced_by"), LTC_ADDRESS_FORMS)
+@pytest.mark.parametrize(("form", "address", "produced_by"), LTC_ADDRESS_FORMS, ids=short_param_id)
 def test_a_testnet_LTC_address_is_REFUSED_as_a_mainnet_deposit_address(form, address, produced_by):
     """The other direction, so the test above cannot be passed by accepting everything.
 

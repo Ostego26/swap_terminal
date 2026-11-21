@@ -31,6 +31,7 @@ import json
 from pathlib import Path
 
 import pytest
+from param_ids import short_param_id
 
 from swap_terminal.chains import icp as icp_module
 from swap_terminal.chains.icp import ICP_DECIMALS, ICPAdapter, ICPCallFailed
@@ -310,7 +311,7 @@ def test_the_amount_and_the_timestamp_are_carried_exactly():
     ("(variant { Err = variant { InsufficientFunds = record { balance = record { e8s = 1 : nat64 } } } })", "NOT established"),
     ("(variant { Err = variant { TxTooOld = record { allowed_window_nanos = 86_400_000_000_000 : nat64 } } })", "24h"),
     ("", "NOT established"),
-])
+], ids=short_param_id)
 def test_anything_but_a_block_index_raises_and_does_not_claim_nothing_moved(reply, needle):
     """A failed send must not assert that no funds moved, because it does not know.
 

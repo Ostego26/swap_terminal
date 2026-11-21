@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from param_ids import short_param_id
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "swap_terminal"))
@@ -137,7 +138,7 @@ def test_no_code_outside_the_registered_sites_claims_env_does_not_arrive():
     )
 
 
-@pytest.mark.parametrize("name,reason", sorted(ALLOWED.items()))
+@pytest.mark.parametrize("name,reason", sorted(ALLOWED.items()), ids=short_param_id)
 def test_every_registered_exception_is_still_a_real_file_with_a_reason(name, reason):
     """A register whose entries have gone stale is a ratchet (rule 19), not an exception."""
     assert (REPO_ROOT / name).is_file(), f"{name} is registered and does not exist"

@@ -67,6 +67,7 @@ from pathlib import Path
 
 import pytest
 from config import Config
+from param_ids import short_param_id
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
@@ -109,7 +110,7 @@ def read_default(label: str) -> int:
     return int(found.group(1))
 
 
-@pytest.mark.parametrize("label", list(THRESHOLD_SITES))
+@pytest.mark.parametrize("label", list(THRESHOLD_SITES), ids=short_param_id)
 def test_each_site_still_states_a_threshold(label):
     """The non-vacuity floor. A gate asserting an agreement is loudest when it can read.
 

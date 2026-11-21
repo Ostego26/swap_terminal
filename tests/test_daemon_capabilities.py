@@ -50,6 +50,7 @@ from chains.daemon_capabilities import (
 )
 from conftest import root_entry_point
 from modules.atomic_swapper import SUPPORTED_ASSETS
+from param_ids import short_param_id
 
 _WALLET_PATH = "multi-wallet HTTP endpoint (/wallet/<name>)"
 
@@ -632,6 +633,7 @@ def test_an_UNCLASSIFIED_failure_says_NOTHING(asset, detail, why):
         ("GRC", _REFUSED, "GRC refusing a connection is not the 403 case"),
         ("LTC", "401 Client Error: Authorization Required", "no 401 remedy is recorded for LTC"),
     ],
+    ids=short_param_id,
 )
 def test_a_CLASSIFIED_failure_with_no_recorded_remedy_says_ONLY_what_it_proves(asset, detail, why):
     """THE ORIGINAL GUARD, STRENGTHENED RATHER THAN RELAXED, 2026-10-12.

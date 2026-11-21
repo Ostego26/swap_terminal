@@ -69,6 +69,7 @@ from chains.solana_transaction import (
     transfer_instruction_data,
     wire_transaction,
 )
+from param_ids import short_param_id
 
 # PyNaCl is an optional dependency (chains/solana_signing._public_key_bytes
 # records why), so the half of this file that needs a signature skips rather
@@ -206,7 +207,8 @@ def test_the_system_program_address_is_thirty_two_zero_bytes():
 # --- the byte layout, against the reference implementation -------------------
 
 
-@pytest.mark.parametrize(("lamports", "reference_message", "reference_wire"), REFERENCE_VECTORS)
+@pytest.mark.parametrize(("lamports", "reference_message", "reference_wire"), REFERENCE_VECTORS,
+                         ids=short_param_id)
 def test_the_message_is_byte_identical_to_what_solana_web3js_serialized(lamports, reference_message, reference_wire):
     """The message -- header, key order, blockhash, instruction -- byte for byte.
 
@@ -221,7 +223,8 @@ def test_the_message_is_byte_identical_to_what_solana_web3js_serialized(lamports
     assert len(message) == TRANSFER_MESSAGE_BYTES == 150
 
 
-@pytest.mark.parametrize(("lamports", "reference_message", "reference_wire"), REFERENCE_VECTORS)
+@pytest.mark.parametrize(("lamports", "reference_message", "reference_wire"), REFERENCE_VECTORS,
+                         ids=short_param_id)
 def test_the_signed_wire_transaction_is_byte_identical_too(lamports, reference_message, reference_wire):
     """Including the SIGNATURE, which is a second fact worth having.
 
