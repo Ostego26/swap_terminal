@@ -395,6 +395,123 @@ def release_inventory_after_send(db, asset: str, amount: float):
     )
 
 
+# =============================================================================
+# A DEFERRED PAYOUT WROTE 17,280 AUDIT ROWS A DAY AND LOOKED HEALTHY DOING IT
+# =============================================================================
+#
+# MEASURED 2026-11-21 against the real tables -- one credited BTC->GRC swap seeded
+# into a throwaway database, no GRC adapter in `adapters`, the real
+# process_pending_payouts() called six times, counting rows in swap_audit_log after
+# each call:
+#
+#     after cycle 1:  2 rows        after cycle 4:   8 rows
+#     after cycle 2:  4 rows        after cycle 5:  10 rows
+#     after cycle 3:  6 rows        after cycle 6:  12 rows
+#
+# TWO rows per pass, and from the second pass on they are byte-identical to the first
+# pair apart from created_at:
+#
+#     payout_pending -> paying            Claimed for payout
+#     payout_pending -> payout_pending    Payout deferred: this worker has no GRC adapter. ...
+#
+# workers/payout_worker.DEFAULT_POLL_SECONDS is 10 (payout_worker.py:80), so one
+# stuck swap is 8,640 cycles and 17,280 rows a day, forever -- and it is forever
+# because the DEFERRAL IS CORRECT. It puts the swap back in payout_pending on purpose
+# so that the next worker, the one started with the variable set, pays it; the SELECT
+# at the top of process_pending_payouts() therefore reads the same swap again ten
+# seconds later and the pass repeats with nothing changed. Only the logging rate was
+# ever wrong.
+#
+# WHAT IT LOOKED LIKE FROM OUTSIDE, which is what makes it a defect rather than
+# noise: the swap reads `payout_pending` with failed_reason NULL and updated_at moving
+# every ten seconds -- exactly what a healthy swap waiting to be paid looks like. The
+# one row that says what is actually wrong, naming the variable the operator has to
+# set, is row 2; by the next morning /admin and show_swap.py render it under 8,639
+# identical copies, and every other swap's history on the same page with it. The
+# reason was never missing. It was buried under itself.
+#
+# WHAT IS SUPPRESSED AND WHAT IS DELIBERATELY NOT (rule 14: "did nothing" must still
+# look different from "did work", and a suppressed row must not make a stuck swap look
+# healthy). Suppressed: the SECOND and later byte-identical copies of a row, for one
+# swap. Not suppressed, and each checked before relying on it here:
+#
+#   the first pass          written in full, both rows. It is the operator's only
+#                           evidence and nothing deletes or rewrites it.
+#   the worker's screen     payout_worker.py:181 prints "N swap(s) pending payout,
+#                           broadcasting now" every cycle, and its cycle line
+#                           (payout_worker.py:195) carries pending_at_start=1 with
+#                           broadcast=0 -- a pass that paid nobody already does not
+#                           share a line with one that paid somebody.
+#   the worker's log        the logger.error() in each deferral still fires every
+#                           cycle, naming the swap and the variable.
+#   swaps.updated_at        still bumped by the status UPDATEs on every pass, so the
+#                           database still shows the swap being worked on and not
+#                           abandoned.
+#
+# WHY A WINDOW OF TWO ROWS RATHER THAN "is it the latest row". Because the repeating
+# unit is a PAIR and neither row is the latest when its own repeat comes round: the
+# claim row is always followed by the deferral row before the next claim. A check
+# against the single most recent row suppresses neither. DEFERRAL_PASS_AUDIT_ROWS is
+# that pair, measured above and not assumed.
+#
+# WHAT BREAKS THE SUPPRESSION, i.e. what makes the next pass log in full again: any
+# row with a different (old_status, new_status, message) landing in the window. A
+# deferral for a DIFFERENT reason, a refusal, a halt, a failure, a broadcast -- each
+# pushes a different triple in, is itself recorded, and the state after it is logged
+# afresh. So the suppression cannot outlive the state it was measured on.
+#
+# THE OTHER swap_audit_log INSERTs IN THIS MODULE DO NOT GO THROUGH THIS, and that is
+# not an oversight: _record_broadcast(), halt_on_duplicate_payout_row(), the
+# GridcoinLockError arm and refuse_payout_before_sending() (via set_swap_status) each
+# leave the swap in completed, paying or failed -- statuses the SELECT at the top of
+# process_pending_payouts() does not read -- so none of them is reached twice for one
+# swap by a poll loop. Checked by reading that SELECT's WHERE clause, not assumed.
+
+#: The number of swap_audit_log rows ONE deferred payout pass writes, and so how far
+#: back log_transition_unless_repeating() looks for an identical row: the claim row
+#: from claim_swap_for_payout() plus the deferral row from defer_for_missing_adapter()
+#: or defer_for_locked_wallet(). Measured 2026-11-21 (the run is above).
+DEFERRAL_PASS_AUDIT_ROWS = 2
+
+
+def log_transition_unless_repeating(db, swap_id: str, old_status: str, new_status: str, message: str) -> bool:
+    """Write one swap_audit_log row, unless this swap's last pass already wrote it.
+
+    THE DECISION IS THIS FUNCTION AND NOTHING ELSE (rule 10), so it can be called with
+    seeded inputs and asserted on directly rather than inferred from a row count. It
+    takes no view of what the caller is doing and changes nothing else: it does not
+    read or write `swaps`, `payouts` or `wallet_inventory`, it does not commit, and its
+    return value is about the ROW, never about the payout. Every caller's control flow,
+    status transition and commit is identical whichever way this answers.
+
+    A row is a repeat when (old_status, new_status, message) is identical to one of this
+    swap's last DEFERRAL_PASS_AUDIT_ROWS rows. created_at is deliberately NOT compared --
+    it is the only thing that differs between the copies, and comparing it would make
+    every repeat look new, which is the defect. The cost is stated rather than hidden:
+    the TIMES of the repeats are not recorded anywhere in this table. What is still
+    recorded every cycle is listed in the block above this function; the thing that
+    makes a repeat not worth a row is that it carries no information the first row
+    does not.
+
+    Returns:
+        True when a row was written, False when an identical one was already there.
+    """
+    recent = db.execute(
+        "SELECT old_status, new_status, message FROM swap_audit_log"
+        " WHERE swap_id = ? ORDER BY id DESC LIMIT ?",
+        (swap_id, DEFERRAL_PASS_AUDIT_ROWS),
+    ).fetchall()
+    candidate = (old_status, new_status, message)
+    if any((row["old_status"], row["new_status"], row["message"]) == candidate for row in recent):
+        return False
+    db.execute(
+        "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (swap_id, old_status, new_status, message, utc_now_iso()),
+    )
+    return True
+
+
 def claim_swap_for_payout(db, swap_id: str) -> bool:
     """Take exclusive ownership of one swap's payout, or decline.
 
@@ -436,6 +553,14 @@ def claim_swap_for_payout(db, swap_id: str) -> bool:
     an RPC call, and this return value is a claim of OWNERSHIP the caller must act on, where
     that one reports whether a status moved.
 
+    THE AUDIT ROW IS WRITTEN ONCE PER DISTINCT CLAIM SINCE 2026-11-21, through
+    log_transition_unless_repeating(). The claim itself is unchanged and is not
+    conditional on anything this function reads about the audit log: a swap that is
+    claimed is claimed, and this returns True either way. What changed is that a swap
+    being claimed, deferred and re-claimed every 10s poll no longer writes a fresh
+    "Claimed for payout" row each time -- see that function's comment block for the
+    measurement and for what is still reported every cycle.
+
     Returns:
         True if this caller owns the payout for `swap_id` and may send.
     """
@@ -446,10 +571,15 @@ def claim_swap_for_payout(db, swap_id: str) -> bool:
     if claim.rowcount != 1:
         db.commit()
         return False
-    db.execute(
-        "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at) VALUES (?, ?, ?, ?, ?)",
-        (swap_id, "payout_pending", "paying", "Claimed for payout", utc_now_iso()),
-    )
+    # THE ROW IS THE ONLY THING CONDITIONAL HERE, SINCE 2026-11-21. The claim above has
+    # already applied and this function still returns True: a suppressed audit row does
+    # not un-claim a swap, and the caller cannot tell the two cases apart because there
+    # is nothing for it to tell. The repeat this suppresses is the first half of the
+    # 17,280-rows-a-day pair measured in the block above
+    # log_transition_unless_repeating(), and it is suppressed ONLY when an identical
+    # claim row is still in the window -- which means the pass before this one put the
+    # swap straight back into payout_pending without paying it.
+    log_transition_unless_repeating(db, swap_id, "payout_pending", "paying", "Claimed for payout")
     db.commit()
     return True
 
@@ -852,7 +982,13 @@ def defer_for_missing_adapter(db, swap, destination_asset: str, adapters) -> boo
                                  did, because nothing re-queues a 'paying' swap either.
       an audit row               so the deferral is in the swap's own history and on
                                  /admin, not only in a worker log the operator is not
-                                 reading at the time.
+                                 reading at the time. ONCE PER DISTINCT DEFERRAL since
+                                 2026-11-21 and not once per 10s poll: it goes through
+                                 log_transition_unless_repeating(), whose comment block
+                                 carries the 17,280-rows-a-day measurement and the list
+                                 of what is still reported every cycle. The first
+                                 deferral is written in full; a byte-identical repeat
+                                 is not.
       failed_reason             UNTOUCHED. The swap has not failed, and a reason on a
                                  pending swap is read by show_swap.py and the admin page
                                  as a post-mortem.
@@ -876,11 +1012,18 @@ def defer_for_missing_adapter(db, swap, destination_asset: str, adapters) -> boo
         "reserved and no payout row was written.",
         swap["id"], destination_asset, why,
     )
-    db.execute(
-        "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at)"
-        " VALUES (?, ?, ?, ?, ?)",
-        (swap["id"], swap["status"], "payout_pending",
-         f"Payout deferred: this worker has no {destination_asset} adapter. {why}", utc_now_iso()),
+    # THE ROW, NOT THE DEFERRAL, IS WHAT IS CONDITIONAL HERE (since 2026-11-21). The
+    # swap is still deferred, the status is still written below, this still returns
+    # True, and nothing was sent either way -- the only thing suppressed is the SECOND
+    # and later byte-identical copy of this sentence. `why` comes from
+    # chains/registry.why_unconfigured(), which composes it from the environment and
+    # not from the clock, so an unchanged configuration produces an unchanged message
+    # and the comparison holds; a message that CHANGED is a different fault and is
+    # recorded in full. The measurement and what is still reported every cycle are in
+    # the block above log_transition_unless_repeating().
+    log_transition_unless_repeating(
+        db, swap["id"], swap["status"], "payout_pending",
+        f"Payout deferred: this worker has no {destination_asset} adapter. {why}",
     )
     db.execute(
         "UPDATE swaps SET status = 'payout_pending', updated_at = ? WHERE id = ?",
@@ -1022,11 +1165,18 @@ def defer_for_locked_wallet(db, swap, destination_asset: str, amount, exc) -> No
     # happen has to come back or the hot wallet is permanently short on paper,
     # which is the same correction services/payout_rescue.py makes by hand.
     release_inventory_after_send(db, destination_asset, amount)
-    db.execute(
-        "INSERT INTO swap_audit_log (swap_id, old_status, new_status, message, created_at)"
-        " VALUES (?, ?, ?, ?, ?)",
-        (swap["id"], "paying", "payout_pending", f"Payout deferred, NOTHING SENT: {exc}",
-         utc_now_iso()),
+    # THE ROW, NOT THE DEFERRAL (since 2026-11-21, and the same reasoning as
+    # defer_for_missing_adapter()'s site). The payouts row above is still withdrawn, the
+    # reservation is still released, the status is still written below and nothing was
+    # ever sent; only a byte-identical repeat of this sentence is suppressed. `exc` is
+    # PayoutUnlockUnavailable, whose message payout_unlock_context() composes from the
+    # asset and WALLET_UNLOCK_ENV_VAR -- no timestamp, no object address, nothing
+    # per-attempt -- so an unchanged fault really does produce an identical string.
+    # Checked: a message that embeds a per-attempt value is exactly how the
+    # failure_signature() comment below describes this going wrong, where every repeat
+    # looked new and every new failure looked the same shape.
+    log_transition_unless_repeating(
+        db, swap["id"], "paying", "payout_pending", f"Payout deferred, NOTHING SENT: {exc}",
     )
     db.execute(
         "UPDATE swaps SET status = 'payout_pending', updated_at = ? WHERE id = ?",

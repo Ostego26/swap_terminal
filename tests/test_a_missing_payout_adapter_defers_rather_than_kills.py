@@ -467,3 +467,236 @@ def test_the_address_warning_decision_is_also_callable(conn):
     swap = dict(swap_row(conn))
     assert payout_service.warn_if_address_unchecked(swap, Verdict(True), "GRC") is True
     assert payout_service.warn_if_address_unchecked(swap, Verdict(False), "GRC") is False
+
+
+# =============================================================================
+# THE DEFERRAL WAS RIGHT AND ITS LOGGING RATE WAS NEVER FINISHED
+# =============================================================================
+#
+# The deferral above is the fix and it is unchanged. What it left behind is a swap that
+# is re-selected every poll and re-deferred every poll, writing TWO byte-identical
+# swap_audit_log rows each time -- the claim and the deferral -- at
+# workers/payout_worker.DEFAULT_POLL_SECONDS = 10 (payout_worker.py:80).
+#
+# MEASURED 2026-11-21 with the fixture below and the real process_pending_payouts(),
+# before the fix: 2, 4, 6, 8, 10, 12 rows after six cycles. 8,640 cycles a day is
+# 17,280 rows a day for ONE stuck swap, and the swap reads `payout_pending` with
+# failed_reason NULL throughout -- which is exactly what a healthy swap waiting to be
+# paid looks like. The row that names the variable to set is row 2, under 8,639
+# identical copies of itself by the next morning.
+#
+# THE ROW COUNT IS THE MEASUREMENT, over several cycles, against the real tables. A
+# test that asserted "the suppression function returns False" would pass for a version
+# that still wrote the row.
+
+
+#: Enough cycles to tell a per-cycle write from a once-ever write. Six is what the
+#: 2026-11-21 measurement used, so the before-figures quoted here (2, 4, 6, 8, 10, 12)
+#: are this exact loop's and not a rounded recollection of another one.
+DEFERRAL_CYCLES = 6
+
+
+def audit_rows(conn) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM swap_audit_log WHERE swap_id = 's_credited'"
+    ).fetchone()["n"]
+
+
+def audit_messages(conn) -> list[str]:
+    return [
+        row["message"]
+        for row in conn.execute(
+            "SELECT message FROM swap_audit_log WHERE swap_id = 's_credited' ORDER BY id"
+        ).fetchall()
+    ]
+
+
+def test_a_missing_adapter_is_recorded_once_and_not_once_per_poll(conn):
+    """THE REGRESSION TEST. MUTATION: make log_transition_unless_repeating() always INSERT.
+
+    Six cycles of the real process_pending_payouts() over the real tables. Before the
+    fix this counted 2, 4, 6, 8, 10, 12; after it, 2 every time. The per-cycle growth is
+    asserted as ZERO rather than as "fewer than before", because a rate is what was
+    wrong -- any non-zero per-cycle figure is the same defect with a smaller constant.
+    """
+    counts = []
+    for _ in range(DEFERRAL_CYCLES):
+        assert run(conn) == [], "a payout was reported completed for a chain with no adapter"
+        counts.append(audit_rows(conn))
+
+    assert counts == [2] * DEFERRAL_CYCLES, (
+        f"swap_audit_log grew {counts} over {DEFERRAL_CYCLES} identical deferrals; before "
+        f"2026-11-21 it grew [2, 4, 6, 8, 10, 12], which is 17,280 rows a day at a 10s poll"
+    )
+
+
+def test_the_first_deferral_is_still_recorded_in_full(conn):
+    """It is the operator's only evidence, so suppressing the repeats must not touch it.
+
+    Both rows of the FIRST pass, with the variable named, after as many cycles as you
+    like -- the assertion runs after all of them precisely so that it cannot pass by
+    reading a log that was later overwritten or trimmed.
+    """
+    for _ in range(DEFERRAL_CYCLES):
+        run(conn)
+
+    messages = audit_messages(conn)
+    assert len(messages) == 2, messages
+    assert messages[0] == "Claimed for payout"
+    assert "GRC_RPC_PORT" in messages[1], "the variable the operator has to set is not named"
+    assert "deferred" in messages[1].lower()
+    assert "failed" not in messages[1].lower(), "a deferral must not describe itself as a failure"
+
+
+def test_the_deferral_itself_is_unchanged_over_every_cycle(conn):
+    """The LOGGING RATE was the defect. The decision is not allowed to move with it.
+
+    Asserted after the suppression has been active for five further cycles, because
+    "the swap stopped being deferred" and "the deferral stopped being logged" would be
+    indistinguishable from the row count alone -- and the first is a swap that stops
+    moving, which is the thing the deferral exists to prevent.
+    """
+    for _ in range(DEFERRAL_CYCLES):
+        run(conn)
+
+    row = swap_row(conn)
+    assert row["status"] == "payout_pending", (
+        f"a credited swap was left in {row['status']!r}; only payout_pending is picked up again"
+    )
+    assert row["failed_reason"] is None
+    assert row["completed_at"] is None
+    assert conn.execute("SELECT COUNT(*) AS n FROM payouts").fetchone()["n"] == 0
+
+
+def test_a_stuck_swap_still_shows_its_updated_at_moving(conn):
+    """Rule 14: a suppressed row must not make a stuck swap look healthy.
+
+    The status UPDATEs on the deferral path are untouched, so swaps.updated_at is still
+    bumped on every pass -- the database still shows the swap being worked on rather
+    than abandoned, even on the cycles that write no audit row at all. The worker's own
+    per-cycle output carries the rest (payout_worker.py:181 and its cycle line); that
+    is the worker's file and is asserted in tests/test_worker_reporting.py, not here.
+    """
+    run(conn)
+    first = swap_row(conn)["updated_at"]
+    before = audit_rows(conn)
+
+    conn.execute(
+        "UPDATE swaps SET updated_at = '2000-01-01T00:00:00+00:00' WHERE id = 's_credited'"
+    )
+    conn.commit()
+    run(conn)
+
+    assert audit_rows(conn) == before, "this cycle was supposed to be a suppressed repeat"
+    assert swap_row(conn)["updated_at"] != "2000-01-01T00:00:00+00:00", (
+        "a cycle that wrote no audit row also left updated_at alone, so a stuck swap "
+        "looks abandoned rather than stuck"
+    )
+    assert first is not None
+
+
+def test_an_unset_passphrase_is_also_recorded_once_and_not_once_per_poll(conn, monkeypatch):
+    """The same loop through the other deferral, which had the same two-row pass.
+
+    MEASURED 2026-11-21, before the fix: 2, 4, 6, 8, 10, 12. And the withdrawal of the
+    payouts row is asserted on EVERY cycle, because that is the half of this path that
+    must keep happening -- a live row left behind blocks the retry the deferral exists
+    for (idx_payouts_one_live_per_swap).
+    """
+    monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
+
+    class GridcoinAdapter:
+        asset = "GRC"
+
+        def send_to_address(self, *_args, **_kwargs):
+            raise AssertionError("a send was attempted with no passphrase")
+
+    counts = []
+    for _ in range(DEFERRAL_CYCLES):
+        assert payout_service.process_pending_payouts(conn, CONFIG, {"GRC": GridcoinAdapter()}) == []
+        counts.append(audit_rows(conn))
+        live = conn.execute(
+            "SELECT COUNT(*) AS n FROM payouts WHERE swap_id = 's_credited' AND status = 'created'"
+        ).fetchone()["n"]
+        assert live == 0, "a live payouts row was left behind and will block the retry"
+
+    assert counts == [2] * DEFERRAL_CYCLES, (
+        f"swap_audit_log grew {counts} over {DEFERRAL_CYCLES} identical locked-wallet deferrals"
+    )
+    assert "NOTHING SENT" in audit_messages(conn)[1]
+
+
+def test_a_deferral_for_a_DIFFERENT_reason_is_recorded_in_full(conn, monkeypatch):
+    """The suppression must not outlive the state it was measured on.
+
+    Two cycles with no GRC adapter at all, then the adapter appears and the wallet
+    passphrase is what is missing instead. That is a different fault with a different
+    remedy, so it gets its own row -- otherwise the operator fixes the variable the
+    first row names and the swap goes on not being paid for a reason nothing ever said.
+    """
+    monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
+
+    class GridcoinAdapter:
+        asset = "GRC"
+
+        def send_to_address(self, *_args, **_kwargs):
+            raise AssertionError("a send was attempted with no passphrase")
+
+    run(conn)
+    run(conn)
+    assert audit_rows(conn) == 2
+
+    payout_service.process_pending_payouts(conn, CONFIG, {"GRC": GridcoinAdapter()})
+
+    messages = audit_messages(conn)
+    assert any("NOTHING SENT" in text for text in messages), (
+        f"a deferral for a new reason was suppressed as a repeat of the old one: {messages}"
+    )
+    assert any("GRC_RPC_PORT" in text for text in messages), "the earlier reason was lost"
+
+
+def test_a_payable_swap_records_its_claim_and_its_completion(ltc_conn):
+    """A FIRST pass is never suppressed, and this is the pass that moves money.
+
+    tests/test_payout_concurrency.py asserts the same pair for the concurrency case;
+    this is here because the suppression is the thing that could break it, and the
+    failure mode would be a paid swap whose audit trail does not say it was claimed.
+    """
+    sent = []
+
+    class LitecoinAdapter:
+        asset = "LTC"
+
+        def send_to_address(self, address, amount, **_kwargs):
+            sent.append((address, amount))
+            return "ltc_txid_0001"
+
+    payout_service.process_pending_payouts(
+        ltc_conn, CONFIG, {"BTC": BitcoinOnlyAdapter(), "LTC": LitecoinAdapter()}
+    )
+
+    assert sent, "a configured chain's payout was deferred"
+    assert [
+        row["new_status"]
+        for row in ltc_conn.execute(
+            "SELECT new_status FROM swap_audit_log WHERE swap_id = 's_credited' ORDER BY id"
+        ).fetchall()
+    ] == ["paying", "completed"]
+
+
+def test_the_suppression_decision_is_callable_with_seeded_inputs(conn):
+    """Rule 10, and it is the only level that may hold the decision.
+
+    Three seeded calls: a new row is written, its byte-identical repeat is not, and a
+    row that differs in ONE field is written -- asserted through the return value and
+    the row count together, because a function that answered correctly while still
+    INSERTing would pass on the return value alone.
+    """
+    log = payout_service.log_transition_unless_repeating
+
+    assert log(conn, "s_credited", "payout_pending", "paying", "Claimed for payout") is True
+    assert audit_rows(conn) == 1
+    assert log(conn, "s_credited", "payout_pending", "paying", "Claimed for payout") is False
+    assert audit_rows(conn) == 1
+    assert log(conn, "s_credited", "payout_pending", "paying", "Claimed for payout again") is True
+    assert audit_rows(conn) == 2
