@@ -265,6 +265,30 @@ adapter works" is not a thing a run proves and the list is what a reader needs:
           test in this repository can broadcast and no session here can produce
           the proof. The proof had to come from the operator's host and it did.
 
+          THE 403 HALF OF THAT SENTENCE IS NO LONGER TRUE OF EVERY DEVELOPMENT
+          CONTAINER, measured 2026-11-21 while taking this box's install
+          ledger. api.devnet.solana.com is allow-listed in the container this
+          correction was written in and answers 200: getHealth -> 'ok',
+          getVersion -> solana-core 4.5.0-beta.0, and getGenesisHash ->
+          EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG, which is devnet's, so
+          the cluster identified itself rather than being taken from the
+          hostname. solana_chain_check.py ran every READ in this file's Reads
+          list against it and passed each one in 8.1µfn (9.7s).
+
+          WHAT IS UNCHANGED, and it is the half that actually mattered: NO
+          BROADCAST happened here and none can. send_to_address() needs
+          SOL_PAYOUT_KEYPAIR_PATH, there is no key on this box, and putting one
+          here is the operator's decision and not a session's (CLAUDE.md rule
+          16). pair_verdicts.py says so in its own vocabulary -- with
+          SOL_RPC_URL and SOL_DEPOSIT_ACCOUNT both set, BTC->SOL and LTC->SOL
+          are 'blocked by cannot_pay', which is exactly this. So the quoted
+          sentence above was right about the conclusion and is now wrong about
+          the reason, and the reason is the part a reader in a hurry acts on:
+          the earlier version told them not to bother trying the cluster at
+          all. READS are reachable here; the PAYOUT leg is gated on a key.
+          The 2026-10-03 devnet broadcasts cited below are still the
+          operator's, from their own host, and nothing here replaces them.
+
           MEASURED, from their own swap_terminal.db joined against `swaps` and
           read BACK off the cluster by correct_payout_amounts.py the same day
           (config.py's ALLOWED_PAIRS block carries the full citation):

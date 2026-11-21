@@ -7,7 +7,7 @@ Can move funds: no
 Mainnet-safe: yes
 
 =============================================================================
-WHY THIS MODULE EXISTS, and it is the same bug nine times.
+WHY THIS MODULE EXISTS, and it is the same bug ten times, in three languages.
 =============================================================================
 
 A gate that scans source text for a forbidden pattern matches that pattern in a
@@ -32,6 +32,12 @@ The occurrences, in order, because the count is the argument:
   9    2026-10-11, minutes later: a scan asserting that no customer-facing refusal in
        swap_service.py claims "both chains are reachable" failed on a DOCSTRING
        describing another module's pair states.
+  10   2026-11-21, in a THIRD language. A gate asserting that
+       docker/harness.Dockerfile verifies a tarball's digest BEFORE extracting it
+       compares the character offset of `sha256sum` against the first `tar -x`. The
+       comments explaining that ordering name both commands, above the RUN, so the
+       raw scan found its own explanation first and would have passed whatever the
+       instructions did. dockerfile_without_comments() was written for it.
 
 THE NINTH IS WHY THIS IS A MODULE. code_without_prose() had been copied once, into
 tests/test_rpc_connect_timeout.py, with a note saying "If a THIRD copy is ever
@@ -120,3 +126,41 @@ def javascript_without_comments(text: str) -> str:
         out.append(ch)
         i += 1
     return "".join(out)
+
+
+def dockerfile_without_comments(text: str) -> str:
+    """One Dockerfile's INSTRUCTIONS, with every `#` comment line blanked out.
+
+    THE TENTH OCCURRENCE OF THE DEFECT THIS MODULE'S HEADER COUNTS, 2026-11-21, and
+    it arrived as soon as a gate started reasoning about WHERE in a Dockerfile
+    something appears rather than merely whether it does.
+
+    tests/test_upstream_daemons_are_pinned_and_verified.py asserts that the
+    `sha256sum -c` in docker/harness.Dockerfile comes BEFORE the first `tar -x` of a
+    downloaded tarball, by comparing character offsets -- because a verify placed
+    after an extraction verifies an archive already unpacked and installed, which
+    proves nothing while looking exactly like a check. That Dockerfile's comments
+    explain the ordering at length and therefore contain the words "sha256sum" and
+    "tar" several times, ABOVE the RUN. Scanned raw, the earliest "sha256sum" is in
+    a comment at line 59 and the gate passes no matter where the real one sits. The
+    gate would have been measuring its own explanation.
+
+    LINES ARE BLANKED RATHER THAN DELETED, which is the one real design choice here.
+    Offsets are what the caller compares, and dropping lines would shift every
+    offset after the first comment, so a failure message quoting a position would
+    point at the wrong place. Replacing each comment line with an empty line of the
+    same count keeps line numbers and leaves offsets monotonic, at the cost of the
+    returned text not being byte-identical in length to the original -- which no
+    caller needs, because what is compared is the ORDER of two offsets.
+
+    A LINE SCAN AND NOT A PARSE, and the limits are stated rather than discovered.
+    Dockerfile comments are whole-line only: `#` is a comment just when it is the
+    first non-whitespace character of a line, which is why `install -m 0755` and a
+    `${VAR}` containing no comment survive untouched. `#` INSIDE an instruction --
+    a shell comment in a RUN, or a fragment in a URL -- is left alone, because
+    docker leaves it alone too and hands it to the shell. A continuation line of a
+    RUN whose own text begins with `#` is a shell comment, not a docker one, and is
+    likewise kept; nothing in this repository has one, and the gates that use this
+    would fail safe (seeing more text, not less) if one appeared.
+    """
+    return "\n".join("" if line.lstrip().startswith("#") else line for line in text.splitlines())

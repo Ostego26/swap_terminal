@@ -86,7 +86,14 @@ invent, only a path and the chain's own transaction format.
 THE THREE LAYERS, AND WHAT IS TRUE OF EACH TODAY
 =============================================================================
 
-  docker      the container layer. SERVICES below. This is the layer that was
+  docker      the container layer. SERVICES below, plus -- since 2026-11-21 --
+              UPSTREAM_BINARIES and UPSTREAM_SOURCE, which record where the chain
+              daemons inside those containers COME FROM and what proves the bytes.
+              A reader who opens this module for the topology now finds the
+              provenance in the same place, because "which project built the
+              bitcoind in the harness, and what verified it" had no home at all
+              before that date and was therefore reconstructed from a Dockerfile
+              comment every time it was asked. This is the layer that was
               repeatedly got wrong and is the one the test checks hardest.
   custody     CUSTODY below. TODAY every chain signs from its own credential and
               NOTHING routes through a canister: `threshold_custody`, `keyring` and
@@ -233,6 +240,221 @@ OVERLAYS = {
 #: The files docker-compose.yml pulls in with `include:`, which is what makes a bare
 #: `up` read them. Everything else needs an explicit -f or a COMPOSE_FILE entry.
 INCLUDED = ("docker-compose.icp.yml", "docker-compose.web.yml")
+
+
+# ---------------------------------------------------------------------------
+# LAYER 1, CONTINUED: WHERE THE CHAIN DAEMONS IN THOSE CONTAINERS COME FROM
+# ---------------------------------------------------------------------------
+#
+# ADDED 2026-11-21, answering the operator's question "can you just integrate these
+# independent daemons that open source into our own closed source?". The measured
+# answer is that MIT permits it outright and the cheapest way to satisfy it is to
+# copy NONE of their code: what lives in this repository is a version string, a
+# digest and a license notice -- about 3KB -- and the binaries arrive from the
+# projects that built them.
+#
+# SO THIS IS THE ANSWER AS DATA. Three facts about the chain layer had no home
+# before today -- which project each daemon comes from, what proves the bytes, and
+# what license travels with them -- and the first two were not written down
+# anywhere at all. A paragraph would have been the fourth stale description in this
+# module's own header (rule 8 / this file's whole reason), so the facts are a table
+# and tests/test_architecture_is_what_the_tree_does.py derives every derivable one
+# from the Dockerfiles and the manifest.
+#
+# NO DIGEST APPEARS HERE. docker/upstream_binaries.sha256 is its one home, the way
+# KEYRING below records shape and points at icp/README.md rather than copying it.
+# These rows record WHERE the digest lives and WHAT consumes it; the test proves the
+# pointer is correct and never asserts a digest's value.
+
+
+class UpstreamBinary(NamedTuple):
+    """One upstream project whose PREBUILT release tarball an image installs."""
+
+    #: The project as it names itself, for a notice and a log line.
+    project: str
+    #: The host the tarball is fetched from. DERIVED by the test out of the
+    #: `installed_by` Dockerfile's curl lines, so a row pointing at the wrong
+    #: project fails rather than misleading.
+    host: str
+    #: The Dockerfile that downloads, verifies and installs it.
+    installed_by: str
+    #: The `ARG` that decides WHICH release. The version is the one fact written
+    #: twice -- here as an ARG and inside the manifest's filenames -- and it cannot
+    #: drift, because `sha256sum --ignore-missing -c` verifies nothing and exits 1
+    #: when the manifest covers no downloaded filename. The build refuses
+    #: disagreement; the test's job is to say so in English at suite time instead of
+    #: leaving a cryptic coreutils line in a build log.
+    pin_variable: str
+    #: The ONE manifest. Both rows carry the same value on purpose: more than one
+    #: manifest is more than one home for the same kind of fact.
+    digest_manifest: str
+    #: Whether the project publishes its own checksum manifest. NOT DERIVED and not
+    #: derivable -- it is a dated measurement of someone else's website, and no
+    #: offline test can establish it. MEASURED 2026-11-21: bitcoincore.org serves
+    #: SHA256SUMS (unsigned plain text) plus a detached SHA256SUMS.asc;
+    #: download.litecoin.org serves a CLEARSIGNED SHA256SUMS.asc at the release
+    #: root, which `gpg --verify` reports as "Good signature from David Burkett".
+    #: This field is what tells the operator which one-time verification applies to
+    #: which project, and it is this module's second undefended claim after
+    #: LOCAL_REPLICA_KEY_IS_EPHEMERAL. Saying which facts the test does NOT cover is
+    #: rule 17's job.
+    upstream_publishes_sums: bool
+    #: The architectures the image can build for. DERIVED from the Dockerfile's own
+    #: `case "$arch"` arms, and the manifest must pin a digest for every one.
+    arches: tuple[str, ...]
+    #: The ONLY binaries installed out of the tarball. DERIVED from the install
+    #: lines. This is the exclusion that is actually available on a prebuilt
+    #: artifact: four of the thirteen binaries in the two tarballs are installed,
+    #: and the wallet tools left behind carry the same Berkeley DB as the daemons
+    #: while `bitcoin-qt` would additionally drag Qt's GPL/LGPL into an image with
+    #: no GUI.
+    binaries: tuple[str, ...]
+    #: Whether the SHIPPED daemon contains Berkeley DB. NOT DERIVED -- the binary is
+    #: not in this repository, by design, so nothing offline can read it.
+    #:
+    #: MEASURED 2026-11-21 against both release tarballs, and it CORRECTS the audit
+    #: this change was written from, which concluded Bitcoin 28.1 is clean because
+    #: `--without-bdb --with-sqlite` builds a wallet-capable bitcoind with no BDB.
+    #: That is true of a build from source and this image does not build from
+    #: source. `strings -a <daemon> | grep -c '^Berkeley DB 4\\.8\\.30: (April  9,
+    #: 2010)$'` is 1 for bitcoind and 1 for litecoind, 0 for both -cli binaries;
+    #: that string is BDB's own DB_VERSION_STRING. `ldd` names no libdb on either,
+    #: because the release builds are static -- so an audit done with ldd calls them
+    #: clean and is wrong, which is how this gets missed.
+    bundles_berkeley_db: bool
+    #: The file recording that finding, or "" where there is nothing to record. It
+    #: exists so the MIT notices cannot be read as the whole story: Sleepycat is the
+    #: only license in these images with a source-disclosure condition.
+    copyleft_note: str
+    #: Where the notice lands inside the image. Unique per project, asserted.
+    license_in_image: str
+    #: The tracked file that notice is COPYed from. It cannot come from the tarball:
+    #: measured 2026-11-21 by listing every file in both, neither ships a COPYING.
+    license_source: str
+
+
+UPSTREAM_BINARIES = {
+    "BTC": UpstreamBinary(
+        project="Bitcoin Core",
+        host="bitcoincore.org",
+        installed_by="docker/harness.Dockerfile",
+        pin_variable="BITCOIN_VERSION",
+        digest_manifest="docker/upstream_binaries.sha256",
+        upstream_publishes_sums=True,
+        arches=("x86_64-linux-gnu", "aarch64-linux-gnu"),
+        binaries=("bitcoind", "bitcoin-cli"),
+        bundles_berkeley_db=True,
+        copyleft_note="docker/licenses/berkeley-db/MEASURED_LINKAGE.md",
+        license_in_image="/usr/share/licenses/bitcoin-core/COPYING",
+        license_source="docker/licenses/bitcoin-core/COPYING",
+    ),
+    "LTC": UpstreamBinary(
+        project="Litecoin Core",
+        host="download.litecoin.org",
+        installed_by="docker/harness.Dockerfile",
+        pin_variable="LITECOIN_VERSION",
+        digest_manifest="docker/upstream_binaries.sha256",
+        upstream_publishes_sums=True,
+        arches=("x86_64-linux-gnu", "aarch64-linux-gnu"),
+        binaries=("litecoind", "litecoin-cli"),
+        bundles_berkeley_db=True,
+        copyleft_note="docker/licenses/berkeley-db/MEASURED_LINKAGE.md",
+        license_in_image="/usr/share/licenses/litecoin-core/COPYING",
+        license_source="docker/licenses/litecoin-core/COPYING",
+    ),
+}
+
+
+class UpstreamSource(NamedTuple):
+    """One upstream project an image COMPILES rather than downloads a binary of."""
+
+    project: str
+    built_by: str
+    #: The `ARG` naming what gets checked out.
+    ref_variable: str
+    #: Whether that ARG's value is a commit SHA. DERIVED: 40 hex characters or not.
+    #:
+    #: A TAG IS NOT A PIN, and this field says so out loud rather than leaving it to
+    #: be noticed. docs/vendoring_upstream_daemon_code.md already states the standard
+    #: this build misses -- "The upstream project, path, and COMMIT SHA. Not a
+    #: version string and not a branch name" -- and grc-desk.Dockerfile:44 is
+    #: `ARG GRIDCOIN_REF=5.5.1.7`, cloned with `--branch`, which upstream can move.
+    ref_is_pinned: bool
+    #: Every host its build stage fetches from. DERIVED from the clone and curl
+    #: lines, and it is what keeps UPSTREAM_BINARIES' coverage test from demanding a
+    #: row for Berkeley DB's tarball.
+    fetches_from: tuple[str, ...]
+    #: Whether anything verifies those downloads. DERIVED: does the Dockerfile run a
+    #: checksum check at all? It does not.
+    digest_verified: bool
+    license_in_image: str
+
+
+#: NOT CHANGED BY THIS WORK, AND THAT IS DELIBERATE (rule 16). grc-desk is the one
+#: image in this repository that holds a WALLET, its provenance is weaker than the
+#: harness's in both ways a build can be weak -- a moving tag for the source and no
+#: digest at all for Berkeley DB 4.8.30 from download.oracle.com -- and I cannot
+#: establish the right commit SHA from here, because github.com/gridcoin-community
+#: returns 403 at this session's proxy and download.oracle.com is not allow-listed.
+#: Changing how a fund-holding daemon is built is the operator's.
+#:
+#: WHAT THIS WORK DOES INSTEAD is make the gap VISIBLE AS DATA, with a test that
+#: fails the day the tree and the table disagree in either direction: somebody pins
+#: a real SHA and leaves this saying False, so the table understates the tree's
+#: safety and the next reader redoes the work; or somebody replaces a SHA with a
+#: moving tag and leaves it saying True, which overstates it on an image holding a
+#: wallet. That is a recorded fact, not a ratchet: nothing is tolerated by appearing
+#: here, and the flag is derived rather than allowed.
+UPSTREAM_SOURCE = {
+    "GRC": UpstreamSource(
+        project="Gridcoin Research",
+        built_by="docker/grc-desk.Dockerfile",
+        ref_variable="GRIDCOIN_REF",
+        ref_is_pinned=False,
+        fetches_from=("download.oracle.com", "github.com"),
+        digest_verified=False,
+        license_in_image="/usr/share/licenses/gridcoin/COPYING",
+    ),
+}
+
+#: THE DECISION ITSELF, AS DATA: no upstream daemon source or binary is committed to
+#: this repository. A sentence saying that would be prose about structure, which is
+#: the thing this module exists because it goes stale silently; an empty tuple with a
+#: test behind it is the same claim in a form that can fail.
+#:
+#: Measured 2026-11-21: 567 tracked files, and ZERO whose first bytes are ELF or
+#: gzip magic. A CLEAN GATE and not a ratchet (rule 19) -- the asserted count is
+#: zero, there is no baseline, nothing is tolerated, and it starts at zero the way
+#: rule 18's spelling gate did.
+#:
+#: THE DENOMINATOR WAS WRONG IN THE FIRST DRAFT OF THIS COMMENT, and it is corrected
+#: here rather than overwritten because the mistake is instructive. It said 561,
+#: which was the tracked count BEFORE this change -- measured honestly, then made
+#: stale by the six files this same commit adds (the manifest, three notices, the
+#: licenses README and the test). Rule 3's "a count without what it was counted out
+#: of has caused real errors more than once", committed inside the change that
+#: broke it. The number a reader can check is 567; the number the gate asserts is
+#: the ZERO, which is why the gate is the thing that survives and the count is
+#: commentary.
+#:
+#: WHY IT IS WORTH A GATE RATHER THAN A HABIT. This repository has already decided
+#: this twice with numbers, in its own .gitignore: on tools/dleq_helper, "a
+#: committed binary is a thing nobody can review and everybody trusts"; and on the
+#: cargo/dfx output, which "cost 891 files and 198MB of build output committed to
+#: this repository". A bitcoind is a strictly larger version of that trade, and the
+#: next person who finds it easier to commit a tarball than to add a digest is who
+#: this is for.
+#:
+#: IT IS ALSO THE ONLY EXCLUSION AVAILABLE FOR SLEEPYCAT. Berkeley DB cannot be
+#: removed from a prebuilt daemon, and every obligation in Sleepycat clause 3
+#: triggers on DISTRIBUTION. This repository distributes nothing: the image is built
+#: on the operator's host from the projects' own tarballs.
+VENDORED_UPSTREAM_TREES: tuple[str, ...] = ()
+
+#: The same fact from the other side, named because a reader asks it directly. False
+#: is what makes the Berkeley DB finding in docker/licenses/berkeley-db/ a thing to
+#: record rather than a thing to remedy today.
+UPSTREAM_BINARIES_ARE_REDISTRIBUTED = False
 
 
 # ---------------------------------------------------------------------------

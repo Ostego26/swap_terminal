@@ -390,6 +390,40 @@ def cmd_record(pytest_args: tuple[str, ...]) -> int:
         print("                    ^ these are recorded AS broken, which is honest and is not")
         print("                      an excuse: `check` will report them as `still broken`")
         print("                      every run until they are fixed.")
+    # RECORDING IS A COMMIT-TIME STEP AND THIS SAYS SO, MEASURED 2026-11-21.
+    #
+    # A session that re-recorded the baseline after adding 25 tests -- correctly, the
+    # suite was green and `check` reported 25 `added` and nothing worse -- then found
+    # `check` reporting
+    #
+    #     regressed  1
+    #       tests.test_commit_message_counts::test_a_suite_count_in_HEADs_message_
+    #       matches_the_baseline_HEAD_COMMITTED
+    #
+    # with the message "HEAD's message claims 5848 collected and the baseline it
+    # commits holds 5873". NOTHING HAD REGRESSED. tests/test_commit_message_counts.py
+    # exists because four commits in one day quoted a count nobody counted, and its
+    # invariant is that this file and the message describing it are committed
+    # TOGETHER. So re-recording without committing breaks it by construction, and the
+    # only way out is the commit -- which a session told not to commit cannot make.
+    #
+    # WHICH MAKES THE OLD `check` CLOSING LINE WRONG RATHER THAN MERELY TERSE. It said
+    # "re-run `record` to adopt this run as the new one", with no hint that doing so
+    # outside a commit manufactures a regression report. Rule 16: a wrong sentence in
+    # output an operator acts on is a bug, and the fix is the sentence, not a note in
+    # a session log that the next reader will not have.
+    #
+    # NOT A HOOK, for the reason test_commit_message_counts.py already gives about
+    # itself: .git/hooks is not in the tree, so a hook protects only a machine
+    # somebody remembered to set up.
+    print("  next              COMMIT THIS FILE NOW, quoting the `for the commit` line above")
+    print("                    verbatim. Until that commit exists, HEAD's message still")
+    print("                    quotes the OLD count and tests/test_commit_message_counts.py")
+    print("                    reports a REGRESSION that is really just this uncommitted")
+    print("                    rewrite. If you cannot commit, restore the baseline")
+    print("                    (`git checkout -- tests/suite_baseline.tsv`) and leave the")
+    print("                    record to whoever can -- `check` treats new tests as `added`,")
+    print("                    which does not fail.")
     return 0
 
 
@@ -422,10 +456,10 @@ def commit_line(outcomes: dict[str, str]) -> str:
     THE MECHANISM WAS THE PROBLEM, NOT THE CARE. `record` printed a collected total and
     pytest printed a passed/skipped summary, in different places, hundreds of lines
     apart, and the commit message was typed from memory of one of them. So this prints
-    ONE labelled line, from the junit report the baseline itself is built from, in the
+    ONE labeled line, from the junit report the baseline itself is built from, in the
     form a commit message quotes verbatim. There is nothing left to convert.
 
-    COLLECTED IS STATED TOO, and labelled, because it is the number `check` compares and
+    COLLECTED IS STATED TOO, and labeled, because it is the number `check` compares and
     an operator reading both wants to see they agree. Omitting it would just move the
     confusion.
     """
@@ -463,7 +497,10 @@ def cmd_check(pytest_args: tuple[str, ...]) -> int:
         print("                    above for which. `added` and `fixed` alone would have exited 0.")
         return 1
     print("  exit 0            nothing is worse than the baseline. `added` and `fixed` do not")
-    print("                    fail a check; re-run `record` to adopt this run as the new one.")
+    print("                    fail a check; re-run `record` IN THE COMMIT that adopts it --")
+    print("                    recording without committing leaves HEAD's message quoting the")
+    print("                    old count, which tests/test_commit_message_counts.py then reads")
+    print("                    as a REGRESSION. See record's own closing line.")
     return 0
 
 

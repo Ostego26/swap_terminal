@@ -180,16 +180,61 @@ def test_restart_on_nothing_running_is_just_a_start(tmp_path):
             _reap(pid)
 
 
-def test_a_CURRENT_process_appends_nothing_to_its_cycle_line():
+def test_a_CURRENT_process_appends_nothing_to_its_cycle_line(monkeypatch):
     """A healthy cycle line must be byte-identical to what it was before this feature.
 
     The note is the whole value of the change and it is also the whole risk: a
     staleness line on every cycle of every healthy worker would be noise, and
     noise is what gets filtered out before the one line that matters appears.
+
+    THE VERDICT IS SEEDED, AND IT WAS NOT UNTIL 2026-11-21. This test read the LIVE
+    tree -- `stale_code_note()` with no patch, asserting the empty string -- which
+    made it an assertion about WHEN THE SUITE RAN rather than about the function.
+    It fails whenever any .py in the tree is written while the suite is in flight,
+    because the pytest process then genuinely predates the newest file and the
+    feature correctly fires. Measured when it did fail, mid-run, on an edit to
+    swap_terminal/architecture.py:
+
+        AssertionError: assert '*** STALE CO...lone will NOT' == ''
+        + *** STALE CODE *** this worker predates the tree: this process started
+          62.3µfn (75.4s) BEFORE the newest .py file was modified
+
+    Nothing was broken. The suite had edited a file under itself, which is an
+    ordinary thing to do and must not read as a regression -- and re-running the
+    same test alone, with no write in flight, passed in 0.2s.
+
+    THIS IS THE SAME DEFECT ITS OWN SIBLING BELOW ALREADY DIAGNOSED AND FIXED, and
+    that is why it is worth the paragraph (rule 8: when you touch a rule, grep for
+    it -- the fix had been applied to ONE of the two sites). Twenty-three lines
+    down, test_a_STALE_verdict_produces_the_sentence_an_operator_needs says "A test
+    whose verdict depends on when the suite is run relative to the last edit is not
+    a test of anything", having been flaky for exactly this reason with pid 1. It
+    seeds its verdict. This one, asserting the opposite branch of the same
+    function, kept reading the real clock -- so the pair disagreed about whether
+    the hazard existed, and the half that was still exposed was the half that fires
+    on every developer who edits during a run.
+
+    THE LIVE TREE IS STILL COVERED, deliberately, by
+    test_the_note_is_WIRED_to_a_real_pid_and_a_real_tree immediately below: it
+    walks a real pid against a real tree and asserts the verdict is one of the
+    THREE, which is the only honest assertion available when both inputs move. The
+    split is the same one the sibling's docstring sets out -- gathering is tested
+    against seeded timestamps, and what the operator READS is tested here.
     """
+    monkeypatch.setattr(
+        "workers.common.worker_code_freshness",
+        lambda _pid: {
+            "verdict": supervisor.CODE_CURRENT,
+            "reason": "this process started 62.3µfn (75.4s) AFTER the newest .py file was modified",
+            "newest_path": "/x/swap_terminal/supervisor.py",
+            "code_modified_at": 0.0,
+            "process_started_at": 1.0,
+            "delta_seconds": 75.4,
+        },
+    )
     assert stale_code_note() == "", (
-        "this process started after the newest .py file, so it is not stale and must "
-        "say nothing"
+        "a CURRENT verdict must produce no note at all: a staleness line on every "
+        "cycle of every healthy worker is the noise this feature cannot afford"
     )
     line = cycle_line("payout_worker", 3, 0.2, {"pending_at_start": 0, "broadcast": 0})
     assert "\n" not in line, "a current worker's cycle line gained a second line"
@@ -230,6 +275,12 @@ def test_a_STALE_verdict_produces_the_sentence_an_operator_needs(monkeypatch):
                                            the only thing this file introduced
 
     So the verdict is seeded here and the assertions are about the SENTENCE.
+
+    ITS TWIN ABOVE WAS STILL READING THE REAL CLOCK UNTIL 2026-11-21, and the
+    reasoning in this docstring is what settled it: the CURRENT branch of the same
+    function was asserted against the live tree and failed the first time the suite
+    edited a .py under itself. Both halves are seeded now. If a third verdict ever
+    grows a sentence, seed it too rather than finding a process in that state.
     """
     monkeypatch.setattr(
         "workers.common.worker_code_freshness",

@@ -1,0 +1,118 @@
+# The ONE home for the digest of every upstream daemon tarball this repository's
+# images install. Rule 8: a second copy of a digest is a bug with a delay on it.
+#
+# Role: build-input pin (data, consumed by `sha256sum -c`)
+# Reads: nothing
+# Writes: nothing
+# Can move funds: no. It decides which BYTES become a regtest daemon; it never
+#        signs, broadcasts or reads a credential.
+# Mainnet-safe: yes. Nothing here is network-specific, and the image that consumes
+#        it runs regtest only (regtest/daemons.assert_regtest() is unconditional).
+#
+# FORMAT IS `sha256sum -c`'s OWN, deliberately, so this repository writes no parser
+# of its own. tests/test_docker_build_context.py's header argues the same thing
+# about not reimplementing docker's ignore matcher: the moment our parser and the
+# real tool disagree, the test passes while the build ships something else.
+#
+# MEASURED 2026-11-21, GNU coreutils 9.4 in this container, so the prose above is
+# not a guess about what the tool tolerates:
+#   - `#` comment lines and blank lines: accepted SILENTLY, no "improperly
+#     formatted" warning, rc=0. That is why this header can live in the file the
+#     tool reads instead of in a second file beside it.
+#   - a 63-hex (one character short) digest line: SKIPPED with a warning, and the
+#     run still exits 0 if any OTHER line verified. So a typo here DISARMS half the
+#     check silently, which is why
+#     tests/test_upstream_daemons_are_pinned_and_verified.py asserts every line is
+#     exactly 64 lowercase hex rather than trusting the tool to complain.
+#   - a manifest that pins no filename the build downloaded:
+#     "sha256sum: <file>: no file was verified", rc=1. THAT is what makes
+#     docker/harness.Dockerfile's `--ignore-missing` fail-closed: bump
+#     BITCOIN_VERSION without adding a line here and the BUILD refuses, not just a
+#     test.
+#
+# NOT MEASURED: debian:bookworm-slim ships coreutils 9.1, and all three behaviors
+# above were measured on 9.4 here. `--ignore-missing` has existed since coreutils
+# 8.25, so the flag is present; its zero-files-verified exit status on 9.1 is
+# REASONED from 9.4's, not observed. Re-measure it on a host with a docker daemon
+# before trusting the fail-closed claim -- that is the first item in this change's
+# operator hand-off.
+#
+# WHY THIS FILE AND NOT upstream's SHA256SUMS FETCHED AT BUILD TIME. A manifest
+# pulled from the same host over the same channel as the tarball verifies TRANSPORT
+# and nothing else: it catches corruption, not substitution. A digest reviewed once
+# and committed here is trust-on-first-use and detects a changed artifact forever.
+#
+# HOW A LINE GETS ADDED, AND THIS PARAGRAPH IS THE ONLY ENFORCEMENT THERE IS. No
+# test can tell a correct digest from the digest of whatever was downloaded last
+# Tuesday -- a digest is a digest. So the failure mode to refuse by hand is: a
+# version bump breaks the build, and the fastest green is
+# `sha256sum thetarball >> this file`. That records the digest of an UNVERIFIED
+# artifact and calls it a pin. A new line is added only after the project's own
+# signed release has been checked:
+#
+#     Bitcoin Core    https://bitcoincore.org/bin/bitcoin-core-<v>/SHA256SUMS
+#                     plus SHA256SUMS.asc, against the Bitcoin Core builder keys
+#                     (github.com/bitcoin-core/guix.sigs)
+#     Litecoin Core   https://download.litecoin.org/litecoin-<v>/SHA256SUMS.asc,
+#                     which is CLEARSIGNED -- the digests and the signature are one
+#                     document -- against the release key
+#
+# =============================================================================
+# PROVENANCE OF EACH LINE BELOW, measured 2026-11-21 from this container. The two
+# projects are NOT equally well attested and writing all four lines in one voice
+# would be rule 17's exact failure: presenting a hypothesis in the register of a
+# measurement.
+# =============================================================================
+#
+# BITCOIN, both lines: UPSTREAM'S OWN, copied from
+# https://bitcoincore.org/bin/bitcoin-core-28.1/SHA256SUMS (HTTP 200, 2620 bytes).
+# The x86_64 line is additionally confirmed by outcome -- the 49,598,812-byte
+# tarball was downloaded here and `sha256sum --ignore-missing -c` against that
+# manifest printed "bitcoin-28.1-x86_64-linux-gnu.tar.gz: OK", rc=0.
+# NOT VERIFIED: the PGP signature. bitcoincore.org's SHA256SUMS is unsigned plain
+# text (zero "BEGIN PGP" matches) and the 13 detached signatures in SHA256SUMS.asc
+# all fail with "No public key" -- the builder keys live in a GitHub repository this
+# session's proxy blocks, and no keyserver is reachable on 443. So Bitcoin's chain
+# here is TLS plus a checksum file from the same host: transit integrity, not
+# provenance. The operator's one-time check closes that.
+#
+# LITECOIN, both lines: ALSO UPSTREAM'S OWN, AND PGP-SIGNED. This corrects the
+# design note this change was written from, which reported that
+# download.litecoin.org publishes no checksum manifest and that the Litecoin
+# digests were therefore locally computed. It does publish one, at the RELEASE
+# ROOT rather than under linux/ or src/:
+#   https://download.litecoin.org/litecoin-0.21.4/SHA256SUMS.asc  HTTP 200, 1775 bytes
+# It is a CLEARSIGNED document covering all NINE release artifacts, both linux
+# tarballs included. Earlier probes went to litecoin-0.21.4/linux/SHA256SUMS and
+# litecoin-0.21.4/src/SHA256SUMS, which 404 -- one directory level too deep -- and
+# "no manifest exists" was concluded from "not at the path I tried". `gpg --verify`
+# on it: "Good signature from David Burkett <davidburkett38@gmail.com>", RSA key
+# D35621D53A1CC6A3456758D03620E9D387E55666, signature made 2024-10-22. The x86_64
+# line is also confirmed by outcome against the 36,737,533-byte tarball
+# ("litecoin-0.21.4-x86_64-linux-gnu.tar.gz: OK", rc=0).
+# CAVEAT, AND IT IS NOT SMALL: the key was fetched from download.litecoin.org --
+# the same host that serves the artifact it signs. That establishes the release's
+# internal self-consistency, NOT independent attestation; a compromised host could
+# have replaced tarball, manifest and key as a set. gpg says so itself: "This key
+# is not certified with a trusted signature." No keyserver is reachable from here
+# to cross-check the fingerprint.
+#
+# NEITHER aarch64 TARBALL WAS DOWNLOADED HERE. Both aarch64 digests come from the
+# upstream manifests above and nothing else. That is the same evidence the x86_64
+# lines rest on minus the local recomputation, and it is stated rather than rounded
+# up to "verified".
+#
+# UPSTREAM PUBLISHES MORE ARCHES THAN THESE FOUR LINES COVER, and that is correct
+# rather than an omission: docker/harness.Dockerfile's `case "$arch"` builds for
+# amd64 and arm64 only and exits 1 on anything else.
+# tests/test_upstream_daemons_are_pinned_and_verified.py derives the arch list from
+# that case block, so adding an arm (bitcoin publishes arm-linux-gnueabihf, riscv64
+# and powerpc64; litecoin publishes arm-linux-gnueabihf and riscv64) without adding
+# its digest here fails at suite time with the filename named -- instead of failing
+# only on somebody else's machine, in a build log, as coreutils' bare "no file was
+# verified".
+
+07f77afd326639145b9ba9562912b2ad2ccec47b8a305bd075b4f4cb127b7ed7  bitcoin-28.1-x86_64-linux-gnu.tar.gz
+6ddb6990690bd4c9a9f4319ed6f6e9c995c85ce5530ee9f120e80ce09e090c44  bitcoin-28.1-aarch64-linux-gnu.tar.gz
+857fc41091f2bae65c3bf0fd4d388fca915fc93a03f16dd2578ac3cc92898390  litecoin-0.21.4-x86_64-linux-gnu.tar.gz
+517e3a9069e658eb92de98c934c61836589ee2410d99464a768a5698985926c9  litecoin-0.21.4-aarch64-linux-gnu.tar.gz

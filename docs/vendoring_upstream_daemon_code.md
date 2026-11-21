@@ -117,3 +117,84 @@ That is not an argument against vendoring in general. It is the measurement
 that settles these three, and it only exists because somebody ran
 `getpeerinfo` for an unrelated reason -- which is the case for recording a
 number rather than reasoning about it.
+
+## 2026-11-21: the question was asked again about whole daemons, and the answer is to vendor nothing
+
+Operator, 2026-11-21: *"can you just integrate these independent daemons that
+open source into our own closed source?"*
+
+Everything above is about taking a FUNCTION or a PATCH. This is about the whole
+`bitcoind`. The answer is that the license is not the obstacle and that the
+cheapest way to satisfy the request is to copy none of their code.
+
+**Re-measured from checksum-verified source tarballs rather than recalled.**
+`bitcoin-28.1.tar.gz` (digest matched `bitcoincore.org`'s own `SHA256SUMS`) and
+`litecoin-0.21.4.tar.gz` (digest matched the clearsigned
+`download.litecoin.org/litecoin-0.21.4/SHA256SUMS.asc`, *"Good signature from
+David Burkett"*):
+
+    bitcoin-28.1/COPYING       "The MIT License (MIT)", 2 copyright lines
+    litecoin-0.21.4/COPYING    "The MIT License (MIT)", 3 copyright lines
+                               (adding "The Litecoin Core developers")
+
+MIT permits closed-source redistribution outright -- the grant covers *"use,
+copy, modify, merge, publish, distribute, sublicense, and/or sell"*. So the
+obligation is still the one this document opened with: carry the notice.
+
+**What was built instead of a vendored tree.** `docker/harness.Dockerfile`
+already downloaded the projects' own release tarballs; what it lacked was any
+integrity check and any notice. Both are now there, and the whole footprint in
+this repository is a version string, a digest and two license files:
+
+    docker/upstream_binaries.sha256      the ONE home for every digest
+    docker/licenses/<project>/COPYING    each project's own notice, verbatim
+    docker/licenses/berkeley-db/         the measured Sleepycat finding below
+    swap_terminal/architecture.py        UPSTREAM_BINARIES / UPSTREAM_SOURCE
+
+`tests/test_upstream_daemons_are_pinned_and_verified.py` and seven new cases in
+`tests/test_architecture_is_what_the_tree_does.py` derive all of it from the
+Dockerfiles and the manifest.
+
+**A submodule and a committed source tree were both rejected with numbers**, and
+the arguments are in `architecture.py`'s own comments: a submodule needs network
+at clone time that this environment cannot serve and gives source where a binary
+is wanted; a committed tree is the trade `.gitignore` already records paying once,
+*"891 files and 198MB of build output committed to this repository"*. Measured
+2026-11-21: 567 tracked files, 16,409,942 bytes of tracked content, zero tracked
+binaries. (This line first read 561 and 16,301,488 -- honestly measured, and then
+made stale by the six files this same change adds. Rule 3's denominator problem
+committed inside the change that caused it; `architecture.py`'s comment beside
+`VENDORED_UPSTREAM_TREES` keeps the longer version of the correction.)
+
+### Two findings that change what a reader should carry forward
+
+**THE RELEASE BINARIES CONTAIN BERKELEY DB, AND BOTH OF THEM DO.** A license
+audit of the two source trees on the same day concluded Bitcoin Core 28.1 is
+clean, having *proven by a build* that `--without-bdb --with-sqlite` yields a
+wallet-capable `bitcoind` with no Berkeley DB, while Litecoin 0.21.4 has no such
+option. Both halves are correct and **neither reaches this image**, because
+nothing here builds from source. Measured against the prebuilt artifacts:
+
+    strings -a <daemon> | grep -c '^Berkeley DB 4.8.30: (April  9, 2010)$'
+      bitcoind 1    bitcoin-cli 0    litecoind 1    litecoin-cli 0
+
+That is Berkeley DB's own `DB_VERSION_STRING`. `ldd` on either daemon names no
+`libdb` at all, because the release builds are static, **so a linkage audit done
+with `ldd` calls them clean and is wrong** -- which is how this gets missed.
+Sleepycat clause 3 is the only source-disclosure condition anywhere in these
+images, it triggers on *distribution*, and this repository distributes nothing.
+`docker/licenses/berkeley-db/MEASURED_LINKAGE.md` states the finding, says which
+parts were measured and which reasoned, and leaves the *"accompanying software"*
+question to counsel. Shipping the two MIT notices alone would have been accurate
+about Bitcoin Core and Litecoin Core and false about what is in the binaries.
+
+**LITECOIN PUBLISHES A SIGNED CHECKSUM MANIFEST AFTER ALL.** Two earlier
+sessions concluded it does not, from probes of
+`litecoin-0.21.4/src/SHA256SUMS` and `litecoin-0.21.4/linux/SHA256SUMS`, which
+404. The manifest is at the release ROOT and covers all nine artifacts:
+`https://download.litecoin.org/litecoin-0.21.4/SHA256SUMS.asc`, HTTP 200, 1775
+bytes, clearsigned. *"No manifest exists"* was concluded from *"not at the path
+I tried"* -- rule 17's failure in its quietest form, because a 404 looks like an
+answer. Both Litecoin digests in the manifest are therefore upstream's own and
+PGP-signed, not locally computed; the trust root is still circular (the key comes
+from the same host) and that is recorded beside them.

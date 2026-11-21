@@ -280,6 +280,224 @@ def test_the_process_tuple_names_every_supervised_worker():
     )
 
 
+def _harness_instructions() -> str:
+    """docker/harness.Dockerfile with its comment lines blanked.
+
+    PROSE IS STRIPPED BECAUSE THE COMMENTS NAME THE VERY THINGS SCANNED FOR -- the
+    ARG names, the version numbers, the manifest path -- at length, which is what
+    rule 1 asks for and is also how a gate ends up measuring its own explanation.
+    tests/prose.py's header counts nine earlier instances of exactly that, and
+    dockerfile_without_comments() was added there for this one rather than copied
+    into two test files (rule 8).
+    """
+    from prose import dockerfile_without_comments  # noqa: PLC0415 -- one home for the stripper
+
+    return dockerfile_without_comments((REPOSITORY_ROOT / "docker" / "harness.Dockerfile").read_text())
+
+
+def _manifest_filenames() -> list[str]:
+    """Every filename docker/upstream_binaries.sha256 pins, comments skipped.
+
+    No digest is read. architecture.py records the manifest's PATH and never a
+    value, and this derivation keeps to the same line: it asks WHICH artifacts are
+    pinned, not what their digests are.
+    """
+    manifest = {row.digest_manifest for row in architecture.UPSTREAM_BINARIES.values()}
+    assert len(manifest) == 1, f"more than one digest manifest recorded: {sorted(manifest)}"
+    text = (REPOSITORY_ROOT / manifest.pop()).read_text()
+    return [
+        line.split()[1]
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#") and len(line.split()) == 2
+    ]
+
+
+def test_upstream_binaries_names_every_release_download_the_images_perform():
+    """UPSTREAM_BINARIES must cover exactly the binary-tarball downloads docker/ performs.
+
+    Derived by scanning every docker/*.Dockerfile for a curl of a .tar.gz, grouping
+    by host, and subtracting the hosts UPSTREAM_SOURCE accounts for (Berkeley DB's
+    tarball and the Gridcoin clone belong to a build-from-source row, not to a
+    prebuilt-binary one). Neither the key set nor the host set is restated.
+
+    MUTATION CAUGHT, in both directions: delete the LTC row and this fails naming
+    download.litecoin.org; add a fourth daemon's download to any Dockerfile without
+    recording it and it fails the other way. The second direction is the one that
+    matters -- a binary nobody wrote down is a binary nobody verified, and that is
+    how .dockerignore's own comment came to be "short by two" when icp-replica and
+    grc-desk were added with `context: .` and nobody re-counted.
+    """
+    from prose import dockerfile_without_comments  # noqa: PLC0415 -- one home for the stripper
+
+    hosts = set()
+    for dockerfile in sorted((REPOSITORY_ROOT / "docker").glob("*.Dockerfile")):
+        text = dockerfile_without_comments(dockerfile.read_text())
+        for url in re.findall(r'curl\s+-[A-Za-z]*O[A-Za-z]*\s+"(https://[^"]+\.tar\.gz)"', text):
+            hosts.add(url.split("//", 1)[1].split("/", 1)[0])
+    from_source = {h for row in architecture.UPSTREAM_SOURCE.values() for h in row.fetches_from}
+    recorded = {row.host for row in architecture.UPSTREAM_BINARIES.values()}
+    assert hosts - from_source == recorded, (
+        f"docker/ downloads release tarballs from {sorted(hosts)}; UPSTREAM_SOURCE accounts for "
+        f"{sorted(from_source)} and UPSTREAM_BINARIES for {sorted(recorded)}"
+    )
+
+
+@pytest.mark.parametrize("asset", sorted(architecture.UPSTREAM_BINARIES))
+def test_each_upstream_pin_is_the_version_the_dockerfile_installs(asset):
+    """The recorded `pin_variable` must exist as an ARG, and its value must be the manifest's.
+
+    THE VERSION IS THE ONE FACT WRITTEN TWICE and this is what makes it unable to
+    drift: once as `ARG BITCOIN_VERSION=28.1` in the Dockerfile, once inside the
+    manifest's filenames. Deriving the ARG from the manifest with shell was
+    considered and rejected -- it would put a second parser of the manifest in the
+    tree, in the stage that installs the binaries, where it is hardest to test, and
+    rule 8 is about two implementations of one rule. The ARG is also what the
+    operator reads and overrides, and harness.Dockerfile:37-53's at-length
+    justification for 28.1 (it matches their measured host) is attached to it.
+
+    THE BUILD ALREADY REFUSES DISAGREEMENT -- `sha256sum --ignore-missing -c`
+    verifies nothing and exits 1 when the manifest covers no downloaded filename,
+    measured 2026-11-21 on coreutils 9.4 -- so this test's value is the MESSAGE: it
+    names both files and both versions at suite time instead of leaving the operator
+    to read a bare "no file was verified" out of a build log.
+
+    MUTATION CAUGHT: bump `ARG BITCOIN_VERSION=29.0` and leave the manifest at 28.1.
+    Also caught: renaming the ARG, which would leave architecture.py pointing at a
+    variable that no longer exists -- and that one the build would NOT catch, because
+    an undefined ARG expands to empty and the curl would 404 instead of saying why.
+    """
+    row = architecture.UPSTREAM_BINARIES[asset]
+    text = _harness_instructions()
+    match = re.search(rf"^ARG\s+{re.escape(row.pin_variable)}=(\S+)", text, re.MULTILINE)
+    assert match, (
+        f"{row.installed_by} has no `ARG {row.pin_variable}=`, which architecture.py records as "
+        f"{asset}'s pin. An undefined ARG expands to empty, so the curl 404s rather than "
+        f"explaining itself"
+    )
+    version = match.group(1)
+    # THE FILENAME PREFIX IS DERIVED FROM THE CURL LINE, not from the project's name
+    # in the table. "bitcoin-${BITCOIN_VERSION}-${btc_arch}.tar.gz" -> "bitcoin-", so
+    # a row whose project string were cosmetically edited cannot change which
+    # manifest lines this test reads. The host is the only thing taken from the
+    # table, and test_upstream_binaries_names_every_release_download_the_images_perform
+    # above is what makes the host trustworthy.
+    template = next(
+        url.rsplit("/", 1)[1]
+        for url in re.findall(r'curl\s+-[A-Za-z]*O[A-Za-z]*\s+"(https://[^"]+\.tar\.gz)"', text)
+        if url.split("//", 1)[1].split("/", 1)[0] == row.host
+    )
+    prefix = template.split("${", 1)[0]
+    pinned = [name for name in _manifest_filenames() if name.startswith(prefix)]
+    assert pinned, (
+        f"the digest manifest pins nothing starting {prefix!r}, which is the filename prefix "
+        f"{row.installed_by} downloads {row.project} under"
+    )
+    disagree = [name for name in pinned if f"-{version}-" not in name]
+    assert disagree == [], (
+        f"{row.installed_by} pins {row.pin_variable}={version} and the manifest pins {disagree}. "
+        f"The build would refuse this with coreutils' 'no file was verified'; fix both together"
+    )
+
+
+@pytest.mark.parametrize("asset", sorted(architecture.UPSTREAM_BINARIES))
+def test_each_recorded_arch_set_is_the_one_the_dockerfile_can_build(asset):
+    """`arches` must equal the tokens the Dockerfile's own `case "$arch"` assigns.
+
+    MUTATION CAUGHT: the Dockerfile grows a third arm -- both projects really do
+    publish arm-linux-gnueabihf and riscv64 builds, measured from their own checksum
+    manifests on 2026-11-21 -- and architecture.py keeps describing two. Paired with
+    the manifest-coverage assertion in
+    tests/test_upstream_daemons_are_pinned_and_verified.py, that makes adding an
+    architecture a three-file change that cannot be done two-thirds of the way.
+    """
+    row = architecture.UPSTREAM_BINARIES[asset]
+    text = _harness_instructions()
+    template = next(
+        url.rsplit("/", 1)[1]
+        for url in re.findall(r'curl\s+-[A-Za-z]*O[A-Za-z]*\s+"(https://[^"]+\.tar\.gz)"', text)
+        if url.split("//", 1)[1].split("/", 1)[0] == row.host
+    )
+    arch_var = re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", template)[1]
+    tokens: list[str] = []
+    for value in re.findall(rf"\b{re.escape(arch_var)}=([A-Za-z0-9_.-]+)", text):
+        if value not in tokens:
+            tokens.append(value)
+    assert sorted(row.arches) == sorted(tokens), (
+        f"{asset}: architecture.py records arches={sorted(row.arches)} and {row.installed_by}'s "
+        f"case block assigns {arch_var}={sorted(tokens)}"
+    )
+
+
+def test_the_digest_manifest_is_one_path_and_every_installer_copies_it():
+    """One manifest, and each Dockerfile that verifies with it must COPY it in.
+
+    MUTATION CAUGHT: give the two rows different manifest paths -- the obvious move
+    when a third chain arrives -- and the single-copy property this whole design
+    rests on is gone. Also caught: deleting the `COPY docker/upstream_binaries.sha256`
+    line, which would leave the verify reading a path that does not exist in the
+    build context and `sha256sum` failing for a reason unrelated to any digest.
+    """
+    manifests = {row.digest_manifest for row in architecture.UPSTREAM_BINARIES.values()}
+    assert len(manifests) == 1, (
+        f"UPSTREAM_BINARIES records {sorted(manifests)} as digest manifests. More than one "
+        f"manifest is more than one home for the same kind of fact (rule 8)"
+    )
+    manifest = manifests.pop()
+    assert (REPOSITORY_ROOT / manifest).is_file(), f"{manifest} does not exist"
+    for installer in {row.installed_by for row in architecture.UPSTREAM_BINARIES.values()}:
+        from prose import dockerfile_without_comments  # noqa: PLC0415 -- one home for the stripper
+
+        text = dockerfile_without_comments((REPOSITORY_ROOT / installer).read_text())
+        assert f"COPY {manifest} " in text, (
+            f"{installer} verifies against {manifest} and never COPYs it into the build context"
+        )
+
+
+def test_the_gridcoin_build_records_its_own_weaker_provenance():
+    """UPSTREAM_SOURCE["GRC"] must describe grc-desk.Dockerfile as it actually is.
+
+    `ref_is_pinned` is True exactly when the ARG's value is 40 hex characters, and
+    `digest_verified` exactly when the Dockerfile runs a checksum check at all.
+
+    MUTATION CAUGHT, IN BOTH DIRECTIONS, AND THEY FAIL DIFFERENTLY ON PURPOSE.
+    Somebody pins a real SHA and leaves the table saying False: the table then
+    understates the tree's safety and the next reader redoes work already done.
+    Somebody replaces a SHA with a moving tag and leaves it saying True: the table
+    OVERSTATES it, which is the dangerous direction on the one image in this
+    repository that holds a wallet. Same for a digest check appearing or being
+    deleted.
+
+    THIS RECORDS A GAP RATHER THAN EXCUSING ONE, and it is not a ratchet (rule 19):
+    nothing is tolerated by appearing here, and both flags are derived facts rather
+    than allowances. Why the gap is not closed in this pass is rule 16's line --
+    grc-desk holds a wallet, and the correct commit SHA cannot be established from
+    this container because github.com/gridcoin-community returns 403 at this
+    session's proxy and download.oracle.com is not allow-listed.
+    """
+    from prose import dockerfile_without_comments  # noqa: PLC0415 -- one home for the stripper
+
+    for asset, row in sorted(architecture.UPSTREAM_SOURCE.items()):
+        text = dockerfile_without_comments((REPOSITORY_ROOT / row.built_by).read_text())
+        match = re.search(rf"^ARG\s+{re.escape(row.ref_variable)}=(\S+)", text, re.MULTILINE)
+        assert match, f"{row.built_by} has no `ARG {row.ref_variable}=`"
+        ref = match.group(1)
+        looks_like_a_sha = bool(re.fullmatch(r"[0-9a-f]{40}", ref))
+        assert row.ref_is_pinned == looks_like_a_sha, (
+            f"{asset}: architecture.py records ref_is_pinned={row.ref_is_pinned} and "
+            f"{row.built_by} has {row.ref_variable}={ref}, which is "
+            f"{'a commit SHA' if looks_like_a_sha else 'NOT a commit SHA -- a tag upstream can move'}"
+        )
+        runs_a_check = "sha256sum" in text or "sha256 -c" in text
+        assert row.digest_verified == runs_a_check, (
+            f"{asset}: architecture.py records digest_verified={row.digest_verified} and "
+            f"{row.built_by} {'runs' if runs_a_check else 'runs no'} checksum check"
+        )
+        assert f"{row.license_in_image}" in text, (
+            f"{row.built_by} does not COPY a notice to {row.license_in_image}, which "
+            f"architecture.py records as where {asset}'s license lands"
+        )
+
+
 def test_the_custody_table_covers_exactly_the_assets_the_registry_can_build():
     """CUSTODY must name every chain an adapter exists for, and no others.
 
