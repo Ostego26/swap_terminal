@@ -1058,6 +1058,46 @@ class RPCAdapter:
             logger.info("%s payout amount %s  <- %s", self.asset or "?", fitted, changed)
         return self.call("sendtoaddress", address, fitted)
 
+    def script_pub_key_for(self, address: str) -> bytes:
+        """The scriptPubKey this daemon would put in an output paying `address`.
+
+        READ-ONLY, one RPC, nothing signed and no wallet touched. It exists so the
+        EXACT dust floor can be applied at swap creation, where the destination is
+        finally known -- dust_floor.dust_threshold_satoshis() prices the output's
+        SHAPE, and a 2,940-litoshi floor is right for a bech32 destination and
+        wrong by 2,520 for a base58 one.
+
+        MEASURED ON BOTH DAEMONS 2026-11-22, because the tree records several
+        0.21.4-vs-28.1 field divergences and this one had never been checked.
+        `getaddressinfo` returns `scriptPubKey` on both, for every address kind
+        each can issue:
+
+            litecoind 0.21.4   legacy 76a914..88ac  p2sh-segwit a914..87  bech32 0014..
+            bitcoind 28.1      the same three, plus bech32m 5120.. (P2TR)
+
+        `validateaddress` returns the identical hex on both, and is NOT used: it is
+        the older call, and on Bitcoin Core since 0.18 it no longer carries wallet
+        fields, so preferring it would be choosing the narrower interface for no
+        reason. Said rather than left as a coin-flip between two calls that agreed.
+
+        Raises:
+            RPCError: if the daemon cannot be asked, or answers without the field.
+                The CALLER decides what that means -- see
+                services/swap_service.refuse_a_payout_below_the_exact_dust_floor(),
+                which treats it as "fall back to the conservative floor" rather
+                than as a reason to refuse a swap. A chain that cannot be asked
+                about an address must not be a chain that cannot be paid.
+        """
+        answer = self.call("getaddressinfo", address)
+        hex_text = (answer or {}).get("scriptPubKey", "") if isinstance(answer, dict) else ""
+        if not hex_text:
+            raise RPCError(
+                f"getaddressinfo on {self.asset or 'this chain'} returned no scriptPubKey for "
+                f"{address!r}, so the exact dust threshold for that destination cannot be computed. "
+                f"NOTHING was written and nothing was sent."
+            )
+        return bytes.fromhex(hex_text)
+
     def own_address(self) -> str:
         """An address this WALLET already owns, read not derived. "" when none can be read.
 

@@ -26,7 +26,13 @@ is written out at the function.
 import logging
 import os
 
+# The dust rule lives in the package-root leaf swap_terminal/dust_floor.py, which
+# imports nothing but __future__ -- so asking it here costs this module no new
+# dependency. coin_amounts' converter is aliased for the same reason it is in
+# services/quote_service.py: chains/solana_units.py exports the same NAME.
 from chains.base import RPCError
+from chains.coin_amounts import CHAIN_DECIMALS
+from chains.coin_amounts import amount_to_base_units as coin_amount_to_base_units
 from chains.gridcoin_wallet_lock import (
     WALLET_UNLOCK_ASSETS,
     WALLET_UNLOCK_ENV_VAR,
@@ -39,6 +45,7 @@ from chains.registry import (
     why_cannot_pay_out,
     why_unconfigured,
 )
+from dust_floor import dust_threshold_satoshis
 from modules.address_authority import check_address, check_receive_address, expected_network
 from services.chain_reachability import reachability_refusal, reachability_rows
 
@@ -937,6 +944,74 @@ def _unreachable_leg_for_swap(db, from_asset: str, to_asset: str) -> str:
     return ""
 
 
+def refuse_a_payout_below_the_exact_dust_floor(adapters: dict, to_asset: str, payout_address: str, output_amount: float) -> None:
+    """The dust floor again, EXACT, now that the destination address is known.
+
+    services/quote_service.require_deliverable_dust_payout() already refused at
+    quote time using the SMALLEST shape's threshold, because no address existed
+    yet. That is conservative by construction and leaves a band open, and the band
+    is not theoretical:
+
+      MEASURED 2026-11-22 against a regtest litecoind 0.21.4 with
+      `testmempoolaccept`, which broadcasts nothing -- 3,000 litoshi to a LEGACY
+      P2PKH destination is "REFUSED: dust", and 5,460 is ALLOWED. 3,000 PASSES the
+      quote-time floor of 2,940. So a customer could be quoted a payout this desk
+      would hand to litecoind and litecoind would reject, for any base58 LTC
+      address: the band 2,940-5,459.
+
+    THE SAME RUN ALSO SETTLED WHETHER THIS IS IMPLEMENTABLE, which is why it was
+    named work until that day rather than done: both daemons return the
+    destination's `scriptPubKey` from `getaddressinfo` -- see
+    chains/base.RPCAdapter.script_pub_key_for() for the per-kind measurement -- and
+    that hex is exactly what dust_threshold_satoshis() takes. No new arithmetic.
+
+    CALLED AFTER refuse_unusable_payout_address() AND NOT INSIDE IT. That function
+    sits at ruff's C901 ceiling of 12 and rule 12 is explicit that the answer is to
+    extract the decision rather than raise the ceiling. This is a different
+    decision anyway: that one asks whether the address can RECEIVE, this asks
+    whether the AMOUNT can be relayed to it.
+
+    A CHAIN THAT CANNOT BE ASKED MUST NOT BECOME A CHAIN THAT CANNOT BE PAID, which
+    is the one judgment here. If the RPC fails, this returns silently and the
+    quote-time floor remains the only gate -- exactly today's behavior, no worse.
+    Refusing instead would turn a daemon hiccup into a refused swap, and the
+    conservative floor has already passed.
+
+    NO TOLERANCE FACTOR, unlike the quote-time gate. That one multiplies by
+    (1 - AMOUNT_TOLERANCE_PCT) because scaled_payout_amount() can shrink the figure
+    AFTER the quote. By here the figure is the quote's own, the scaling still lies
+    ahead, and applying the tolerance twice would refuse payouts that clear the
+    floor -- so the quote-time gate owns that margin and this one does not repeat it.
+    """
+    if to_asset not in CHAIN_DECIMALS:
+        return
+    adapter = (adapters or {}).get(to_asset)
+    if adapter is None:
+        return
+    try:
+        script_pub_key = adapter.script_pub_key_for(payout_address)
+    except Exception as exc:  # noqa: BLE001 -- checked: any failure here means "could not ask", and the caller's own docstring says that must not refuse a swap the conservative quote-time floor already passed. The reason is logged rather than swallowed.
+        logger.info(
+            "%s exact dust floor not applied for %s: %s: %s. The quote-time floor (smallest shape) "
+            "already passed, so the swap proceeds on that.",
+            to_asset, payout_address, type(exc).__name__, exc,
+        )
+        return
+    threshold = dust_threshold_satoshis(to_asset, script_pub_key)
+    amount_base_units = coin_amount_to_base_units(output_amount, CHAIN_DECIMALS[to_asset])
+    if amount_base_units >= threshold:
+        return
+    decimals = CHAIN_DECIMALS[to_asset]
+    raise ValueError(
+        f"No swap was created: a {to_asset} payout of {output_amount:.8f} is below the smallest "
+        f"amount the {to_asset} network will relay TO THIS ADDRESS, which is "
+        f"{threshold / 10**decimals:.8f} {to_asset}. Addresses of different kinds have different "
+        f"minimums on this chain, and this one is higher than the general limit the quote was "
+        f"checked against. A payment this small would be rejected by the network rather than "
+        f"delivered. Use a larger amount, or a different payout address. Nothing was written."
+    )
+
+
 def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) -> dict:
     quote = get_quote_or_raise(db, quote_id)
     to_asset = quote["to_asset"]
@@ -1125,6 +1200,12 @@ def create_swap(db, config, adapters: dict, quote_id: str, payout_address: str) 
             f"{from_asset}. Nothing was written."
         )
     refuse_unusable_payout_address(config, adapters, to_asset, payout_address)
+    # THE EXACT DUST FLOOR, which needs the address and so could not run at quote
+    # time. Placed immediately after the address is known to be usable and before
+    # anything is written, so a refusal costs a retry rather than a stranded swap.
+    refuse_a_payout_below_the_exact_dust_floor(
+        adapters, to_asset, payout_address, float(quote["output_amount_estimate"])
+    )
     refuse_unless_the_payout_can_be_funded(adapters, config, quote, from_asset, to_asset)
     swap_id = new_id("s")
     # The swap row must exist before a tag can reference it: xrp_destination_tags

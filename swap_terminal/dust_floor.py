@@ -46,6 +46,48 @@ computed before and after for five output shapes on all three chains and compare
     P2TR    BTC 330   LTC 3300   GRC 1
 
 Identical in every cell, and both describe_dust_threshold() sentences byte for byte.
+
+=============================================================================
+CONFIRMED BY THE DAEMONS THEMSELVES, 2026-11-22, AND IT NEVER HAD BEEN
+=============================================================================
+
+Every figure above was Bitcoin Core's GetDustThreshold arithmetic applied to a
+relay rate measured on 2026-09-25. What it had never been checked against is a
+daemon's own answer -- tests/test_ltc_chain_facts.py said so in its own words:
+"WHAT IS NOT MEASURED HERE (rule 17): that litecoind refuses 2000 base units. No
+litecoind is reachable from this container."
+
+One now is. Regtest daemons built from the verified release tarballs, asked with
+`testmempoolaccept`, which broadcasts nothing:
+
+    litecoind 0.21.4, legacy P2PKH destination
+      2000 litoshi   REFUSED: dust
+      3000 litoshi   REFUSED: dust
+      5460 litoshi   ALLOWED
+
+    bitcoind 28.1, legacy P2PKH destination
+       545 sat       REFUSED: dust
+       546 sat       ALLOWED
+
+So the P2PKH row of the table -- BTC 546, LTC 5460 -- is exact, to the unit, from
+both daemons, and `reject-reason` is literally `dust`. The arithmetic was right.
+
+AND THE SAME RUN PROVED THE GAP THIS FILE'S CALLER LEAVES OPEN IS REAL. 3000
+litoshi PASSES services/quote_service.require_deliverable_dust_payout(), because
+that gate uses smallest_dust_threshold() -- 2940, the P2WPKH shape -- and litecoind
+REFUSES it to a legacy address. The band 2,940-5,459 was named as remaining work on
+the reasoning that it existed; it is now measured, with a reproduction.
+
+THE EXACT CHECK IS ALSO IMPLEMENTABLE, which was the other open question. The tree
+records several 0.21.4-vs-28.1 field divergences and nobody had checked this one.
+Both daemons return `scriptPubKey` from BOTH `getaddressinfo` and
+`validateaddress`, for every address kind they can issue:
+
+    litecoind 0.21.4   legacy 76a914..88ac   p2sh-segwit a914..87   bech32 0014..
+    bitcoind 28.1      the same three, plus bech32m 5120.. (P2TR)
+
+That hex is exactly what dust_threshold_satoshis() takes, so a create-time check
+against the real destination shape needs one read-only RPC and no new arithmetic.
 """
 
 from __future__ import annotations

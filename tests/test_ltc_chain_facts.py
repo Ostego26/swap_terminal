@@ -59,15 +59,16 @@ import ast
 from pathlib import Path
 
 import pytest
+from chains.base import RPCError
 from chains.coin_amounts import CHAIN_DECIMALS
 from chains.litecoin import LitecoinAdapter
 from config import Config
 from db import SCHEMA, apply_migrations, connect_db
-from dust_floor import DUST_RELAY_FEE_SAT_PER_KVB, dust_threshold_satoshis
+from dust_floor import DUST_RELAY_FEE_SAT_PER_KVB, STANDARD_OUTPUT_SHAPES, dust_threshold_satoshis
 from recording_rpc_adapter import RecordingRPCAdapter
 from services import payout_service
 from services.quote_service import require_deliverable_dust_payout
-from services.swap_service import get_min_confirmations
+from services.swap_service import get_min_confirmations, refuse_a_payout_below_the_exact_dust_floor
 from valid_addresses import GRC_DESK_DEPOSIT, LTC_PARTICIPANT
 
 CONFIG = {name: getattr(Config, name) for name in dir(Config) if name.isupper()}
@@ -291,11 +292,25 @@ def test_a_sub_dust_LTC_payout_is_still_SENT_rather_than_refused(tmp_path):
     list of things to cull. Note that landing one means overriding base.py's
     measurement above, so it is the operator's call and not a tidy-up.
 
-    WHAT IS NOT MEASURED HERE (rule 17): that litecoind refuses 2000 base units.
-    No litecoind is reachable from this container. The floor is Core's own
-    GetDustThreshold arithmetic over modules/htlc_fee's measured relay rate, and
-    the test above pins that half. This half measures only that OUR path does
-    not refuse first, which is the half that is ours to change.
+    THAT CLAIM IS NOW MEASURED, AND IT SAID OTHERWISE UNTIL 2026-11-22. It read:
+    "WHAT IS NOT MEASURED HERE (rule 17): that litecoind refuses 2000 base units.
+    No litecoind is reachable from this container." One was reached that day --
+    a regtest litecoind 0.21.4 built from the release tarball the harness image
+    installs, asked with `testmempoolaccept`, which broadcasts nothing:
+
+        2000 litoshi to a legacy P2PKH   REFUSED: dust
+        3000 litoshi to a legacy P2PKH   REFUSED: dust
+        5460 litoshi to a legacy P2PKH   ALLOWED
+
+    and bitcoind 28.1 the same way: 545 sat REFUSED, 546 sat ALLOWED. So the
+    table's P2PKH row -- BTC 546, LTC 5460 -- is exact to the unit from the
+    daemons themselves, and the reject-reason is literally `dust`. The 2000 base
+    units this test watches reach sendtoaddress would be refused by the node.
+
+    WHAT THIS HALF STILL MEASURES is unchanged and is the point: that OUR path
+    does not refuse first. The daemon refusing is not a defense -- it leaves the
+    swap `failed` with the deposit credited and nothing to re-queue it, which is
+    why the gate went to quote time.
     """
     conn = _seeded_sub_dust_swap(tmp_path)
     adapter = RecordingRPCAdapter("LTC")
@@ -412,4 +427,124 @@ def test_create_quote_ACTUALLY_CALLS_the_dust_floor():
     assert "require_deliverable_sol_payout" in called, (
         "the SOL floor's call site went missing from the same function; these two are the only "
         "payout-minimum gates in the quote path"
+    )
+
+
+# ---------------------------------------------------------------------------
+# THE EXACT PER-SHAPE FLOOR, which closes the band the quote-time one leaves
+# ---------------------------------------------------------------------------
+
+
+class ShapedDestination:
+    """A destination adapter that reports ONE output shape, whatever the address.
+
+    THE ADDRESS IS IRRELEVANT TO WHAT IS UNDER TEST and that is deliberate rather
+    than lazy: refuse_a_payout_below_the_exact_dust_floor() prices the output's
+    SHAPE, which it learns from the daemon's scriptPubKey, not from parsing the
+    address. Seeding the shape directly is what lets one test cover P2PKH and
+    P2WPKH without needing two real addresses on two encodings -- and without
+    adding address literals, which tests/test_address_literals_are_valid.py counts.
+    """
+
+    asset = "LTC"
+    can_spend = True
+    payout_refusal = ""
+
+    def __init__(self, shape: str = "P2WPKH", fail_with: Exception | None = None):
+        self._script = STANDARD_OUTPUT_SHAPES[shape]
+        self._fail_with = fail_with
+
+    def script_pub_key_for(self, address: str) -> bytes:
+        if self._fail_with is not None:
+            raise self._fail_with
+        return self._script
+
+
+@pytest.mark.parametrize(
+    ("shape", "amount", "refused"),
+    [
+        # 3,000 litoshi is INSIDE the band: it clears the quote-time floor of 2,940
+        # and litecoind refuses it as dust to a base58 destination. MEASURED against
+        # a regtest litecoind 0.21.4 with testmempoolaccept on 2026-11-22.
+        ("P2PKH", 0.00003, True),
+        ("P2PKH", 0.0000546, False),
+        ("P2SH", 0.00003, True),
+        # The SAME 3,000 litoshi is fine to a P2WPKH destination, whose threshold is
+        # 2,940. A floor that refused it everywhere would be rejecting payouts the
+        # chain would have relayed, which is why this is per-shape and not one number.
+        ("P2WPKH", 0.00003, False),
+        # AND P2WSH REFUSES THE SAME 3,000, which is finer granularity than the first
+        # draft of this table expected: its threshold is 3,300, not P2WPKH's 2,940,
+        # because the output is 11 bytes longer. The test was wrong and the code was
+        # right -- worth keeping as a row, because "witness means 2,940" is exactly
+        # the simplification a one-number floor would bake in.
+        ("P2WSH", 0.00003, True),
+        ("P2WSH", 0.000033, False),
+    ],
+)
+def test_the_exact_floor_refuses_the_band_the_quote_time_floor_lets_through(shape, amount, refused):
+    """Per output shape, both directions. The band is 2,940-5,459 on LTC.
+
+    MUTATION CAUGHT: swap dust_threshold_satoshis() for smallest_dust_threshold() in
+    refuse_a_payout_below_the_exact_dust_floor() and every P2PKH row stops refusing
+    -- which is precisely the state before this check existed.
+    """
+    adapters = {"LTC": ShapedDestination(shape)}
+    if refused:
+        with pytest.raises(ValueError) as refusal:
+            refuse_a_payout_below_the_exact_dust_floor(adapters, "LTC", LTC_PARTICIPANT, amount)
+        said = str(refusal.value)
+        assert "TO THIS ADDRESS" in said, (
+            f"the refusal does not say the limit is address-specific, so a customer reads it as the "
+            f"same limit the quote already passed and has no idea what changed: {said}"
+        )
+        assert "Nothing was written" in said, "the refusal does not say nothing was written"
+    else:
+        refuse_a_payout_below_the_exact_dust_floor(adapters, "LTC", LTC_PARTICIPANT, amount)
+
+
+def test_a_daemon_that_cannot_be_ASKED_does_not_refuse_the_swap():
+    """The one judgment in the exact floor: could-not-ask is not a refusal.
+
+    A chain that cannot answer must not become a chain that cannot be paid. The
+    conservative quote-time floor has already passed by this point, so falling back
+    to it leaves exactly today's behavior -- whereas refusing would turn a daemon
+    hiccup into a refused swap for a payout that is probably deliverable.
+
+    MUTATION CAUGHT: let the RPCError propagate instead of logging and returning,
+    and this fails -- every LTC swap would then depend on getaddressinfo answering.
+    """
+    adapters = {"LTC": ShapedDestination("P2PKH", fail_with=RPCError("getaddressinfo: connection refused"))}
+    # 3,000 litoshi WOULD be refused for a P2PKH destination if the shape could be
+    # read, so this asserts the fallback rather than a vacuously allowed amount.
+    refuse_a_payout_below_the_exact_dust_floor(adapters, "LTC", LTC_PARTICIPANT, 0.00003)
+
+
+@pytest.mark.parametrize("asset", ["SOL", "XRP", "ICP"])
+def test_the_exact_floor_leaves_the_non_bitcoin_chains_alone(asset):
+    """CHAIN_DECIMALS is the membership test, and SOL already has its own rent floor."""
+    refuse_a_payout_below_the_exact_dust_floor({asset: ShapedDestination("P2PKH")}, asset, LTC_PARTICIPANT, 1e-9)
+
+
+def test_create_swap_ACTUALLY_CALLS_the_exact_floor():
+    """The wiring, by AST. A floor with no call site refuses nothing.
+
+    Asserted structurally for the same reason the quote-time one is: driving
+    create_swap() here would need a database, a priced quote and two adapters, and
+    none of that makes the call-site question any better answered.
+    """
+    source = (Path(__file__).resolve().parents[1] / "swap_terminal" / "services" / "swap_service.py").read_text()
+    tree = ast.parse(source)
+    create_swap = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "create_swap"
+    )
+    called = {
+        node.func.id for node in ast.walk(create_swap)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "refuse_a_payout_below_the_exact_dust_floor" in called, (
+        "create_swap() does not call the exact dust floor, so the band 2,940-5,459 is open again: a "
+        "payout that clears the quote-time floor is handed to litecoind for a base58 destination and "
+        "refused as dust after the deposit is irreversible"
     )
