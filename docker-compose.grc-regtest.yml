@@ -73,9 +73,39 @@
 # with `To use the "-server" option, you must set a rpcpassword in the configuration
 # file:` -- a message which, note, ends in a colon and names no file.
 #
-# So before the first start, create `<GRC_REGTEST_DATADIR>/regtest/gridcoinresearch.conf`
-# carrying at least rpcuser, rpcpassword, rpcport=35715 and server=1. The credential
-# is yours to choose and is not written in this repository.
+# So before the first start, create `<GRC_REGTEST_DATADIR>/regtest/gridcoinresearch.conf`.
+# The credential is yours to choose and is not written in this repository. The rest is NOT
+# optional, and `rpcbind` is the half that is easy to leave out:
+#
+#     rpcuser=<yours>
+#     rpcpassword=<yours>
+#     rpcport=35715
+#     server=1
+#     listen=0
+#     noncruncher=1
+#     rpcbind=0.0.0.0
+#     rpcallowip=127.0.0.1
+#     rpcallowip=172.16.0.0/12
+#
+# WITHOUT rpcbind THE DAEMON BINDS LOOPBACK AND THE PUBLISHED PORT CANNOT REACH IT.
+# Measured 2026-11-22: the log read `RPC: bound and listening on 127.0.0.1:35715` -- which
+# is 127.0.0.1 INSIDE the container's network namespace. Docker forwards the published port
+# to the container's BRIDGE address, where nothing was listening, so curl got
+# `Recv failure: Connection reset by peer` from a daemon that was healthy and running. With
+# rpcbind set the same log line reads `bound and listening on 0.0.0.0:35715 (-rpcbind)` and
+# the call returns the genesis hash.
+#
+# AND THEN rpcallowip, BECAUSE THE CALLER IS NO LONGER LOOPBACK. Once the daemon listens on
+# the bridge, the source address it sees is the gateway, not 127.0.0.1, and the default
+# allow list rejects it. 172.16.0.0/12 covers every address Docker hands a default bridge
+# (172.17.x through 172.31.x), which matters because the subnet is not fixed -- OPEN_FINDINGS
+# records a web container arriving from 172.17.0.1 and from 172.18.0.3 on the same host. The
+# same two-line shape is already recorded at OPEN_FINDINGS.md:39-40 for the GRC desk.
+#
+# THIS IS NOT A HOLE IN THE HOST'S FIREWALL. `ports:` below publishes on 127.0.0.1 only, so
+# the container's port is reachable through the host's loopback and from other containers on
+# its bridge, and from nowhere else. rpcbind widens what the DAEMON listens on inside its own
+# namespace; it does not widen what the host exposes.
 
 services:
   grc-regtest:
@@ -125,6 +155,48 @@ services:
       - -regtest
       - -datadir=/data
       - -printtoconsole
+
+    # =======================================================================
+    # RUN AS WHOEVER OWNS THE DATADIR, BECAUSE uid 1000 IS AN ASSUMPTION
+    # =======================================================================
+    #
+    # Measured on the operator's host, 2026-11-22, on the first container that got far
+    # enough to try writing:
+    #
+    #     swap-grc-regtest | Gridcoin: Error initializing settings.
+    #
+    # once per restart, and nothing bound the port. The cause was not Gridcoin's:
+    #
+    #     docker run --entrypoint id <image>   ->  uid=1000(gridcoin) gid=1000(gridcoin)
+    #     ls -lan $GRC_REGTEST_DATADIR         ->  drwxrwxr-x 3 1001 1001
+    #
+    # THE OPERATOR IS uid 1001. The image's `gridcoin` user is 1000, the bind-mounted
+    # datadir is mode 775 owned by 1001:1001, so uid 1000 matches neither owner nor group
+    # and falls through to `others` -- r-x, no write. The daemon could read its conf and
+    # could not create anything beside it.
+    #
+    # docker/grc-desk.Dockerfile's own comment asserted this could not happen: "uid 1000 so
+    # a datadir the operator created is writable without a chown". That holds only when the
+    # operator IS uid 1000, which is the common case on a single-user Linux box and is not
+    # universal -- 1001 is what you get when the account was not the first one created.
+    # The comment has been corrected there; this key is the fix.
+    #
+    # WHY `user:` AND NOT A chown. A chown would work and is worse: it mutates a directory
+    # outside the repository to suit a container, and the next person to look at it sees an
+    # owner they did not set. Overriding the container's uid changes only the container, and
+    # it is the direction that scales -- the datadir's ownership is a fact about the host,
+    # so the container should adapt to it rather than the reverse.
+    #
+    # THE DEFAULT IS 1000:1000, which is the image's own user, so a host where that happens
+    # to match keeps working with no variable set. Where it does not, pass
+    # GRC_REGTEST_USER="$(id -u):$(id -g)".
+    #
+    # ONE KNOWN CONSEQUENCE, stated because it is a real limitation rather than a worry:
+    # a uid with no entry in the image's /etc/passwd has no home directory, so anything
+    # that resolves `~` inside the container gets a surprise. gridcoinresearchd is given
+    # `-datadir=/data` explicitly on the command line above and so never resolves one --
+    # but a future command added here that does would need a HOME.
+    user: "${GRC_REGTEST_USER:-1000:1000}"
 
     # on-failure:5 rather than unless-stopped, matching grc-desk and for its reason:
     # a daemon that cannot open its datadir must be visible as exited with that

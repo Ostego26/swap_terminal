@@ -205,9 +205,41 @@ keeping this tree's shape is written at the site, in
   plus enumerating every unconditional `find_package` from the source instead. The image log
   independently confirmed the vendored Berkeley DB 5.3 building itself
   (`BerkeleyDB_Project build command succeeded`), the `/build/bin/` output path, and that no
-  CLI target exists. **What is still untested is one layer further out: no container from
+  CLI target exists. ~~**What is still untested is one layer further out: no container from
   that image has been STARTED**, so the runtime stage's library set, the uid-1000 `/data`
-  ownership and the CMD are unproven.
+  ownership and the CMD are unproven.~~ **A CONTAINER NOW RUNS AND ANSWERS RPC**, later the
+  same day, and starting it found three defects the build could not have:
+
+      libboost_iostreams.so.1.74.0: cannot open shared object file
+          The build stage installed libboost-iostreams-dev; the runtime stage installed
+          system, filesystem and thread and not iostreams. A link-time dependency with no
+          run-time counterpart. Guarded now by
+          tests/test_runtime_stage_has_a_lib_for_every_boost_dev.py.
+
+      Gridcoin: Error initializing settings.
+          uid. The image's user is 1000; the operator is 1001, and the bind-mounted datadir
+          was mode 775 owned by 1001:1001 -- so uid 1000 matched neither owner nor group and
+          fell through to `others`, r-x, no write. The Dockerfile's claim that uid 1000 makes
+          an operator-created datadir "writable without a chown" holds only where the
+          operator IS 1000. docker-compose.grc-regtest.yml now carries a `user:` key.
+
+      Recv failure: Connection reset by peer
+          `RPC: bound and listening on 127.0.0.1:35715` -- inside the container's namespace.
+          Docker forwards the published port to the container's BRIDGE address, where nothing
+          was listening, so a healthy daemon looked dead. rpcbind=0.0.0.0 plus
+          rpcallowip=172.16.0.0/12 fixes it, and the log then reads `bound and listening on
+          0.0.0.0:35715 (-rpcbind)`. The same shape was already recorded at
+          OPEN_FINDINGS.md:39-40 for the GRC desk and was not applied here.
+
+  **AND THEN THE CHAIN ANSWERED, FROM INSIDE A CONTAINER:**
+
+      getblockhash 0  ->  4692b9564c585f76f41e02e304767b2ad16f1d18f72efcf0a724efe01e065371
+      listunspent     ->  10 UTXOs totalling 1000000.0
+
+  Identical to the native measurements in section 1, which closes the chain end to end:
+  pinned source, built image, running container, live chain. The genesis hash is the one
+  `chains/gridcoin_genesis.py` keys the network gate on, so that gate is now exercised
+  against a containerized node and not only a native one.
 - **Nothing was measured about 5.5.1.0**, the version this tree's own command table describes.
   It has no regtest at all, so none of this page applies to it, and which Gridcoin a GRC leg is
   pointed at is a decision rather than a measurement.

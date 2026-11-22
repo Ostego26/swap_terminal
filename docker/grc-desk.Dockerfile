@@ -302,6 +302,26 @@ COPY --from=build /build/bin/gridcoinresearchd /usr/local/bin/gridcoinresearchd
 
 # uid 1000 so a datadir the operator created is writable without a chown that would
 # change ownership of a live wallet on the host.
+#
+# THAT SENTENCE IS TRUE ONLY WHERE THE OPERATOR IS uid 1000, and on this host they are
+# NOT. Measured 2026-11-22, on the first container to get far enough to write:
+#
+#     docker run --entrypoint id <image>  ->  uid=1000(gridcoin) gid=1000(gridcoin)
+#     ls -lan <the bind-mounted datadir>  ->  drwxrwxr-x 3 1001 1001
+#
+# The operator is 1001. Mode 775 owned by 1001:1001 gives uid 1000 neither owner nor
+# group, so it fell through to `others` -- r-x, no write -- and the daemon died with
+# `Gridcoin: Error initializing settings.` once per restart, having read its conf and
+# been unable to create anything beside it. 1001 is ordinary: it is what an account gets
+# when it was not the first one created on the machine.
+#
+# THE uid STAYS 1000 AND THE FIX IS AT THE SERVICE, not here. An image cannot know the
+# uid of a host directory it has never seen, so baking a different number in would only
+# move the assumption. docker-compose.grc-regtest.yml carries
+# `user: "${GRC_REGTEST_USER:-1000:1000}"`, which defaults to this user and lets a host
+# pass `$(id -u):$(id -g)`. docker-compose.grc-desk.yml does NOT yet carry that key --
+# named here because the same bind mount is in it, so the same failure is waiting there
+# for anyone whose uid is not 1000, and that service holds a real wallet.
 RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin gridcoin \
     && mkdir -p /data && chown gridcoin:gridcoin /data
 USER gridcoin
