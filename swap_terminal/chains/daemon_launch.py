@@ -215,6 +215,44 @@ def _mainnet_datadir(command: str) -> str:
     return ""
 
 
+def mainnet_datadir_named_by(value: object) -> str:
+    """The mainnet datadir segment `value` names, or "". For a PATH, not just a command.
+
+    ONE ANSWER TO "IS THIS THE STAKING WALLET" (rule 8). _mainnet_datadir() already knows,
+    and it was written for a recorded launch COMMAND. This is the same answer exposed for a
+    bare datadir path, so a second caller does not grow a second matcher that disagrees
+    about `~/.GridcoinResearch-desk` -- the case the segment-not-prefix comment above exists
+    for, and the one a `startswith` gets wrong.
+
+    =========================================================================
+    APPLY IT TO THE DATADIR. NEVER TO A SUBDIRECTORY OF ONE.
+    =========================================================================
+
+    This is the contract, and it has a name here because getting it wrong is silent and
+    expensive. The matcher compares the LAST path component, so:
+
+        /root/.GridcoinResearch            -> ".GridcoinResearch"   REFUSED
+        /root/.GridcoinResearch/regtest    -> ""                    allowed
+        /root/.GridcoinResearch/testnet    -> ""                    allowed
+        /root/.GridcoinResearch-desk       -> ""                    allowed (correct: the desk)
+
+    Rows two and three are inside the mainnet wallet's datadir and the matcher approves
+    them, because what it answers is "does this path NAME the mainnet datadir", not "is
+    this path INSIDE it". A caller that passes the subdirectory it is about to delete gets
+    a cheerful "". Pass the datadir.
+
+    Measured 2026-11-22, which is why this exists: regtest/daemons.wipe_datadir() had
+    exactly one guard -- a liveness probe -- and `regtest/funding_steps.resolve_config("GRC")`
+    hands it a ChainConfig whose datadir is the hardcoded literal `~/.GridcoinResearch`,
+    the operator's mainnet GUI staking wallet, with `regtest_dir` therefore
+    `~/.GridcoinResearch/regtest`. The delete was a no-op only because that subdirectory
+    does not exist; the obvious correction -- point it at Gridcoin's real net subdirectory
+    -- deletes `~/.GridcoinResearch/testnet`, which on the Bitcoin-derived layout is where
+    that network's wallet.dat lives.
+    """
+    return _mainnet_datadir(str(value))
+
+
 def _refuse_nothing_recorded(asset, record, port) -> str:
     """Nobody has looked at this chain's launch on this host."""
     del port

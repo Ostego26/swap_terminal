@@ -85,6 +85,7 @@ from typing import Any, Protocol
 import requests
 from chains.base import RPCAdapter, RPCError
 from chains.credential_match import how_to_settle_a_401
+from chains.daemon_launch import mainnet_datadir_named_by
 from microfortnights import format_duration
 from regtest.console import FAIL, OK, ConsoleLike
 
@@ -187,6 +188,36 @@ def resolve_chain_config(asset: str, extra_args: list[str] | None = None) -> Cha
     message. Resolving it here would turn a missing binary into a FileNotFound
     raised from somewhere in the middle of step 2.
     """
+    if asset not in CHAIN_DEFAULTS:
+        # A BARE KeyError USED TO COME OUT OF HERE, mid-step-1, reading as a crash rather
+        # than as a refusal with a remedy. Measured 2026-11-22: resolve_chain_config("GRC")
+        # raised `KeyError: 'GRC'` with nothing naming the table, the two chains it holds,
+        # or why Gridcoin is not one of them.
+        #
+        # THE REASON GRC IS ABSENT IS NOT AN OVERSIGHT AND THE MESSAGE SAYS SO. This table
+        # drives a `-regtest` flag, a `regtest` datadir subdirectory and assert_regtest()'s
+        # `chain == "regtest"` check, and Gridcoin's getblockchaininfo has no `chain` key at
+        # any version -- so a GRC row here could not satisfy the assertion it would be
+        # asserted against. There is a GRC-shaped path already written in
+        # regtest/funding_steps.py, and sending the reader there is the whole point of
+        # naming it here (rule 14: the refusal carries the fix).
+        #
+        # AND IT IS A TRIPWIRE AS WELL AS A MESSAGE. tests/test_configure_env.py:1078
+        # asserts `"GRC" not in CHAIN_DEFAULTS` because a row here silently adds the
+        # operator's MAINNET Gridcoin conf as a second credential-read candidate in
+        # configure_env.conf_candidates(), and that loop takes the first file that exists.
+        raise RegtestSetupError(
+            f"regtest/daemons.CHAIN_DEFAULTS has no entry for {asset!r}; it holds "
+            f"{sorted(CHAIN_DEFAULTS)}. This table is for chains with a Bitcoin-Core-style "
+            f"REGTEST mode: it passes -regtest, keeps state in a `regtest` datadir "
+            f"subdirectory, and is asserted by assert_regtest() demanding "
+            f"getblockchaininfo.chain == 'regtest'. Gridcoin has no `chain` field in that "
+            f"response at any version, so a GRC row could never satisfy that assertion -- "
+            f"the GRC path is regtest/funding_steps.py (resolve_config + "
+            f"assert_test_network), not this table. Adding a row here also changes "
+            f"configure_env.conf_candidates() for that asset, which is what "
+            f"tests/test_configure_env.py:1078 is guarding."
+        )
     spec = CHAIN_DEFAULTS[asset]
     prefix = spec["env_prefix"]
     return ChainConfig(
@@ -1576,6 +1607,54 @@ def wipe_datadir(console: ConsoleLike, config: ChainConfig) -> None:
     Refuses if the daemon is still answering, because deleting a live chainstate
     produces corruption that looks like a bug in this repository.
     """
+    # THE MAINNET-DATADIR REFUSAL COMES FIRST, BEFORE ANY RPC, AND THAT ORDER IS THE POINT.
+    # Until 2026-11-22 the liveness probe below was this function's ONLY guard: no asset
+    # gate, no network gate, and the words "GRC", "Gridcoin" and "mainnet" appeared nowhere
+    # in it. That is safe for Bitcoin Core, whose datadir the harness creates and owns, and
+    # it is a fund-loss shape for Gridcoin, because regtest/funding_steps.resolve_config("GRC")
+    # hands out a ChainConfig whose datadir is the hardcoded literal `~/.GridcoinResearch` --
+    # the operator's MAINNET GUI staking wallet. Measured that day:
+    #
+    #     resolve_config("GRC")  datadir     /root/.GridcoinResearch
+    #                            regtest_dir /root/.GridcoinResearch/regtest   <- the rmtree target
+    #                            port        25715                            <- what rpc_answers polls
+    #
+    # The guard and the target were resolved from INDEPENDENT sources. The mainnet daemon
+    # answering on 15715 would not have blocked a delete under its own datadir, because the
+    # probe asks 25715. There IS a good `port == 15715` refusal in resolve_config, so
+    # mainnet-by-port is covered -- but the DATADIR is the mainnet one at every port.
+    #
+    # Today's delete is a silent no-op, because `~/.GridcoinResearch/regtest` is a directory
+    # no Gridcoin wallet ever creates, so the `not target.exists()` branch prints "nothing to
+    # wipe". THAT IS THE TRAP RATHER THAN THE SAFETY: the next person finds --wipe doing
+    # nothing for GRC, "fixes" regtest_dir to Gridcoin's real net subdirectory, and the fix
+    # deletes `~/.GridcoinResearch/testnet` -- where that network's wallet.dat lives.
+    #
+    # IT IS COMPUTED FROM THE CONFIG ALONE so it holds before anything is asked of any
+    # daemon. Both callers wipe BEFORE the network is asserted (regtest_htlc_verify.py's
+    # --wipe runs immediately before step_2_daemon, and fund_testnets.py's before
+    # start_daemon), so a refusal that needed an RPC answer would arrive after the delete.
+    #
+    # THE ANSWER IS BORROWED, NOT REWRITTEN (rule 8). chains/daemon_launch already owns
+    # "does this path name the operator's staking wallet", including the segment-not-prefix
+    # subtlety that keeps `~/.GridcoinResearch-desk` allowed. It is applied to config.datadir
+    # and never to config.regtest_dir, which is the contract that function's docstring names:
+    # pointed at the subdirectory it silently approves the delete.
+    mainnet_segment = mainnet_datadir_named_by(config.datadir)
+    if mainnet_segment:
+        raise RegtestSetupError(
+            f"--wipe REFUSED for {config.asset}: its datadir {config.datadir} names "
+            f"{mainnet_segment}, which on this host is the operator's MAINNET Gridcoin wallet "
+            f"(OPEN_FINDINGS finding 2, and CLAUDE.md's chain-safety section: it is unlocked for "
+            f"staking and nothing in this tree has its passphrase). Nothing was deleted. This "
+            f"harness has no datadir of its own for that chain -- regtest/funding_steps."
+            f"resolve_config() hardcodes the mainnet datadir and is safe only because none of "
+            f"the wiping paths run for GRC -- so --wipe is not a parameter that chain has, "
+            f"rather than one that happens to be empty. If you want a disposable Gridcoin "
+            f"chain, give it its OWN datadir and point the harness at that; a regtest Gridcoin "
+            f"node keeps its wallet in a mocked in-memory BDB environment and persists nothing "
+            f"across restarts anyway, so there is nothing a wipe would buy."
+        )
     if rpc_answers(config):
         raise RegtestSetupError(
             f"--wipe refused for {config.asset}: a daemon is still answering on {config.base_url}. "

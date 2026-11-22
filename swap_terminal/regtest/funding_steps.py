@@ -93,6 +93,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, Protocol
 
 import base58
+from chains import gridcoin_genesis
 from chains.base import RPCError
 from microfortnights import format_duration
 from modules import network_selection
@@ -224,6 +225,20 @@ TEST_NETWORK_SIGNALS = (
 # The strings are Gridcoin's own, read off chainparamsbase.cpp:13-15 rather than recalled:
 # CBaseChainParams::MAIN is "main", TESTNET is "test", REGTEST is "regtest". `OnTestnet()`
 # returns a bool, so False is the mainnet statement for the two `testnet` keys.
+#
+# AND `False` IS ALSO WHAT REGTEST ANSWERS, WHICH MADE THAT MAPPING WRONG BY ITSELF.
+# Measured 2026-11-22 at commit 30a89f2ab0bb4f7134ca7a9c74e233e76130ebd8: OnTestnet() is
+# `NetworkIDString() == TESTNET` (src/chainparams.h:129-132), so a Gridcoin REGTEST node
+# answers False to all three of these truthfully -- and this table therefore classified it
+# as a positive statement of mainnet and refused the run unoverridably. The comment above
+# had already read `REGTEST is "regtest"` off chainparamsbase.cpp while the mapping was
+# being written; what it missed is that the BOOLEAN cannot express the third network.
+#
+# The table is kept as it stands, because `testnet == False` IS a mainnet statement whenever
+# nothing better is known -- which is the common case and the safe default. What changed is
+# that assert_test_network() now asks for the genesis hash first (chains/gridcoin_genesis),
+# and suppresses this mapping only when the genesis has POSITIVELY identified regtest. A
+# genesis that is unreachable or unrecognized suppresses nothing.
 MAINNET_STATEMENTS = {
     ("getblockchaininfo", "testnet"): (False,),
     ("getinfo", "testnet"): (False,),
@@ -539,32 +554,89 @@ def step_1_reachable(run: Run) -> None:
     daemons.wait_for_rpc(run.console, run.config)
 
 
-def assert_test_network(run: Run) -> dict:
-    """THE UNCONDITIONAL REFUSAL. It asks the daemon, and never infers from a port.
+class GenesisVerdict(NamedTuple):
+    """What `getblockhash 0` established, and the phrase a run prints for it.
 
-    Nothing after this runs unless at least one of TEST_NETWORK_SIGNALS comes back with a
-    POSITIVE statement that this daemon is on a test network. The distinction that makes
-    this a refusal rather than a check is that an ABSENCE OF EVIDENCE IS TREATED AS
-    MAINNET: a daemon that has none of the three fields, or whose calls all fail, is
-    refused. "Nothing said mainnet" is not the same claim as "the daemon said testnet",
-    and only the second one is evidence.
-
-    daemons.assert_regtest() does the BTC/LTC half of this and is stricter -- it demands
-    `chain == "regtest"` exactly -- so it is called for those two rather than reimplemented
-    (rule 8). This function exists because Gridcoin has no regtest mode at all, so that
-    assertion could never pass there, and the alternative to writing this would be
-    weakening the one that already works.
+    TWO FIELDS RATHER THAN ONE BECAUSE THE REFUSAL NEEDS THE SECOND. `network` is None
+    both when the call failed and when the hash was not recognized, and those two refuse
+    for the same reason but send the operator to different places -- so the message that
+    refuses has to carry what the daemon actually said. Returning the pair keeps that out
+    of mutable state on `run`, where a second caller would eventually read a stale value.
     """
-    run.step(2, "WHICH NETWORK -- asked of the daemon, never inferred from a port")
-    if run.asset != "GRC":
-        run.say("BTC and LTC go through daemons.assert_regtest(), which demands chain=='regtest' exactly")
-        # THIS HARNESS STARTS NO BTC/LTC DAEMON -- it adopts whatever is answering, which is
-        # what the MWEB line downstream has to know before it claims a startup flag was applied.
-        return daemons.assert_regtest(run.console, run.config, we_started_it=False)
 
-    node = run.node(wallet=False)
-    run.say(f"port {run.config.port} is not Gridcoin mainnet's {GRC_MAINNET_PORT}, but a PORT IS NOT PROOF")
-    run.say(f"asking the daemon itself, {len(TEST_NETWORK_SIGNALS)} ways; at least one must SAY a test network")
+    network: str | None
+    description: str
+
+
+def grc_network_from_genesis(run: Run, node: Any) -> GenesisVerdict:
+    """Gridcoin's own name for this daemon's network, from `getblockhash 0`, and a phrase.
+
+    SEPARATE FROM THE CLASSIFICATION ON PURPOSE (rule 10). The decision -- which hash
+    means which network -- is a pure table in chains/gridcoin_genesis that can be called
+    with seeded inputs and asserted on directly. This function is only the I/O and the
+    reporting around it, which is the part that needs a daemon.
+
+    None MEANS "COULD NOT SAY" AND NEVER "SAFE". The caller must treat it exactly as this
+    gate treats an absent field: no positive statement, therefore refused, because an
+    absence of evidence is treated as mainnet here. Both of the ways this returns None --
+    the call failing, and the hash not being in the table -- are reported as SKIP rather
+    than FAIL, matching the convention the signals loop below already uses: nothing failed
+    and nothing was learned, and collapsing that into FAIL is what once put
+    `getblockchaininfo.chain` in a correct run's unexpected-failures list.
+
+    THE UNRECOGNIZED HASH IS ECHOED, through gridcoin_genesis.describe(). No Gridcoin
+    daemon has ever answered this call for this repository -- every value in that table was
+    read from Gridcoin's source, and Gridcoin spells its block hash `GetHash(true)` at the
+    assert sites, so whether `getblockhash 0` returns the same digest is READ and not
+    MEASURED (rule 17). If the first real run refuses, the operator needs the value to add
+    rather than the news that there was one (rule 14).
+    """
+    try:
+        answer = node.call("getblockhash", 0)
+    except RPCError as exc:
+        failed = f"(none: {exc})"
+        run.check("getblockhash(0)", failed, "a genesis hash naming a Gridcoin network", SKIP)
+        return GenesisVerdict(None, failed)
+    network = gridcoin_genesis.network_of_genesis(answer)
+    description = gridcoin_genesis.describe(answer)
+    run.check(
+        "getblockhash(0)",
+        description,
+        "a genesis hash naming a Gridcoin network",
+        OK if network else SKIP,
+    )
+    return GenesisVerdict(network, description)
+
+
+def grc_boolean_network_signals(
+    run: Run, node: Any, regtest_identified: bool,
+) -> tuple[list[str], list[str]]:
+    """What TEST_NETWORK_SIGNALS' three booleans state: (positives, mainnet_statements).
+
+    EXTRACTED FROM assert_test_network() ON 2026-11-22 RATHER THAN RAISING A CEILING.
+    Adding the genesis probe took that function to C901 13 > 10, and CLAUDE.md rule 12 is
+    explicit about which way that gets fixed: "A main() past the ceiling is orchestration
+    that has swallowed decisions, which is rule 10's defect wearing a lint code. The fix is
+    to extract the decision so it can be called with seeded inputs, not to raise the
+    ceiling." This loop IS the decision -- it is where a daemon's answer becomes "said
+    testnet" or "said mainnet" -- and the caller around it is orchestration.
+
+    `regtest_identified` IS PASSED IN RATHER THAN RE-DERIVED, so there is exactly one place
+    that decides it (the genesis probe) and this function cannot drift from it. It is a
+    bool rather than the network name on purpose: the only question this loop may ask is
+    "has regtest been positively established", and handing it the name would invite a
+    second, slightly different classification here (rule 8).
+
+    IT RETURNS THE TWO LISTS INSTEAD OF MUTATING THE CALLER'S. The refusal downstream turns
+    on `mainnet_statements` being non-empty and on `positives` being empty, so a function
+    that appended into lists it did not own would be able to change the verdict without the
+    caller's code showing it. Returned pairs make the merge visible at the call site.
+
+    EVERY OUTCOME PRINTS A LINE, which is the invariant the original loop was built around
+    and the reason it is copied here unchanged rather than tidied: a call that failed, a
+    field that was absent, a value that said mainnet and a value that said testnet are four
+    different things, and rule 14 wants all four visible in a pasted run.
+    """
     positives: list[str] = []
     mainnet_statements: list[str] = []
     for method, key, accepted in TEST_NETWORK_SIGNALS:
@@ -586,7 +658,14 @@ def assert_test_network(run: Run) -> dict:
             continue
         value = answer[key]
         if value in MAINNET_STATEMENTS.get((method, key), ()):
-            # A POSITIVE STATEMENT OF MAINNET, and it refuses the run below even if another
+            if regtest_identified:
+                # CONSISTENT WITH REGTEST, AND NOTHING WAS LEARNED. SKIP rather than OK for
+                # the reason the absent-field branch above gives: this is the third outcome,
+                # and calling it OK would let a reader count it toward the positive
+                # statements the refusal requires, which it is not.
+                run.check(f"{method}.{key}", value, "False, which Gridcoin regtest also answers", SKIP)
+                continue
+            # A POSITIVE STATEMENT OF MAINNET, and it refuses the run even if another
             # signal says testnet. Recorded as FAIL here so the line is in the summary too.
             run.check(f"{method}.{key}", value, f"one of {accepted}", FAIL)
             mainnet_statements.append(f"{method}.{key}={value!r}")
@@ -595,6 +674,101 @@ def assert_test_network(run: Run) -> dict:
         run.check(f"{method}.{key}", value, f"one of {accepted}", OK if good else FAIL)
         if good:
             positives.append(f"{method}.{key}={value!r}")
+    return positives, mainnet_statements
+
+
+def assert_test_network(run: Run) -> dict:
+    """THE UNCONDITIONAL REFUSAL. It asks the daemon, and never infers from a port.
+
+    Nothing after this runs unless at least one of TEST_NETWORK_SIGNALS comes back with a
+    POSITIVE statement that this daemon is on a test network. The distinction that makes
+    this a refusal rather than a check is that an ABSENCE OF EVIDENCE IS TREATED AS
+    MAINNET: a daemon that has none of the three fields, or whose calls all fail, is
+    refused. "Nothing said mainnet" is not the same claim as "the daemon said testnet",
+    and only the second one is evidence.
+
+    daemons.assert_regtest() does the BTC/LTC half of this and is stricter -- it demands
+    `chain == "regtest"` exactly -- so it is called for those two rather than reimplemented
+    (rule 8). This function exists because Gridcoin has no `chain` FIELD at any version:
+    getblockchaininfo pushes a boolean `testnet` and nothing else about the network
+    (src/rpc/blockchain.cpp:4809), so that assertion can never pass there whatever network
+    the daemon is on, and the alternative to writing this would be weakening the one that
+    already works.
+
+    THAT SENTENCE USED TO READ "because Gridcoin has no regtest mode at all" AND IT WAS
+    FALSE, measured 2026-11-22 against the exact source docker/grc-desk.Dockerfile pins
+    (ref 5.5.1.7-testnet, commit 30a89f2ab0bb4f7134ca7a9c74e233e76130ebd8). Gridcoin has a
+    full regtest network there -- `CBaseChainParams::REGTEST`, a CRegTestParams, RPC port
+    35715, a 1,000,000 GRC genesis premine, nStakeMinAge=0, and `generate` /
+    `generatetoaddress` gated on it. It is 5.5.1.0, which this tree's own
+    chains/gridcoin_rpc_commands.COMMANDS table was built from (166 entries against
+    5.5.1.7's 215), that has only `main` and `test`. The reason for this function survives
+    the correction; the reason it GAVE did not, and the distinction matters because the
+    false version is what made a GRC regtest leg look impossible.
+
+    WHAT THE CORRECTION CHANGED HERE, and it was a live defect rather than stale prose.
+    On Gridcoin regtest `OnTestnet()` is False -- it is defined as
+    `NetworkIDString() == TESTNET` (src/chainparams.h:129-132) -- so all three of
+    TEST_NETWORK_SIGNALS answer `testnet=False`, and MAINNET_STATEMENTS mapped every one of
+    those to a POSITIVE STATEMENT OF MAINNET. This gate therefore classified a Gridcoin
+    REGTEST daemon as mainnet and refused, unoverridably. One bit cannot name three
+    networks, and `testnet=False` is an ABSENCE of evidence about which of two networks you
+    are on -- so recording it as presence was this gate's own governing rule ("an absence of
+    evidence is treated as mainnet") being broken in the opposite direction.
+
+    So the network is now identified by its GENESIS HASH first, through
+    chains/gridcoin_genesis, which names one network out of all of them instead of
+    splitting them two-and-one. That is a STRICTER gate rather than a looser one: a daemon
+    answering with mainnet's genesis is refused on a consensus constant that no proxy, port
+    forward or half-migrated node can fake, where before it was refused on a status field.
+    `testnet=False` stops being a mainnet statement ONLY when the genesis has positively
+    identified regtest, and never merely because it failed to identify anything.
+    """
+    run.step(2, "WHICH NETWORK -- asked of the daemon, never inferred from a port")
+    if run.asset != "GRC":
+        run.say("BTC and LTC go through daemons.assert_regtest(), which demands chain=='regtest' exactly")
+        # THIS HARNESS STARTS NO BTC/LTC DAEMON -- it adopts whatever is answering, which is
+        # what the MWEB line downstream has to know before it claims a startup flag was applied.
+        return daemons.assert_regtest(run.console, run.config, we_started_it=False)
+
+    node = run.node(wallet=False)
+    run.say(f"port {run.config.port} is not Gridcoin mainnet's {GRC_MAINNET_PORT}, but a PORT IS NOT PROOF")
+
+    positives: list[str] = []
+    mainnet_statements: list[str] = []
+
+    # THE GENESIS HASH IS ASKED FIRST BECAUSE IT IS THE ONLY ANSWER THAT NAMES ONE NETWORK.
+    # The three booleans below split three networks two-and-one -- `testnet` is False on
+    # mainnet AND on regtest -- so they cannot distinguish the chain that holds the
+    # operator's staking balance from the chain whose coins come out of a genesis premine.
+    # A genesis hash is a consensus constant and names exactly one. It is also the harder
+    # thing to fake: a status field is whatever the process answering the socket says, while
+    # presenting mainnet's genesis while serving regtest would require being mainnet.
+    genesis_network, genesis_description = grc_network_from_genesis(run, node)
+    if genesis_network == gridcoin_genesis.GRIDCOIN_MAINNET:
+        # THE STRONGEST REFUSAL THIS GATE CAN PRODUCE, and it is recorded as a mainnet
+        # statement so it flows into the same unoverridable refusal below as the booleans.
+        mainnet_statements.append(f"getblockhash(0)=the Gridcoin {genesis_network} genesis")
+    elif genesis_network in gridcoin_genesis.GRIDCOIN_TEST_NETWORKS:
+        positives.append(f"getblockhash(0)=the Gridcoin {genesis_network} genesis")
+
+    # `testnet == False` IS EXPECTED ON REGTEST AND IS NOT A STATEMENT OF MAINNET THERE.
+    # OnTestnet() is `NetworkIDString() == TESTNET` (src/chainparams.h:129-132), so a
+    # regtest node answers False to all three signals truthfully. Suppressing the mainnet
+    # mapping is gated on the genesis having POSITIVELY said regtest -- never on it having
+    # failed to say anything -- so an unreachable or unrecognized genesis leaves every
+    # existing refusal exactly as strict as it was.
+    regtest_identified = genesis_network == "regtest"
+    if regtest_identified:
+        run.say("genesis says REGTEST, so `testnet=False` below is the truthful answer there "
+                "and is not read as a statement of mainnet")
+
+    run.say(f"asking the daemon itself, {len(TEST_NETWORK_SIGNALS)} more ways; "
+            f"at least one positive statement is required in total")
+    boolean_positives, boolean_mainnet = grc_boolean_network_signals(run, node, regtest_identified)
+    positives.extend(boolean_positives)
+    mainnet_statements.extend(boolean_mainnet)
+
     if mainnet_statements:
         # A CONTRADICTION REFUSES, AND THIS IS NOT BELT-AND-BRACES. Before this, the aggregate
         # below passed whenever `positives` was non-empty -- so a daemon whose
@@ -619,7 +793,9 @@ def assert_test_network(run: Run) -> dict:
     if not positives:
         raise RegtestSetupError(
             f"REFUSING TO RUN: the Gridcoin daemon at {run.config.base_url} did not SAY it is on a test "
-            f"network through any of {[signal[0] for signal in TEST_NETWORK_SIGNALS]}. An absence of "
+            f"network through any of {['getblockhash(0)', *(signal[0] for signal in TEST_NETWORK_SIGNALS)]}. "
+            f"The genesis hash is the one that names a network rather than splitting three of them "
+            f"two-and-one, and it answered: {genesis_description}. An absence of "
             f"evidence is treated as mainnet here, deliberately: this harness broadcasts, and Gridcoin "
             f"mainnet holds the operator's staking balance. There is no flag to override this."
         )

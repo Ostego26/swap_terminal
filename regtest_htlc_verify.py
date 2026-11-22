@@ -327,6 +327,37 @@ def build_real_client(asset: str, config, wallet: str):
         os.environ["BTC_RPC_WALLET"] = wallet
         return BTCClient(config.base_url, config.rpc_user, config.rpc_password)
 
+    if asset != "LTC":
+        # THE FALL-THROUGH USED TO BE UNCONDITIONAL, AND IT WAS A WRONG-CHAIN PAYOUT.
+        # There was no `elif asset == "LTC"` and no else-raise: every asset that is not
+        # BTC returned an LTCClient. Measured 2026-11-22 while scoping a GRC leg -- the
+        # first thing `--chain grc` would have done is construct a LITECOIN client against
+        # a GRIDCOIN daemon and, one line below, set PLATFORM_FEE_LTC_ADDRESS to a freshly
+        # generated Litecoin regtest address. A platform fee is a real output to a real
+        # address, so this is fund movement, not a type error, and nothing anywhere
+        # refused it.
+        #
+        # IT IS UNREACHABLE FROM THE CLI TODAY, which is why it is a guard rather than a
+        # bug report: --chain's choices are ("btc","ltc","both") and the dict at the
+        # callsite maps those to BTC and LTC only, so no asset but those two has ever
+        # arrived here. That is exactly the state in which a guard is cheap -- it costs
+        # nothing now and refuses the moment somebody adds a third choice, which is a
+        # thing this repository is actively considering.
+        #
+        # GRC IS NAMED IN THE MESSAGE rather than left to a generic "unsupported asset",
+        # because the reader who trips this will be adding Gridcoin and the answer they
+        # need is which client to construct and where the per-chain divergence already
+        # lives (rule 14: the refusal carries the fix, not just the fact).
+        raise RegtestSetupError(
+            f"build_real_client() has no client for {asset}. This harness drives BTC and LTC only, "
+            f"and until 2026-11-22 it would have returned an LTCClient for {asset} -- a Litecoin "
+            f"client against a {asset} daemon, with PLATFORM_FEE_LTC_ADDRESS set to a Litecoin "
+            f"address, which is a payout to the wrong chain rather than a crash. For GRC the client "
+            f"is modules.atomic_grc_client.GRCClient and it takes the BARE base_url with no "
+            f"/wallet/<name> suffix (regtest/funding_steps.py sets run.wallet = \"\" for GRC on "
+            f"purpose), so adding it here is not a one-line copy of the LTC branch."
+        )
+
     # LTCClient.redeem_contract() pays a 0.25% platform fee to
     # PLATFORM_FEE_LTC_ADDRESS, whose default in that file is a hardcoded
     # `tltc1...` address -- a Litecoin TESTNET bech32 address, which a regtest
