@@ -21,12 +21,27 @@ On BTC/LTC regtest nothing moves between those readings. On Gridcoin testnet a b
 roughly every GRC_SECONDS_PER_BLOCK seconds, so every block arriving in between pushed the
 recomputed target one higher than the caller asked for.
 
-IT WAS LIVE, NOT LATENT. Both callers of wait_or_mine_to are in grc_htlc_verify.py, which
-builds its Run without ever calling step_3_capabilities -- so `run.mines` is unconditionally
-False there and the waiting branch is the only branch the function has ever taken.
+THE PATH IS REACHABLE; THE OVERSHOOT WAS NEVER OBSERVED. Both callers of wait_or_mine_to
+are in grc_htlc_verify.py, which builds its Run without ever calling step_3_capabilities --
+so `run.mines` is unconditionally False there and the waiting branch is the only branch the
+function has ever taken. That much is measured.
 
-The cost is bounded: real waiting nobody asked for, and a progress line printing two
-different targets one line apart (rule 14, on the path watched the longest). It does not
+THIS FILE FIRST SAID "IT WAS LIVE, NOT LATENT" AND THAT WAS AN OVERSTATEMENT, corrected the
+same day after an adversarial re-measurement was asked to refute it rather than confirm it.
+The race window is not the 90s block interval it was reasoned from -- it is the microseconds
+between two getblockcount calls separated by one run.say() and no sleep. And the single
+recorded real Gridcoin run did NOT overshoot: docs/branch_coverage.md has step 8 executing
+at tip 3296548 against a script locktime of 3296548, stopping exactly on it.
+
+IT IS STILL WORTH A FIX AND A TEST, for a reason that does not depend on the odds. The
+self-contradicting output is unconditional rather than racy -- the second reading is what
+printed `(tip 101 -> 121)` one line under `to height 120` -- and two observations of a
+moving value where one would do is a defect at any frequency. What changed is the severity
+claim, not the diagnosis; inferring severity from a block target was rule 17's error running
+in the opposite direction.
+
+The cost is bounded either way: real waiting nobody asked for, and a progress line printing
+two different targets one line apart (rule 14, on the path watched the longest). It does not
 change what is sent, to whom, or how much.
 
 WHY IT SURVIVED, AND WHY THIS FILE EXISTS. `_mine()` carries a comment stating this exact

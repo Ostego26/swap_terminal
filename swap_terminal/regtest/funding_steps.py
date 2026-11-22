@@ -2084,10 +2084,26 @@ def wait_or_mine_to(run: Run, target: int) -> None:
     plus the output printing two different targets one line apart -- rule 14's
     self-contradicting progress line, on the path that is watched the longest.
 
-    IT WAS LIVE RATHER THAN LATENT, which is why it is fixed rather than noted. Both callers
-    are in grc_htlc_verify.py, which builds its Run without ever calling
+    THE CODE PATH IS REACHABLE, AND THAT IS THE HONEST CLAIM -- not that it was observed.
+    Both callers are in grc_htlc_verify.py, which builds its Run without ever calling
     step_3_capabilities, so `run.mines` is unconditionally False there and the waiting
-    branch is the ONLY branch this function has ever taken.
+    branch is the ONLY branch this function has ever taken. That part is measured.
+
+    THIS PARAGRAPH SAID "IT WAS LIVE RATHER THAN LATENT" AND THAT OVERSTATED IT, corrected
+    the same day by an adversarial re-measurement that was asked to refute it. Two things
+    the first pass got wrong by reasoning from the block interval instead of from the code:
+    the race window is NOT 90 seconds, it is the microseconds between two getblockcount
+    calls separated by one run.say() and no sleep; and the one recorded real Gridcoin run
+    did not overshoot -- docs/branch_coverage.md has step 8 executing at tip 3296548
+    against a script locktime of 3296548, so that wait stopped exactly on the locktime.
+    No overshoot has ever been seen on a chain.
+
+    SO WHY FIX IT AT ALL. Because a microsecond race is still a race -- two observations of
+    a moving value where one would do -- and because the self-contradicting output is
+    unconditional rather than racy: the second reading is what printed `(tip 101 -> 121)`
+    under `to height 120`, and rule 14 does not grade that by how often it happens. "A
+    reason to believe is not a check" (rule 17) cuts both ways, and inferring severity from
+    a block target was the same error in the other direction.
 
     AND IT SURVIVED BECAUSE _mine() CARRIES A COMMENT SAYING THIS EXACT SHAPE WAS ALREADY
     FIXED -- "THE TIP IS READ ONCE" -- crediting a test file that no longer exists. The
