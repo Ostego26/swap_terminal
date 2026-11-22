@@ -55,14 +55,18 @@ is a line somebody has to delete on purpose.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 from chains.coin_amounts import CHAIN_DECIMALS
 from chains.litecoin import LitecoinAdapter
 from config import Config
 from db import SCHEMA, apply_migrations, connect_db
-from modules.htlc_fee import DUST_RELAY_FEE_SAT_PER_KVB, dust_threshold_satoshis
+from dust_floor import DUST_RELAY_FEE_SAT_PER_KVB, dust_threshold_satoshis
 from recording_rpc_adapter import RecordingRPCAdapter
 from services import payout_service
+from services.quote_service import require_deliverable_dust_payout
 from services.swap_service import get_min_confirmations
 from valid_addresses import GRC_DESK_DEPOSIT, LTC_PARTICIPANT
 
@@ -257,12 +261,35 @@ def test_a_sub_dust_LTC_payout_is_still_SENT_rather_than_refused(tmp_path):
     fit_to_chain_precision() and the `fitted <= 0` refusal are the real ones and
     the amount asserted on is the amount that would have gone on the wire.
 
-    WHEN THE REFUSAL LANDS, THIS TEST IS INVERTED rather than deleted: `sent`
-    becomes `[]`, the swap's status becomes whatever the operator chose for a
-    payout refused before any network call, and the assertions below say so.
-    The DEFECT comment goes with it. Leaving it passing after a fix would be a
-    test pinning behavior that has been replaced rather than moved, which is
-    rule 9's list of things to cull.
+    STILL A DEFECT ASSERTION ON 2026-11-22, AND IT IS NOW A NARROWER ONE. A dust
+    floor DID land that day -- services/quote_service.require_deliverable_dust_payout()
+    refuses a sub-dust payout at QUOTE time, before any deposit is taken, on BTC,
+    LTC and GRC. It does not change this test, and that is the point: this test
+    seeds a swap row directly and calls process_pending_payouts(), so it never
+    passes through create_quote(). The SEND path is deliberately unguarded.
+
+    WHY DELIBERATELY, from chains/base.py:1041's own measurement rather than from
+    preference: a refusal at the send arrives after the deposit is irreversible and
+    sends the swap to `failed` with no retry -- "measured by mutation", in that
+    file's words -- so adding a second refusal there would turn a customer's retry
+    into a stranded swap needing a person. The same paragraph's OTHER reason, that
+    the dust rule could not be imported without dragging a signing library into the
+    web process, was answered by moving it to the package-root leaf
+    swap_terminal/dust_floor.py.
+
+    SO WHAT THIS NOW PINS is the one path that remains: a swap that already exists
+    -- seeded here, or quoted before the gate landed -- can still carry a sub-dust
+    amount to `sendtoaddress`. That is a real remaining gap and it is named in
+    chains/litecoin.py's header beside the other one, the exact per-shape check for
+    the 2,940-5,459 band.
+
+    WHEN A SEND-TIME REFUSAL LANDS, THIS TEST IS INVERTED rather than deleted:
+    `sent` becomes `[]`, the swap's status becomes whatever the operator chose for a
+    payout refused before any network call, and the assertions below say so. The
+    DEFECT comment goes with it. Leaving it passing after a fix would be a test
+    pinning behavior that has been replaced rather than moved, which is rule 9's
+    list of things to cull. Note that landing one means overriding base.py's
+    measurement above, so it is the operator's call and not a tidy-up.
 
     WHAT IS NOT MEASURED HERE (rule 17): that litecoind refuses 2000 base units.
     No litecoind is reachable from this container. The floor is Core's own
@@ -279,9 +306,11 @@ def test_a_sub_dust_LTC_payout_is_still_SENT_rather_than_refused(tmp_path):
     assert base_units == [SUB_DUST_BASE_UNITS], (
         f"DEFECT ASSERTION, and it has stopped holding: {base_units} base units reached "
         f"`sendtoaddress` rather than the {[SUB_DUST_BASE_UNITS]} this file measured on "
-        f"2026-10-11. If a dust refusal has landed, invert this test -- `sent` should now be "
-        f"[] and the swap should not be `completed` -- and delete the DEFECT wording from "
-        f"this file and from chains/litecoin.py's docstring in the same commit (rule 19)"
+        f"2026-10-11. If a SEND-TIME dust refusal has landed, invert this test -- `sent` "
+        f"should now be [] and the swap should not be `completed` -- and delete the DEFECT "
+        f"wording from this file and from chains/litecoin.py's docstring in the same commit "
+        f"(rule 19). The QUOTE-time floor added 2026-11-22 does not reach this path and is "
+        f"not what this measures"
     )
     row = conn.execute("SELECT status, payout_txid FROM swaps WHERE id = 's_dust'").fetchone()
     assert row["status"] == "completed", (
@@ -291,4 +320,96 @@ def test_a_sub_dust_LTC_payout_is_still_SENT_rather_than_refused(tmp_path):
     assert row["payout_txid"], (
         "a txid was recorded for a payout no node would relay, which is the half of this that "
         "makes it worse than a plain failure: the database says the customer was paid"
+    )
+
+
+# ---------------------------------------------------------------------------
+# THE QUOTE-TIME FLOOR, which is where the refusal actually landed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("asset", "amount", "refused"),
+    [
+        # LTC's P2WPKH floor is 2,940 base units. 0.00002 is the figure the DEFECT
+        # test above seeds and the one measured reaching sendtoaddress on 2026-10-11.
+        ("LTC", 0.00002, True),
+        ("LTC", 0.00003, False),
+        ("LTC", 1.0, False),
+        # BTC's is 294, a tenth of Litecoin's -- the band 295..2,939 is deliverable
+        # on BTC and refused by litecoind, which is what makes one shared constant
+        # wrong and this table per-chain.
+        ("BTC", 0.000002, True),
+        ("BTC", 0.00001, False),
+        # GRC has NO dust rule, so MINIMUM_OUTPUT_SATOSHIS (1) is the whole floor:
+        # only an amount that scales to nothing is refused.
+        ("GRC", 0.00000001, True),
+        ("GRC", 1.0, False),
+        # NOT BITCOIN-DERIVED, so this gate must not touch them. SOL has its own
+        # rent floor beside this one; XRP's analogue is a reserve.
+        ("SOL", 0.00000001, False),
+        ("XRP", 0.000001, False),
+        ("ICP", 0.00000001, False),
+    ],
+)
+def test_the_quote_refuses_a_payout_below_the_chains_smallest_relayable_amount(asset, amount, refused):
+    """The floor, per chain, in both directions. MEASURED against the real function.
+
+    BOTH DIRECTIONS FOR EVERY CHAIN, because a gate that refused everything would
+    pass a one-sided test and take every pair off the menu. And three chains it must
+    NOT touch, because CHAIN_DECIMALS is the membership test and a gate that
+    silently grew to SOL would collide with the rent floor that already guards it.
+
+    MUTATION CAUGHT: swap smallest_dust_threshold() for dust_threshold_satoshis()
+    against any single shape and the LTC rows move; drop the AMOUNT_TOLERANCE_PCT
+    factor and 0.00003 LTC starts passing a figure whose payout can legally scale
+    to 2,970 and then below the floor.
+    """
+    config = {"AMOUNT_TOLERANCE_PCT": 0.01}
+    if refused:
+        with pytest.raises(ValueError) as refusal:
+            require_deliverable_dust_payout(config, asset, amount)
+        said = str(refusal.value)
+        assert asset in said, f"the refusal does not name the chain it is about: {said}"
+        assert "network will relay" in said, (
+            f"the refusal does not say WHY the amount is too small, which is the whole of what a "
+            f"customer can act on: {said}"
+        )
+        for internal in ("AMOUNT_TOLERANCE_PCT", "dust", "scriptPubKey", "sat/kvB", "base units"):
+            assert internal not in said, (
+                f"the customer-facing refusal leaks the internal term {internal!r}, which commit "
+                f"6ae5838 stripped off this page once already: {said}"
+            )
+    else:
+        require_deliverable_dust_payout(config, asset, amount)
+
+
+def test_create_quote_ACTUALLY_CALLS_the_dust_floor():
+    """The wiring, by AST, because the floor is worth nothing uncalled.
+
+    tests/test_sol_payout_capability.py makes the same argument for the SOL floor: a
+    guard function with no call site passes every test written about the function
+    and refuses nothing. Asserted structurally rather than by driving create_quote(),
+    which fetches live prices.
+    """
+    source = (Path(__file__).resolve().parents[1] / "swap_terminal" / "services" / "quote_service.py").read_text()
+    tree = ast.parse(source)
+    create_quote = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "create_quote"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(create_quote)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "require_deliverable_dust_payout" in called, (
+        "create_quote() does not call require_deliverable_dust_payout(), so the dust floor refuses "
+        "nothing. A sub-dust payout is quoted, the deposit is taken and credited, and the amount "
+        "reaches sendtoaddress -- which is the state tests/test_ltc_chain_facts.py's DEFECT "
+        "assertion measures"
+    )
+    assert "require_deliverable_sol_payout" in called, (
+        "the SOL floor's call site went missing from the same function; these two are the only "
+        "payout-minimum gates in the quote path"
     )

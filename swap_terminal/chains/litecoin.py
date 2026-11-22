@@ -44,12 +44,16 @@ the same day; a reader who finds one is being told the other exists (rule 8).
                     chains/registry.validate_min_confirmations(). NOT A GAP,
                     and moving a fund-moving threshold to a new home is the
                     operator's call (rule 16).
-  dust threshold    modules/htlc_fee.DUST_RELAY_FEE_SAT_PER_KVB, measured
-                    against Litecoin Core 0.21.4. It is NOT absent, and a
-                    table here would be a second home for it. What IS absent
-                    is any READER of it on the brokered payout path, and of
-                    the three Bitcoin-derived chains that absence binds first
-                    on this one. See below.
+  dust threshold    dust_floor.DUST_RELAY_FEE_SAT_PER_KVB, measured against
+                    Litecoin Core 0.21.4. It is NOT absent, and a table here
+                    would be a second home for it. "What IS absent is any
+                    READER of it on the brokered payout path" WAS TRUE UNTIL
+                    2026-11-22 and is not any more:
+                    services/quote_service.require_deliverable_dust_payout()
+                    reads it on every * -> LTC quote. The table itself moved
+                    out of modules/htlc_fee.py to the package-root leaf
+                    swap_terminal/dust_floor.py so the web process could reach
+                    it without the atomic-swap signing stack. See below.
 
 SO NOTHING IS BROKEN BY THIS FILE BEING FOUR LINES, and filling it in is the
 thing that would break something. What was genuinely absent was a pointer,
@@ -57,12 +61,25 @@ which is what the survey above now is -- plus the one real gap, below, which is
 in a different file entirely.
 
 =============================================================================
-THE DUST FLOOR IS MEASURED IN THIS TREE AND THE PAYOUT PATH DOES NOT READ IT
+THE DUST FLOOR IS MEASURED IN THIS TREE, AND SINCE 2026-11-22 THE QUOTE READS IT
 =============================================================================
 
-modules/htlc_fee.DUST_RELAY_FEE_SAT_PER_KVB carries Litecoin Core 0.21.4's dust
+THE HEADING ABOVE SAID "AND THE PAYOUT PATH DOES NOT READ IT" and that is no
+longer true at the quote, which is where it matters: a payout below the floor is
+now refused before any deposit is taken, by
+services/quote_service.require_deliverable_dust_payout(), using the SMALLEST
+output shape's threshold because no payout address exists yet. What is still true
+is everything below about the figures and about the SEND path, which deliberately
+does not refuse -- chains/base.py:1041's own measurement is that a refusal there
+strands the swap in `failed` with the deposit credited and nothing to re-queue it.
+Two gaps remain named rather than closed: the exact per-shape check (the band
+2,940-5,459 for a base58 LTC destination), which needs the address and belongs in
+create_swap(); and a swap QUOTED BEFORE this gate, which can still carry a
+sub-dust payout to the send.
+
+dust_floor.DUST_RELAY_FEE_SAT_PER_KVB carries Litecoin Core 0.21.4's dust
 relay rate -- 30,000 sat/kvB, TEN TIMES Bitcoin Core's 3,000 -- measured
-2026-09-25, and modules/htlc_fee.dust_threshold_satoshis() applies Core's own
+2026-09-25, and dust_floor.dust_threshold_satoshis() applies Core's own
 GetDustThreshold arithmetic to it. Computed from those two on 2026-10-11, per
 output type, in base units:
 

@@ -125,8 +125,8 @@ from typing import NamedTuple
 # two that agree on the day they are written. modules/htlc_spend does not
 # import this file, so there is no cycle; modules/htlc_rpc already imports
 # both, so nothing gains a dependency it did not already have.
+from dust_floor import describe_dust_threshold, dust_threshold_satoshis
 from modules.address_authority import check_address
-from modules.htlc_spend import varint_length
 
 # Coin per kvB, per chain. Chosen so that the FLOOR below -- which is each
 # chain's old flat fee -- is what binds at an ordinary redeem size, and the
@@ -203,154 +203,22 @@ MINIMUM_FEE_COIN: dict[str, Decimal] = {
 # An output is dust when its value is strictly LESS than that, which is Core's
 # `nValue < GetDustThreshold(...)` -- so a P2PKH output of exactly 546 on BTC
 # is fine and 545 is not.
-# SOLANA IS NOT IN THIS TABLE, AND THAT WAS A DECISION RATHER THAN AN OMISSION.
-# Recorded here as well as at the other end, because CLAUDE.md rule 8 asks that
-# where two implementations genuinely differ "the difference is the point and
-# belongs in a comment at BOTH sites, naming the other one." The other one is
-# chains/solana_units.py, whose RENT_EXEMPT_* constants are Solana's analogue
-# of this table, and its module docstring carries the full argument. The short
-# form, three reasons:
-#
-#   different suite       this file belongs to the atomic-swap modules; Solana
-#                         was added to the Flask app, which imports none of it.
-#   the signature dies    dust_threshold_satoshis(asset, script_pubkey) takes a
-#                         Bitcoin scriptPubKey and prices (txout_bytes +
-#                         spend_bytes) at a per-kvB relay rate. Solana has no
-#                         scriptPubKey, no txout and no per-byte pricing -- its
-#                         fee is 5,000 lamports per SIGNATURE.
-#   not the same quantity dust is REFUSED BY RELAY: the transaction never
-#                         propagates and nothing is lost. A Solana account
-#                         below the rent-exempt minimum is ACCEPTED, exists,
-#                         and is then collected by the runtime -- the funds go
-#                         away after the fact.
-#
-# Adding "SOL" here would mean a parameter meaningless for one of its assets,
-# which is how one table quietly becomes two rules sharing a name.
-DUST_RELAY_FEE_SAT_PER_KVB: dict[str, int] = {
-    # Bitcoin Core's DUST_RELAY_TX_FEE. Gives 546 for P2PKH, 294 for P2WPKH.
-    "BTC": 3000,
-    # Litecoin Core 0.21.4's is TEN TIMES Bitcoin's, which is the fact that
-    # makes this a live defect rather than a theoretical one: 5,460 for P2PKH
-    # and 2,940 for P2WPKH.
-    "LTC": 30000,
-    # GRIDCOIN HAS NO DUST RULE, and this is READ FROM THE POLICY SOURCE rather
-    # than assumed from Bitcoin's (rule 17). gridcoin-community/
-    # Gridcoin-Research, master branch, read 2026-09-25:
-    #
-    #   src/policy/policy.cpp   IsStandardTx() walks tx.vout and the only
-    #                           amount test in it is `if (txout.nValue == 0)
-    #                           return false;`. There is no dust branch.
-    #   whole repository        zero occurrences of IsDust, GetDustThreshold or
-    #                           DUST_RELAY_TX_FEE -- each searched separately
-    #                           across the repository, not just these files.
-    #   src/main.cpp:117        nMinimumInputValue = 0.
-    #   src/consensus/consensus.h:26-28
-    #                           the only amount floor is a FEE floor --
-    #                           MIN_TX_FEE = MIN_RELAY_TX_FEE = 10000 halfords,
-    #                           scaled by (1 + bytes/1000). A fee rule, not an
-    #                           output rule.
-    #
-    # So a rate of 0, and MINIMUM_OUTPUT_SATOSHIS below is what actually binds
-    # on GRC -- which is exactly Gridcoin's rule, expressed in the same
-    # machinery as the other two rather than as a special case.
-    #
-    # WHAT THIS IS NOT: a measurement against a running Gridcoin daemon. There
-    # is none in this setup. It is a reading of the current source of the
-    # reference implementation, which is a weaker claim than the BTC and LTC
-    # rows -- those were measured against daemons -- and an operator on an
-    # older build should check their own before trusting it.
-    "GRC": 0,
-}
-
-# Every chain here refuses an output worth nothing. On BTC and LTC the dust
-# threshold is far above it and this never binds; on GRC it is the whole rule.
-# It also catches a 0.25% platform fee that quantizes to zero, which on GRC --
-# with no dust threshold above it -- is otherwise the one way to build a
-# non-standard transaction that the old `<= 0` guard could never have seen,
-# because that guard only ever looked at the DESTINATION.
-MINIMUM_OUTPUT_SATOSHIS = 1
-
-# Core's GetDustThreshold: the cost of spending the output being protected.
-# 148 = 32 (txid) + 4 (vout) + 1 (script length) + 107 (scriptSig) + 4
-# (sequence). The witness figure is the same sum with 107 scaled down by
-# WITNESS_SCALE_FACTOR 4 and integer-divided: 32 + 4 + 1 + 26 + 4.
-LEGACY_INPUT_SPEND_BYTES = 148
-WITNESS_INPUT_SPEND_BYTES = 67
-
-# Eight bytes of value precede every output's script.
-TXOUT_VALUE_BYTES = 8
-
-# BIP141: a witness program is OP_0..OP_16 followed by a single push of 2 to 40
-# bytes, which is what Core's CScript::IsWitnessProgram() checks.
-WITNESS_PROGRAM_MIN_PUSH = 2
-WITNESS_PROGRAM_MAX_PUSH = 40
-OP_0 = 0x00
-OP_1 = 0x51
-OP_16 = 0x60
-
-# The same 1000 the fee rate uses, as an int, because the dust arithmetic is
-# integer satoshis throughout and Core's is too -- its CFeeRate::GetFee
-# truncates, so doing this in Decimal and rounding would give a threshold this
-# repository believes and no node applies.
-BYTES_PER_KVB_INT = 1000
-
-
-def is_witness_program(script_pubkey: bytes) -> bool:
-    """BIP141's shape test: a version opcode, then one push of 2 to 40 bytes.
-
-    Read off the BYTES, never off a rendered address or a daemon's
-    `scriptPubKey.type` string, for the same reason every other comparison in
-    this package is: Bitcoin Core 28.1 and Litecoin Core 0.21.4 disagree about
-    what a decoded scriptPubKey contains, and agree about the hex.
-    """
-    if len(script_pubkey) < WITNESS_PROGRAM_MIN_PUSH + 2 or len(script_pubkey) > WITNESS_PROGRAM_MAX_PUSH + 2:
-        return False
-    version = script_pubkey[0]
-    if version != OP_0 and not (OP_1 <= version <= OP_16):
-        return False
-    return script_pubkey[1] == len(script_pubkey) - 2
-
-
-def dust_threshold_satoshis(asset: str, script_pubkey: bytes) -> int:
-    """The smallest value this chain will relay in an output paying `script_pubkey`.
-
-    Args:
-        asset: BTC, LTC or GRC. It selects the dust relay rate and nothing else.
-        script_pubkey: the output's script, as the node laid it out. The bytes,
-            never an address -- what lets one call answer for a P2WPKH
-            platform-fee address and a P2PKH destination in the same
-            transaction is that it reads the shape instead of being told it.
-
-    Raises:
-        ValueError: if the asset is unknown. Adding a chain means adding its
-            dust relay rate here, in this one table, beside its fee rate and
-            its floor (rule 11).
-    """
-    if asset not in DUST_RELAY_FEE_SAT_PER_KVB:
-        raise ValueError(
-            f"no dust rule for asset {asset!r}; known assets are {', '.join(SUPPORTED_ASSETS)}. "
-            "Adding a chain means adding its dust relay rate here, beside its fee rate and its floor."
-        )
-    spend_bytes = WITNESS_INPUT_SPEND_BYTES if is_witness_program(script_pubkey) else LEGACY_INPUT_SPEND_BYTES
-    txout_bytes = TXOUT_VALUE_BYTES + varint_length(len(script_pubkey)) + len(script_pubkey)
-    by_rate = (txout_bytes + spend_bytes) * DUST_RELAY_FEE_SAT_PER_KVB[asset] // BYTES_PER_KVB_INT
-    return max(by_rate, MINIMUM_OUTPUT_SATOSHIS)
-
-
-def describe_dust_threshold(asset: str, script_pubkey: bytes) -> str:
-    """One self-describing line: the threshold, and every number that decided it.
-
-    Rule 14 -- an operator reading a refusal must not have to open this file to
-    learn why 2,500 satoshis was too small.
-    """
-    spend_bytes = WITNESS_INPUT_SPEND_BYTES if is_witness_program(script_pubkey) else LEGACY_INPUT_SPEND_BYTES
-    txout_bytes = TXOUT_VALUE_BYTES + varint_length(len(script_pubkey)) + len(script_pubkey)
-    kind = "witness" if is_witness_program(script_pubkey) else "legacy"
-    return (
-        f"{asset} dust threshold is {dust_threshold_satoshis(asset, script_pubkey)} satoshis "
-        f"= ({txout_bytes}-byte output + {spend_bytes}-byte {kind} spend) x "
-        f"{DUST_RELAY_FEE_SAT_PER_KVB[asset]} sat/kvB / 1000, floored at {MINIMUM_OUTPUT_SATOSHIS}"
-    )
+# THE DUST RULE MOVED TO swap_terminal/dust_floor.py ON 2026-11-22 and is imported
+# back here, so every existing importer of this module is unaffected and there is
+# still exactly one table and one arithmetic (rule 8). It moved because the brokered
+# PAYOUT path needed it and importing this module would have dragged `ecdsa`,
+# `base58` and `bech32` into the web process -- that file's header carries the full
+# argument. The narrative above it, about WHY the threshold is per-output and what
+# the 90 satoshis were, stayed with the fee reasoning it belongs to.
+# THE DUST RULE LIVES IN swap_terminal/dust_floor.py SINCE 2026-11-22 -- the table,
+# the per-output arithmetic and describe_dust_threshold(), moved unchanged and
+# verified cell by cell. It moved because the brokered PAYOUT path needed it and
+# importing THIS module would have pulled `ecdsa`, `base58` and `bech32` into the web
+# process; that file's header carries the argument. assert_no_output_is_dust() below
+# stays here, because refusing a dust output BEFORE SIGNING an HTLC spend is this
+# module's job rather than the leaf's. The narrative above -- why the threshold is
+# per-OUTPUT, and what the 90 satoshis were -- stayed with the fee reasoning it
+# belongs to.
 
 
 def assert_no_output_is_dust(asset: str, outputs: Sequence[tuple[int, bytes]]) -> None:

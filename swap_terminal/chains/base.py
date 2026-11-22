@@ -1024,14 +1024,24 @@ class RPCAdapter:
         # reader the figure did not exist, and rule 16 is explicit that a wrong comment is
         # fixed with the same seriousness as wrong code.
         #
-        # WHY THE GATE IS STILL NOT HERE, which is a different reason than the old one
-        # claimed. First, this module cannot import modules/htlc_fee.py: that pulls in
-        # base58, bech32 and ecdsa, and swap_terminal/requirements.txt states as a
-        # deployment property that the Flask app does not drag the atomic-swap
-        # dependencies in. The shape that works is a package-root leaf with no third-party
-        # imports, as script_pub_key.py and microfortnights.py already are. Second, a
+        # WHY THE GATE IS STILL NOT HERE, AND ONE OF THE TWO REASONS WAS ANSWERED ON
+        # 2026-11-22. The first was that "this module cannot import modules/htlc_fee.py:
+        # that pulls in base58, bech32 and ecdsa ... The shape that works is a
+        # package-root leaf with no third-party imports, as script_pub_key.py and
+        # microfortnights.py already are." That leaf now exists -- swap_terminal/
+        # dust_floor.py, built to this paragraph's own specification, importing nothing
+        # but __future__ -- so the dust rule IS reachable from here and from the web
+        # process. (The dependency half of that sentence was also imprecise: both
+        # requirements files declare base58, bech32 and ecdsa. The LAYERING objection was
+        # the real one and it stood; the availability one did not.)
+        #
+        # THE SECOND REASON IS WHY THE GATE STILL WENT ELSEWHERE, and it is unchanged: a
         # refusal HERE arrives after the deposit is irreversible and sends the swap to
-        # `failed` with no retry -- measured by mutation. The gate belongs at quote time
+        # `failed` with no retry -- measured by mutation. So the floor landed at quote
+        # time instead, as services/quote_service.require_deliverable_dust_payout(),
+        # where nothing has been taken and the customer gets a number they can act on.
+        # Adding a second refusal here would turn a retry into a stranded swap, which is
+        # the trade this paragraph already measured and refused. The gate belongs at quote time
         # beside services/quote_service.require_deliverable_sol_payout(), which exists for
         # exactly this on Solana because the operator asked for it on 2026-10-02.
         #

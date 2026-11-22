@@ -76,6 +76,12 @@ import base58
 import pytest
 import requests as requests_module
 from config import Config
+
+# dust_threshold_satoshis and is_witness_program moved to the package-root leaf
+# swap_terminal/dust_floor.py on 2026-11-22, so the brokered payout path could reach
+# the dust rule without importing this module's signing stack. Imported from there
+# rather than re-exported through modules/htlc_fee.py (rule 8).
+from dust_floor import dust_threshold_satoshis, is_witness_program
 from modules import atomic_btc_client as btc_module
 from modules import atomic_grc_client as grc_module
 from modules import atomic_ltc_client as ltc_module
@@ -92,10 +98,8 @@ from modules.htlc_fee import (
     PLATFORM_FEE_TESTNET_DEFAULT,
     assert_no_output_is_dust,
     assert_within_broadcast_ceiling,
-    dust_threshold_satoshis,
     effective_rate_coin_per_kvb,
     fee_rate_coin_per_kvb,
-    is_witness_program,
     minimum_fee_coin,
     platform_fee_address,
     platform_fee_coin,

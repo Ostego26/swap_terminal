@@ -99,6 +99,12 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 import base58
+from dust_floor import (
+    VARINT_1BYTE_MAX,
+    VARINT_2BYTE_MAX,
+    VARINT_4BYTE_MAX,
+    varint_length,
+)
 from ecdsa import SECP256k1, SigningKey
 from ecdsa.util import sigencode_der_canonize
 from modules.atomic_htlc_scripts import push_data
@@ -158,13 +164,6 @@ WIF_PAYLOAD_LEN = 33
 WIF_PAYLOAD_LEN_COMPRESSED = 34
 WIF_COMPRESSED_SUFFIX = 0x01
 
-# Compact-size boundaries. A varint encodes COUNTS and SCRIPT LENGTHS, and is
-# not the same encoding as a script number: this repository confused the two
-# once already and every HTLC refund branch was unspendable for it (see
-# modules/atomic_htlc_scripts.encode_script_number).
-VARINT_1BYTE_MAX = 0xFC
-VARINT_2BYTE_MAX = 0xFFFF
-VARINT_4BYTE_MAX = 0xFFFFFFFF
 # The marker byte a multi-byte compact size starts with, and how many bytes
 # follow it. Named rather than spelled inline so the three thresholds above and
 # the three widths here read as one encoding rather than as six literals.
@@ -240,11 +239,6 @@ def varint(value: int) -> bytes:
     if value <= VARINT_4BYTE_MAX:
         return b"\xfe" + struct.pack("<I", value)
     return b"\xff" + struct.pack("<Q", value)
-
-
-def varint_length(value: int) -> int:
-    """How many bytes `varint(value)` will occupy, without building it."""
-    return len(varint(value))
 
 
 def _read_varint(raw: bytes, offset: int) -> tuple[int, int]:

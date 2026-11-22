@@ -20,8 +20,18 @@ import time
 from datetime import timedelta
 from typing import NamedTuple
 
+# ALIASED BECAUSE TWO MODULES EXPORT amount_to_base_units. chains/solana_units.py's
+# is imported unqualified above for the SOL floor; chains/coin_amounts.py's is the
+# Bitcoin-derived one. They are two spellings of one conversion, and the split is
+# recorded rather than mine: chains/payout_quantization.py's header measures the
+# import cycle that forced it ("coin_amounts needs SOL_DECIMALS and
+# base_units_to_amount() from solana_units"). Aliasing names which is which at the
+# call site instead of leaving a reader to guess from the import order.
+from chains.coin_amounts import CHAIN_DECIMALS
+from chains.coin_amounts import amount_to_base_units as coin_amount_to_base_units
 from chains.solana_signing import below_new_account_floor
 from chains.solana_units import SOL_DECIMALS, SYSTEM_ACCOUNT_SPACE, amount_to_base_units, decimal_amount
+from dust_floor import smallest_dust_threshold
 
 from .helpers import new_id, utc_now
 from .pricing import derive_pair_rate, fetch_usd_prices, last_price_source
@@ -564,6 +574,97 @@ def own_address_on_chain(db, asset: str, adapter=None) -> str:
     return str(row["deposit_address"]) if row else ""
 
 
+
+def require_deliverable_dust_payout(config, to_asset: str, output_amount: float) -> None:
+    """Refuse a BTC/LTC/GRC payout the chain would not relay. AT QUOTE TIME.
+
+    =========================================================================
+    THE DEFECT THIS CLOSES, MEASURED AND ALREADY PINNED BY A TEST
+    =========================================================================
+
+    tests/test_ltc_chain_facts.py::test_a_sub_dust_LTC_payout_is_still_SENT_rather_
+    than_refused was a deliberate DEFECT assertion and it PASSED: a seeded GRC->LTC
+    swap with output_amount_estimate 0.00002 and a tltc1q... payout address, run
+    through the real payout_service.process_pending_payouts(), put 2,000 base units
+    into `sendtoaddress`. Litecoin's P2WPKH dust threshold is 2,940. Nothing
+    refused it -- not at quote time, not at send time: RPCAdapter.send_to_address()'s
+    only amount check is `fitted <= 0 < float(amount)`, exactly-zero with no
+    threshold.
+
+    THE DUST RULE EXISTED AND WAS WIRED TO THE WRONG SUITE. dust_floor's table and
+    arithmetic (then in modules/htlc_fee.py) had exactly one caller,
+    modules/htlc_rpc.py -- the ATOMIC-SWAP path. The brokered payout path, which is
+    what a customer uses, had no floor on any chain but SOL.
+
+    WHY GRC->LTC IS THE REACHABLE TRIGGER rather than a hypothetical: Gridcoin's own
+    dust relay rate is 0 (read from its policy source, see dust_floor), so a small
+    tGRC deposit prices a sub-dust tLTC payout, and Litecoin Core 0.21.4's rate is
+    TEN TIMES Bitcoin's -- 2,940 base units for P2WPKH where Bitcoin asks 294.
+
+    AND IT RELEASES RATHER THAN HALTS, which is why it is the worst of the three
+    fund-path defects found on 2026-11-22. The swap is created, the deposit is taken
+    and credited, and the sub-dust amount is handed to litecoind. A refusal there
+    marks the swap `failed` with the deposit already credited, and
+    services/payout_rescue.py exists because nothing re-queues that.
+
+    =========================================================================
+    WHY THE SMALLEST THRESHOLD AND NOT THE EXACT ONE
+    =========================================================================
+
+    AT QUOTE TIME THERE IS NO DESTINATION -- create_quote() takes
+    (db, config, from_asset, to_asset, input_amount) and the payout address arrives
+    at create_swap(). The threshold is per-OUTPUT-SHAPE (LTC: 2,940 for P2WPKH,
+    5,460 for P2PKH), so the exact figure is unknowable here. This uses the SMALLEST
+    shape's threshold, which is the conservative direction: every real address's
+    threshold is >= it, so a payout this passes may still be refused by an exact
+    check later, and a payout this refuses could not have been paid to ANY address
+    on the chain. It cannot reject a swap that would have worked -- the same
+    argument require_deliverable_sol_payout() above makes for its own floor.
+
+    THE EXACT PER-SHAPE CHECK IS NAMED WORK, not done here. It belongs in
+    create_swap(), which has the address, and it leaves the band 2,940-5,459 open
+    for a base58 LTC destination. It needs the output's scriptPubKey, and whether
+    Litecoin Core 0.21.4's validateaddress returns the hex this repository would
+    need was NOT established -- the tree records several 0.21.4-vs-28.1 field
+    divergences (chains/daemon_capabilities.py, script_pub_key.py) and not this one.
+
+    THE TOLERANCE IS APPLIED BECAUSE THE PAYOUT CAN SHRINK AFTER THE QUOTE.
+    services/payout_service.scaled_payout_amount() may scale the figure down by up
+    to AMOUNT_TOLERANCE_PCT (0.01), and anything beyond that is halted to
+    `under_review` rather than paid. So the figure this must clear is the worst-case
+    payable one, not the quoted one -- checking the quoted figure would pass a quote
+    whose payout then prices below the floor.
+
+    NO CHAIN IS ASKED. Unlike the SOL floor, this needs no adapter and no round
+    trip: the rate is a static policy constant per chain. That makes it CHEAPER to
+    gate than SOL's, which is why quote_service's earlier note -- "BTC, LTC, GRC and
+    XRP have no runtime-imposed payout minimum this desk must read from a chain" --
+    was defensible only on its last five words, and is corrected where it sits.
+
+    XRP AND ICP ARE ABSENT ON PURPOSE. Neither is a Bitcoin-derived chain with a
+    dust relay rate; CHAIN_DECIMALS is the membership test and it holds exactly
+    BTC, LTC and GRC. XRP's analogue is a reserve, which chains/xrp.py owns.
+    """
+    if to_asset not in CHAIN_DECIMALS:
+        return
+    floor_base_units = smallest_dust_threshold(to_asset)
+    tolerance = float(config.get("AMOUNT_TOLERANCE_PCT", 0.01)) if hasattr(config, "get") else 0.01
+    decimals = CHAIN_DECIMALS[to_asset]
+    worst_case_base_units = coin_amount_to_base_units(output_amount * (1.0 - tolerance), decimals)
+    if worst_case_base_units >= floor_base_units:
+        return
+    floor_amount = floor_base_units / (10 ** decimals)
+    # CUSTOMER-FACING, AND IT NAMES NO INTERNAL SETTING -- the rule
+    # quote_service.py:296 already applies to the SOL floor beside it. The limit is
+    # given in the coin, the smallest workable input is not guessed at, and nothing
+    # about relay rates, script shapes or AMOUNT_TOLERANCE_PCT appears.
+    raise ValueError(
+        f"No quote: a {to_asset} payout of {output_amount:.8f} is below the smallest amount the "
+        f"{to_asset} network will relay, which is {floor_amount:.8f} {to_asset}. A payment this "
+        f"small would be rejected by the network rather than delivered, so nothing was written. "
+        f"Send a larger amount."
+    )
+
 def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float, *, adapters=None) -> dict:  # noqa: PLR0913 -- checked: the first five ARE the quote (where to write it, the settings, the pair, the size) and the sixth is the only object that can ask a chain a question. Bundling them would add a type without removing a parameter. It is KEYWORD-ONLY, which is the same property the arming token on the payout path relies on: a positional argument that drifted one place cannot land in it. Same judgment recorded at chains/xrp.py:773 and chains/solana.py's __init__.
     from_asset = from_asset.upper().strip()
     to_asset = to_asset.upper().strip()
@@ -667,6 +768,12 @@ def create_quote(db, config, from_asset: str, to_asset: str, input_amount: float
     # it. A comment that says a live gate is unreachable invites someone to
     # delete it.
     require_deliverable_sol_payout(config, adapters, to_asset, output_amount_estimate)
+    # THE SAME GATE FOR THE BITCOIN-DERIVED CHAINS, added 2026-11-22. Beside the SOL
+    # floor because it is the same decision -- "is this payout too small for the
+    # destination chain to deliver" -- asked at the same moment, before any row is
+    # written. It needs no adapter: the dust rate is a static policy constant, which
+    # is why this one is cheaper to gate than SOL's rather than harder.
+    require_deliverable_dust_payout(config, to_asset, output_amount_estimate)
     now = utc_now()
     quote = {
         "id": new_id("q"),
