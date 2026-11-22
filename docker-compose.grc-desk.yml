@@ -95,6 +95,55 @@ services:
       # hands the reader a broken command is worse than one that hands them none.
       - "${GRC_DESK_DATADIR:?set GRC_DESK_DATADIR to the DESK datadir. It must NOT be the customer wallet (~/.GridcoinResearch). Verify with - gridcoinresearchd -datadir=<that datadir> validateaddress <a customer address> | grep ismine - which must answer false}:/data"
 
+    # =======================================================================
+    # `-testnet` ON THE COMMAND LINE. THIS SERVICE HAD NO command: AT ALL.
+    # =======================================================================
+    #
+    # Until 2026-11-22 this service carried no `command:`, so it inherited the image's
+    # CMD -- `gridcoinresearchd -datadir=/data -printtoconsole -rpcport=25779` -- which
+    # names a port and NOT a network. The network came from `testnet=1` in the mounted
+    # conf, which this file's own header calls its live-safety argument: "TESTNET ONLY as
+    # written -- port 25779 and `testnet=1` in the mounted conf".
+    #
+    # THAT ARGUMENT DOES NOT HOLD, and it was measured the same day on a sibling service.
+    # At Gridcoin 5.5.1.0 a conf-file network selection is SILENTLY IGNORED -- the daemon
+    # logs one line about an unknown configuration value and comes up on MAINNET. (At
+    # 5.5.1.7 the key is registered and does work; the point is that the safety of this
+    # service must not depend on which binary is in the image.) So a desk daemon whose
+    # conf was missing, renamed, mounted at the wrong path, or simply lacking that one
+    # line would have opened a MAINNET wallet on port 25779, and nothing here would have
+    # said so. docs/gridcoin_regtest_2026_11_22.md §4 has the measurement; the same trap
+    # is recorded for launch commands in chains/daemon_launch.RECORDED["GRC"], whose
+    # `unestablished` field says in as many words: "If nothing matches, this line starts
+    # a MAINNET daemon on the desk wallet and -testnet has to be added".
+    #
+    # An argument on the command line cannot be ignored: an unknown one makes the daemon
+    # refuse to start, which is the fail-safe direction. Measured -- `-noncruncher=1`,
+    # which is conf-only, was rejected with `Invalid parameter -noncruncher=1`.
+    #
+    # THE PORT IS STILL REDUNDANT WITH THE CONF and is passed anyway, for the same reason:
+    # 25779 is this desk's observed port (OPEN_FINDINGS finding 2) and not Gridcoin's
+    # testnet default of 25715, so leaving it to the conf would make the published port
+    # below depend on a file this compose file does not own.
+    command:
+      - gridcoinresearchd
+      - -testnet
+      - -datadir=/data
+      - -printtoconsole
+      - -rpcport=25779
+
+    # SAME uid LESSON AS grc-regtest, and it matters more here because this datadir is a
+    # real wallet. The image runs as uid 1000; an operator who is not 1000 owns a datadir
+    # uid 1000 cannot write, and the daemon dies with `Gridcoin: Error initializing
+    # settings.` having read its conf and created nothing. Measured 2026-11-22 against a
+    # host whose operator is 1001. Default is the image's own user, so a 1000 host is
+    # unaffected; elsewhere pass GRC_DESK_USER="$(id -u):$(id -g)".
+    #
+    # A chown of THIS datadir is the worse remedy and not merely by style: it would change
+    # the ownership of a live wallet's directory, which is the thing the volume comment
+    # above spends six lines keeping this file away from.
+    user: "${GRC_DESK_USER:-1000:1000}"
+
     # on-failure:5, not unless-stopped. Same measurement, same reasoning as the
     # two above. A daemon that cannot open its datadir -- the lock is held, the
     # path is wrong, the wallet is from a newer Berkeley DB -- must be visible as
