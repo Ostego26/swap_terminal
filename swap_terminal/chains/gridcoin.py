@@ -140,7 +140,36 @@ argument and GRC_MIN_CONFIRMATIONS holds the knob.
 """
 
 from .base import RPCAdapter
+from .gridcoin_wallet_lock import payout_capability
 
 
 class GridcoinAdapter(RPCAdapter):
     asset = "GRC"
+
+    # FAIL-CLOSED DEFAULT, and it must stay even though __init__ always assigns.
+    # chains/registry.why_cannot_pay_out() reads getattr(adapter, "can_spend", False),
+    # and tests/test_every_payable_adapter_derives_can_spend.py requires the class
+    # attribute to be False once a subclass derives it: an adapter whose __init__
+    # raised partway must not be left reporting the base class's True.
+    can_spend = False
+    payout_refusal = ""
+
+    def __init__(self, *args, **kwargs):
+        """Derive can_spend from whether this process is armed to send GRC.
+
+        THIS CLASS WAS TWO LINES UNTIL 2026-11-22 and inherited `can_spend = True`
+        from RPCAdapter -- correct for BTC and LTC, whose daemons sign with no
+        separate arming token, and wrong for GRC, which has one. The measurement,
+        the cost and the limits are in gridcoin_wallet_lock.payout_capability();
+        this is only the call site.
+
+        *args/**kwargs RATHER THAN RESTATING THE SIX RPC PARAMETERS (rule 8).
+        RPCAdapter.__init__'s signature is the connection, adapters are built as
+        `**Config.RPC[asset]`, and copying that list here would create a second
+        place to update when it changes while removing nothing.
+
+        NO NETWORK, so this is safe in a constructor that runs before any Gridcoin
+        daemon is reachable: one environment read, no RPC, no value printed.
+        """
+        super().__init__(*args, **kwargs)
+        self.can_spend, self.payout_refusal = payout_capability()

@@ -95,6 +95,7 @@ from chains.gridcoin_wallet_lock import (
     WALLET_UNLOCK_ASSETS,
     WALLET_UNLOCK_ENV_VAR,
     GridcoinLockError,
+    payout_capability,
     unlocked_for_payout,
 )
 
@@ -1778,8 +1779,17 @@ def payout_unlock_context(asset: str, adapter):
     if asset not in WALLET_UNLOCK_ASSETS:
         return nullcontext()
 
+    # THE DECISION COMES FROM chains/gridcoin_wallet_lock.payout_capability(), which
+    # is also what chains/gridcoin.py publishes as can_spend. Added 2026-11-22: until
+    # then this function asked "is the variable set?" and GridcoinAdapter.can_spend
+    # answered True unconditionally, so one process held two gates that disagreed --
+    # creation admitted a GRC payout this send would refuse, after the deposit was
+    # irreversible. Sharing the predicate is what stops them drifting again (rule 8);
+    # the MESSAGE below stays longer than the adapter's because an operator tailing a
+    # worker is a different reader from a customer looking at a disabled pair.
+    armed, _refusal = payout_capability()
     passphrase = os.environ.get(WALLET_UNLOCK_ENV_VAR, "")
-    if not passphrase:
+    if not armed:
         raise PayoutUnlockUnavailable(
             f"{asset} payouts need the wallet fully unlocked, and {WALLET_UNLOCK_ENV_VAR} is "
             f"not set in this process's environment. A {asset} wallet left unlocked for staking "

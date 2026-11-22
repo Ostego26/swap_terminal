@@ -1673,7 +1673,35 @@ def spawn_warning() -> str:
     # "No blockers" and "nothing to block" rendered identically, which is rule 14's
     # did-nothing-looks-like-did-work at the level of a capability.
     payable = payable_assets(adapters, Config.ALLOWED_PAIRS)
+    blocked = [line for line in unlock_readiness_lines(adapters.keys()) if "IS NOT SET" in line]
     if not payable:
+        # NOTHING PAYABLE HAS TWO CAUSES AND THEY NEEDED DIFFERENT SENTENCES, which
+        # became true on 2026-11-22 when chains/gridcoin.py started DERIVING
+        # can_spend from GRIDCOIN_WALLET_PASSPHRASE. Until then GRC answered True
+        # unconditionally, so a process whose only destination adapter was Gridcoin
+        # always had a payable asset and this branch could only mean "no configured
+        # chain is a destination". Now an unarmed Gridcoin empties `payable` too --
+        # and the sentence below blamed the chain CONFIGURATION and listed GRC among
+        # the adapters built, which reads as "GRC is not an allowed destination" when
+        # the truth is "GRC is a destination and this process cannot send it".
+        #
+        # Measured against tests/test_supervisor.py's own scenario -- only GRC
+        # configured, passphrase unset -- which is exactly the new case and was
+        # getting the old sentence.
+        #
+        # `blocked` IS COMPUTED ABOVE RATHER THAN BELOW so this branch can read it.
+        # That is the whole of the reordering.
+        if blocked:
+            return (
+                f"a payout worker CANNOT BROADCAST ANYTHING, and the reason is an unlock rather than "
+                f"the chain configuration: {WALLET_UNLOCK_ENV_VAR} is unset here, so those payouts "
+                f"refuse and their swaps land in 'failed', which nothing retries. The chain(s) named "
+                f"above ARE allowed destinations -- adapters built: "
+                f"{', '.join(sorted(adapters)) or '(none)'} -- and no OTHER configured chain is a "
+                f"destination, so there is nothing this process can pay out at all. Deposits will "
+                f"still be watched and CREDITED. Set the passphrase for the worker process, or do "
+                f"not start it."
+            )
         return (
             f"a payout worker CANNOT BROADCAST ANYTHING. No configured chain is the destination of any "
             f"allowed pair -- adapters built: {', '.join(sorted(adapters)) or '(none)'}; destinations "
@@ -1682,7 +1710,6 @@ def spawn_warning() -> str:
             f"nothing retries. Fix the chain configuration before sending anything."
         )
 
-    blocked = [line for line in unlock_readiness_lines(adapters.keys()) if "IS NOT SET" in line]
     if not blocked:
         return (f"a payout worker CAN broadcast on {', '.join(sorted(payable))}. Stop now if this database "
                 f"is pointed at a funded mainnet wallet.")

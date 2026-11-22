@@ -588,11 +588,78 @@ def test_the_spawn_warning_does_not_contradict_the_unlock_line(monkeypatch, caps
     assert "a payout worker CAN broadcast. Stop now" not in out, (
         "the unconditional sentence contradicts the unlock line four lines above it:\n" + out
     )
-    # It still carries the mainnet caution, because a chain needing no unlock IS
-    # unaffected by a Gridcoin passphrase -- "nothing can send" would be its own
-    # wrong line.
-    assert "funded mainnet wallet" in out
-    assert "those payouts refuse" in out
+    # THESE TWO ASSERTIONS CHANGED 2026-11-22, and the scenario is why rather than
+    # the wording. They were:
+    #
+    #     # It still carries the mainnet caution, because a chain needing no unlock
+    #     # IS unaffected by a Gridcoin passphrase -- "nothing can send" would be
+    #     # its own wrong line.
+    #     assert "funded mainnet wallet" in out
+    #
+    # That reasoning is correct and does not apply HERE, because this scenario
+    # configures only GRC. Until chains/gridcoin.py derived can_spend, an unarmed
+    # Gridcoin still counted as payable, so payable_assets() was {"GRC"} and the
+    # banner took the hedged branch -- which keeps the mainnet caution for the other
+    # chains. Now an unarmed Gridcoin is NOT payable, nothing in this process can
+    # broadcast at all, and a mainnet caution would be the wrong line: there is no
+    # wallet this worker could spend from.
+    #
+    # The case the old assertions covered -- a payable unlock-free chain alongside a
+    # blocked one -- is covered by the sibling below rather than lost.
+    assert "those payouts refuse" in out, (
+        "the hedge must still say what WILL happen to the blocked chain's payouts:\n" + out
+    )
+    assert "CANNOT BROADCAST ANYTHING" in out, (
+        "with GRC the only configured destination and its passphrase unset, nothing in this process "
+        "can pay out, and the banner has to say so:\n" + out
+    )
+    assert "an unlock rather than the chain configuration" in out, (
+        "the banner blames the chain CONFIGURATION for an emptiness the passphrase caused. It lists "
+        "GRC among the adapters built, so an operator reads 'GRC is not an allowed destination' when "
+        "the truth is 'GRC is a destination this process cannot send':\n" + out
+    )
+    assert "funded mainnet wallet" not in out, (
+        "nothing can broadcast in this posture, so a mainnet caution is its own wrong line -- the "
+        "mirror of the defect this test was written for:\n" + out
+    )
+
+
+def test_the_hedged_warning_KEEPS_the_mainnet_caution_when_an_unlock_free_chain_IS_payable(monkeypatch, capsys, tmp_path):
+    """The case the test above used to cover, now that its own posture moved.
+
+    A blocked GRC AND a payable chain that needs no unlock. Both sentences are then
+    true at once and both must appear: the worker really can broadcast BTC, so the
+    mainnet caution is the real danger, and it really cannot pay GRC, so the hedge
+    has to say which chain and why.
+
+    MUTATION: collapse spawn_warning()'s two not-payable branches back into one, or
+    drop the hedge, and this fails -- it is the only test asserting that the mainnet
+    caution survives a partial block, which is the distinction
+    tests/test_supervisor.py::test_the_spawn_warning_does_not_contradict_the_unlock_line
+    was originally written to protect.
+    """
+    monkeypatch.delenv("GRIDCOIN_WALLET_PASSPHRASE", raising=False)
+    for asset, port in (("GRC", 25715), ("BTC", 28332)):
+        entry = supervisor.Config.RPC[asset]
+        monkeypatch.setitem(entry, "port", port)
+        monkeypatch.setitem(entry, "user", "fixture-user")
+        monkeypatch.setitem(entry, "password", "fixture-auth")
+
+    assert supervisor.main(["start", "--run-dir", str(tmp_path)], commands=_dying_table()) == 1
+    out = capsys.readouterr().out
+
+    assert "IS NOT SET" in out, "setup: GRC's unlock line must be present for there to be a hedge"
+    assert "funded mainnet wallet" in out, (
+        "a chain needing no unlock IS payable here, so the worker can broadcast and the mainnet "
+        "caution is the real danger. Dropping it is how a banner stops being read before money "
+        "moves:\n" + out
+    )
+    assert "those payouts refuse" in out, (
+        "the hedge does not say what happens to the chain that cannot pay:\n" + out
+    )
+    assert "a payout worker CAN broadcast. Stop now" not in out, (
+        "the unconditional sentence is back, and it contradicts the unlock line above it:\n" + out
+    )
 
 
 def test_the_spawn_warning_is_the_original_one_when_every_unlock_is_ready(monkeypatch):

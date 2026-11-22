@@ -102,6 +102,7 @@ from __future__ import annotations
 import copy
 
 import pytest
+from chains.gridcoin_wallet_lock import WALLET_UNLOCK_ENV_VAR as GRIDCOIN_WALLET_UNLOCK_ENV_VAR
 from chains.registry import build_adapters
 from chains.xrp_payout_seed import SIGNING_SEED_ENV_VAR
 from config import Config
@@ -140,6 +141,22 @@ def _build(*, seed: bool, deposit_account: bool, monkeypatch):
     the fixture instead of the page. The credentials are conftest's fixture
     constants; no socket is opened with them.
 
+    AND IT IS GIVEN GRIDCOIN_WALLET_PASSPHRASE FOR THE SAME REASON, added
+    2026-11-22 when GridcoinAdapter started DERIVING can_spend from it. Before
+    that the class answered True unconditionally, so these tests got a payable GRC
+    leg for free -- from the defect, as it turns out: an unarmed Gridcoin wallet
+    cannot send, and the class said it could. With the derivation in place and the
+    variable unset, why_cannot_pay_out() refuses every * -> GRC pair, and
+    test_XRP_to_GRC_names_XRP_DEPOSIT_ACCOUNT_whenever_the_account_is_unset read
+    the GRC payout refusal instead of the XRP deposit one. BOTH refusals were
+    correct and the test was measuring the wrong leg.
+    
+    So the passphrase is set here exactly as the port and credentials are: it makes
+    the GRC leg payable so the XRP posture stays the only variable. It is a
+    PLACEHOLDER, never used -- no socket is opened and no walletpassphrase RPC is
+    issued; chains/gridcoin_wallet_lock.payout_capability() reads presence only,
+    which is the whole of what it claims to answer.
+
     THE SEED IS SET ON THE ENVIRONMENT rather than in config, because that is
     where chains/xrp_payout_seed.py reads it from, at adapter CONSTRUCTION time --
     so the adapter must be built after the variable is set, which is why this
@@ -157,6 +174,12 @@ def _build(*, seed: bool, deposit_account: bool, monkeypatch):
         monkeypatch.setenv(SIGNING_SEED_ENV_VAR, ARMED_SEED)
     else:
         monkeypatch.delenv(SIGNING_SEED_ENV_VAR, raising=False)
+
+    # BEFORE build_adapters(), because GridcoinAdapter derives can_spend in its
+    # __init__ -- setting it afterwards would leave the adapter already built from
+    # the unarmed environment, which is the same ordering trap this helper's
+    # docstring records for the XRP seed.
+    monkeypatch.setenv(GRIDCOIN_WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
 
     rpc = copy.deepcopy(Config.RPC)
     rpc["XRP"]["url"] = UNREACHABLE_URL

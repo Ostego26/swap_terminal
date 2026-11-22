@@ -162,6 +162,80 @@ WALLET_UNLOCK_ASSETS = frozenset({"GRC"})
 WALLET_UNLOCK_ENV_VAR = "GRIDCOIN_WALLET_PASSPHRASE"
 
 
+def payout_capability() -> tuple[bool, str]:
+    """(can_spend, refusal) for GridcoinAdapter. THE arming question, asked in one place.
+
+    Returns (True, "") when GRIDCOIN_WALLET_PASSPHRASE holds a non-empty value, and
+    (False, <refusal>) otherwise. That pair is what chains/gridcoin.py publishes as
+    `can_spend` / `payout_refusal` and chains/registry.why_cannot_pay_out() reads
+    back out -- the same shape chains/xrp.py and chains/solana.py already use.
+
+    =========================================================================
+    WHY THIS EXISTS: TWO GATES IN ONE PROCESS DISAGREED ABOUT GRC
+    =========================================================================
+
+    MEASURED 2026-11-22, with the variable confirmed unset in the process:
+
+        GRIDCOIN_WALLET_PASSPHRASE set?            False
+        GridcoinAdapter.can_spend                  True
+        why_cannot_pay_out({'GRC': a}, 'GRC')      ''
+        pair_serviceability('BTC','GRC')['cannot_pay']  ''
+        payout_unlock_context('GRC', a)            RAISES PayoutUnlockUnavailable
+
+    chains/gridcoin.py was two lines -- `class GridcoinAdapter(RPCAdapter): asset =
+    "GRC"` -- so it inherited `can_spend = True` from chains/base.py, which is
+    correct for a Bitcoin-derived daemon whose own wallet signs AND WRONG HERE,
+    because GRC has a separate arming token and the other three do not.
+    tests/test_every_payable_adapter_derives_can_spend.py says exactly that in its
+    licence for class-level True: it applies where "the capability comes with being
+    reachable at all and there is no separate arming token".
+
+    WHAT IT COST, end to end against the real create_swap on the real schema: a
+    swap was CREATED, status awaiting_deposit, a deposit address issued -- and the
+    payout for that swap could not be sent. Since 2026-10-10 it defers rather than
+    fails (defer_for_locked_wallet()), so nothing is lost and nothing is sent, but
+    the customer's deposit is taken, credited and irreversible while the swap loops
+    in payout_pending until an operator sets the variable. Each loop re-runs the
+    lock cycle, which interrupts staking again. GRC is a destination on FIVE
+    ALLOWED_PAIRS directions.
+
+    THIS ADDS NO REFUSAL THAT DID NOT ALREADY EXIST, which is the whole minimality
+    argument: the payout already refuses in exactly this state. The refusal only
+    moves to before the deposit, where it costs a retry instead of a stranded swap.
+
+    ONE DECISION, TWO RENDERINGS, AND THAT IS DELIBERATE (rule 8).
+    services/payout_service.payout_unlock_context() takes its DECISION from this
+    function so the create-time and send-time gates cannot drift apart -- that is
+    what makes this a fix rather than a second gate -- while keeping its own longer
+    message, because it is read by an operator tailing a worker and this one is read
+    by a customer looking at a disabled pair.
+
+    THE SENTENCE IS BARE ON PURPOSE. chains/registry.why_cannot_pay_out() is the one
+    place that prefixes the asset name; prefixing here printed "ICP ICP" once.
+
+    NOT A CLAIM THE PASSPHRASE IS CORRECT. A wrong passphrase is refused by the
+    daemon at `walletpassphrase`, and restore_failed_because() below is what reads
+    that. This answers presence, which is the question that can be answered without
+    a node -- and it is the same question payout_unlock_context has always asked.
+
+    NOT A CLAIM THE WALLET IS ENCRYPTED EITHER, and that limit is worth stating. An
+    UNENCRYPTED Gridcoin wallet needs no passphrase and can send while this reports
+    False. The send gate has always had that same blind spot -- it refuses on
+    passphrase absence without consulting the wallet -- so this change makes the two
+    gates agree rather than making either more correct. Reading
+    chains/wallet_lock.wallet_is_encrypted() in BOTH is the better long-run shape
+    and needs a reachable daemon to justify; it is named work, not done here.
+    """
+    if not os.environ.get(WALLET_UNLOCK_ENV_VAR, "").strip():
+        return False, (
+            f"payouts need the Gridcoin wallet fully unlocked and {WALLET_UNLOCK_ENV_VAR} is not "
+            f"set in this process's environment, so this terminal cannot send GRC. A wallet left "
+            f"unlocked for staking CANNOT send -- the daemon answers rpc code -4. This is refused "
+            f"here, before a deposit is taken, rather than after"
+        )
+    return True, ""
+
+
 #: What a Bitcoin-derived daemon says when an operation needs the wallet unlocked.
 #:
 #: RPC code -13 is WALLET_UNLOCK_NEEDED, and the message is the one every fork

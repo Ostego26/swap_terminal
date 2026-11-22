@@ -70,6 +70,7 @@ import valid_addresses
 # opens a socket, so neither value is ever sent anywhere.
 from chains.base import RPCAdapter, RPCError
 from chains.gridcoin import GridcoinAdapter
+from chains.gridcoin_wallet_lock import WALLET_UNLOCK_ENV_VAR
 from conftest import RPC_FIXTURE_AUTH, RPC_FIXTURE_USER
 
 #: The desk's own GRC deposit address, derived rather than typed. Its ROLE matters:
@@ -301,7 +302,7 @@ def test_an_output_that_pays_somebody_else_is_not_credited_to_this_swap():
     )
 
 
-def test_the_adapter_under_test_is_the_production_gridcoin_one():
+def test_the_adapter_under_test_is_the_production_gridcoin_one(monkeypatch):
     """A floor on the fixture itself, because the fixture is the subject.
 
     Every test above asserts behavior INHERITED from chains/base.py. If
@@ -309,10 +310,48 @@ def test_the_adapter_under_test_is_the_production_gridcoin_one():
     `asset = "GRC"`, which is what reaches deposit_events.asset and therefore which
     swap a credit is attributed to -- the tests above would keep passing while
     measuring a class the terminal no longer uses.
+
+    THE can_spend ASSERTION HERE WAS INVERTED 2026-11-22, and the sentence it
+    carried is why. It read:
+
+        assert GridcoinAdapter.can_spend is True, (
+            "GRC pays out through the daemon's own wallet; can_spend False would
+            make chains/registry.why_cannot_pay_out() disable every *->GRC pair")
+
+    Both halves were true and the conclusion was backwards. GRC does pay out through
+    the daemon's own wallet -- and that wallet CANNOT SEND while it is unlocked only
+    for staking, which is what an unset GRIDCOIN_WALLET_PASSPHRASE means. So
+    `can_spend False` disabling every *->GRC pair is not the cost of the fix; it is
+    the fix. Measured 2026-11-22 before it: with the variable unset, can_spend was
+    True, why_cannot_pay_out() returned "", a swap was CREATED, and
+    payout_unlock_context() then raised for that same swap. The deposit was taken
+    for a payout the same process already knew it could not send.
+
+    THE CLASS ATTRIBUTE IS NOW THE FAIL-CLOSED FLOOR AND THE INSTANCE DERIVES, which
+    is the shape chains/xrp.py and chains/solana.py already had and the shape
+    tests/test_every_payable_adapter_derives_can_spend.py requires of a deriving
+    adapter. Both directions are asserted, because a class that answers False
+    unconditionally would pass a one-sided check while taking GRC off the menu
+    permanently.
     """
     assert issubclass(GridcoinAdapter, RPCAdapter)
     assert GridcoinAdapter.asset == "GRC"
-    assert GridcoinAdapter.can_spend is True, (
-        "GRC pays out through the daemon's own wallet; can_spend False would make "
-        "chains/registry.why_cannot_pay_out() disable every *->GRC pair"
+    assert GridcoinAdapter.can_spend is False, (
+        "the class-level default is not fail-closed. chains/registry.why_cannot_pay_out() reads "
+        "getattr(adapter, 'can_spend', False), so an adapter whose __init__ raised partway must "
+        "not be left reporting a capability it never derived"
+    )
+
+    monkeypatch.delenv(WALLET_UNLOCK_ENV_VAR, raising=False)
+    unarmed = GridcoinAdapter(user="u", password="x", host="127.0.0.1", port=1)  # noqa: S106 -- the RPC connection, never opened: no method is called on this instance
+    assert unarmed.can_spend is False, (
+        "an unarmed instance reports it can pay GRC out, which is the state that took a deposit "
+        "for a payout the same process refuses"
+    )
+
+    monkeypatch.setenv(WALLET_UNLOCK_ENV_VAR, "not-a-real-passphrase")
+    armed = GridcoinAdapter(user="u", password="x", host="127.0.0.1", port=1)  # noqa: S106 -- as above
+    assert armed.can_spend is True, (
+        "an ARMED instance still reports it cannot pay GRC out, so the derivation is a blanket "
+        "refusal and every *->GRC pair is off the menu for good"
     )

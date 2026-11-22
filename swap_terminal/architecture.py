@@ -520,7 +520,14 @@ CUSTODY = {
     # the one credential a daemon chain needs. See GRC_PASSPHRASE_GATES_BOTH_LEGS and
     # GRC_PASSPHRASE_SECOND_NAME below -- this entry is the narrowest true statement
     # about it and both notes are load-bearing.
-    "GRC": Custody("daemon", "GRIDCOIN_WALLET_PASSPHRASE", "class"),
+    # "class" -> "derived" 2026-11-22: GridcoinAdapter now sets can_spend in
+    # __init__ from gridcoin_wallet_lock.payout_capability(). The row mattered --
+    # test_can_spend_from_matches_how_the_adapter_actually_decides_it fails on a
+    # half-fix, and its docstring already named this consequence: "A chain recorded
+    # as 'class' that quietly started deriving -- or the reverse -- changes whether a
+    # missing credential shows up as an unpayable chain or as a payout that fails
+    # after the deposit is taken."
+    "GRC": Custody("daemon", "GRIDCOIN_WALLET_PASSPHRASE", "derived"),
     "SOL": Custody("process", "SOL_PAYOUT_KEYPAIR_PATH", "derived"),
     "XRP": Custody("process", "XRP_PAYOUT_SECRET_SEED", "derived"),
     # A dfx IDENTITY NAME, not a key: the PEM behind it lives on the icp-state volume
