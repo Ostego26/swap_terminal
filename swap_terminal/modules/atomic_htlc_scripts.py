@@ -400,6 +400,67 @@ def p2sh_script_for(script: bytes) -> bytes:
     script_hash = hash160(script)
     return b"\xa9" + bytes([len(script_hash)]) + script_hash + b"\x87"
 
+# =========================================================================
+# WHY THIS IS HAND-BUILT FOR GRC RATHER THAN DELEGATED TO `createhtlc`
+# =========================================================================
+#
+# Gridcoin has NATIVE HTLC RPCs. Measured 2026-11-22 against the exact source
+# docker/grc-desk.Dockerfile pins (ref 5.5.1.7-testnet, commit
+# 30a89f2ab0bb4f7134ca7a9c74e233e76130ebd8, clone verified): src/htlc.cpp and
+# src/htlc.h exist, and src/rpc/server.cpp registers three `heritage_pure_gridcoin`
+# wallet commands -- `createhtlc` (:436), `claimhtlc` (:435) and `refundhtlc` (:487).
+# They are absent from this tree's chains/gridcoin_rpc_commands.COMMANDS table,
+# which was built from 5.5.1.0.
+#
+# THEY CANNOT SPEND WHAT THIS BUILDS, AND THIS CANNOT SPEND WHAT THEY BUILD. The
+# two scripts differ in the one place that decides who may sign. Both opcode
+# sequences were decoded rather than read off a comment:
+#
+#   this tree        OP_IF   OP_SHA256 <hash:32> OP_EQUALVERIFY
+#                            OP_DUP OP_HASH160 <pubkeyHASH:20> OP_EQUALVERIFY OP_CHECKSIG
+#                    OP_ELSE <locktime> OP_CHECKLOCKTIMEVERIFY OP_DROP
+#                            OP_DUP OP_HASH160 <pubkeyHASH:20> OP_EQUALVERIFY OP_CHECKSIG
+#                    OP_ENDIF
+#
+#   Gridcoin native  OP_IF   OP_SHA256 <hash:32> OP_EQUALVERIFY
+#                            <PUBKEY:33> OP_CHECKSIG
+#                    OP_ELSE <timeout> OP_CHECKLOCKTIMEVERIFY OP_DROP
+#                            <PUBKEY:33> OP_CHECKSIG
+#                    OP_ENDIF
+#
+# Pubkey-HASH against bare PUBKEY. Both are valid HTLCs and both hashlock with
+# SHA256 and timelock with CLTV, so neither is wrong -- they are simply different
+# scripts, which means different P2SH addresses and different scriptSigs. And the
+# incompatibility is enforced rather than incidental: src/htlc.cpp:83-111 is a
+# strict parser that walks the expected opcodes in order and refuses on the first
+# mismatch, so `claimhtlc` and `refundhtlc` REJECT a contract built here, at step 5
+# of their own walk.
+#
+# THE SHAPE HERE IS THE RIGHT ONE FOR THIS SYSTEM, for two reasons that have
+# nothing to do with which is nicer. It is byte-identical in structure to the
+# BTC and LTC legs, so one script builder, one spender and one set of tests cover
+# all three chains -- adopting Gridcoin's shape would make the GRC leg
+# structurally unlike the other two in the one module where that matters. And it
+# is the shape with on-chain evidence: every SPENT row for GRC in
+# docs/branch_coverage.md -- the hashlock spends of 2026-09-27 and the refunds
+# 9495082ef304c4ca… and ee9dc216bf055b22… -- was this script.
+#
+# NO NEW TEST CAME WITH THIS NOTE, AND THAT IS DELIBERATE. The shape is already
+# pinned item-by-item: tests/test_htlc_locktime_encoding.py asserts the full
+# nineteen-element disassembly, both `OP_DUP OP_HASH160 <hash> OP_EQUALVERIFY
+# OP_CHECKSIG` branches included. So a "simplification" to Gridcoin's bare-pubkey
+# form fails there, which is where it should fail. A second test asserting the same
+# sequence would be rule 8's duplicate with a delay on it, in a module about not
+# having two answers to one question.
+#
+# SO THE NATIVE RPCs ARE NOT A SHORTCUT AND THIS IS NOT DUPLICATION (rule 8). Two
+# implementations of one concept would be a bug with a delay on it; this is one
+# implementation of a concept the daemon happens to also implement differently,
+# for its own users. The note exists so the next reader who finds `createhtlc` in
+# a help listing does not spend an afternoon discovering the parser the hard way.
+# Worth knowing if it is ever reconsidered: `createhtlc` is `cat_wallet` and funds
+# through the wallet, so it is also blocked by the devbuild cripple that
+# src/init.cpp:1693-1707 sets on any 5.5.1.7 build running outside testnet.
 def build_htlc_redeem_script(secret_hash: str | bytes,
                              participant_address: str,
                              refund_address: str,

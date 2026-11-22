@@ -72,7 +72,6 @@ ARG GRIDCOIN_REF=5.5.1.7-testnet
 # MEASURED 2026-11-21: refs/tags/5.5.1.7-testnet -> this commit, via git ls-remote.
 ARG GRIDCOIN_COMMIT=30a89f2ab0bb4f7134ca7a9c74e233e76130ebd8
 
-ARG BDB_VERSION=4.8.30.NC
 
 # BERKELEY DB'S DIGEST, AND IT DID NOT COME FROM download.oracle.com. That host is
 # not reachable from the environment this was written in, so the pin is taken from
@@ -89,29 +88,48 @@ ARG BDB_VERSION=4.8.30.NC
 # is: a digest-verified Bitcoin Core source release pins this exact filename from
 # this exact path. That is a stronger provenance than an unverified fetch and a
 # weaker one than reading Oracle's own checksum, and saying which is rule 17's job.
-ARG BDB_SHA256=12edc0df75bf9abd7f82f821795bcee50f42cb2e5f76a6a281b85732798364ef
 
+# THE DEPENDENCY LIST IS MEASURED, NOT COPIED FROM UPSTREAM'S install_dependencies.sh.
+# Established 2026-11-22 by running `cmake -S <src> -B <build>` natively against the clone
+# at this commit and adding packages until it stopped refusing -- so every entry is one
+# configure actually demanded. `cmake`, `bison` and `xxd` are the additions over the old
+# autotools list; `libboost-iostreams-dev` is the one that is easy to miss, because
+# find_package(Boost) SUCCEEDS and then fails on the component (CMakeLists.txt:266).
+#
+# WHAT WENT AWAY: libtool, autotools-dev and automake. They were here to run ./autogen.sh,
+# which does not exist at this commit -- see the build step below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential libtool autotools-dev automake pkg-config bsdmainutils \
+      build-essential cmake pkg-config bison xxd python3 bsdmainutils \
       libevent-dev libboost-dev libboost-system-dev libboost-filesystem-dev \
-      libboost-test-dev libboost-thread-dev libssl-dev libminiupnpc-dev \
-      libzmq3-dev libcurl4-openssl-dev ca-certificates curl git \
+      libboost-iostreams-dev libboost-test-dev libboost-thread-dev \
+      libssl-dev libminiupnpc-dev libzmq3-dev libcurl4-openssl-dev \
+      ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
 
-# BERKELEY DB 4.8, AND IT IS NOT OPTIONAL FOR A WALLET. The atomic_mutex patch is
-# the long-standing fix for building 4.8 against modern glibc, where the bundled
-# configure test picks a symbol that no longer exists.
-WORKDIR /bdb
-RUN set -eux; \
-    curl -fsSLO "https://download.oracle.com/berkeley-db/db-${BDB_VERSION}.tar.gz"; \
-    echo "${BDB_SHA256}  db-${BDB_VERSION}.tar.gz" | sha256sum -c - \
-      || { echo "REFUSED: db-${BDB_VERSION}.tar.gz did not match ARG BDB_SHA256. Until 2026-11-21 this stage verified NOTHING and built a wallet daemon against whatever TLS served. If you are bumping BDB_VERSION, take the new digest from a source you can verify -- Bitcoin Core's depends/packages/bdb.mk is where this one came from -- and do not delete this check to get past it." >&2; exit 1; }; \
-    tar -xzf "db-${BDB_VERSION}.tar.gz"; \
-    sed -i 's/__atomic_compare_exchange/__atomic_compare_exchange_db/' \
-      "db-${BDB_VERSION}/src/dbinc/atomic.h"; \
-    cd "db-${BDB_VERSION}/build_unix"; \
-    ../dist/configure --enable-cxx --disable-shared --with-pic --prefix=/opt/bdb48; \
-    make -j"$(nproc)" && make install
+# =========================================================================
+# THE BERKELEY DB 4.8 STAGE IS GONE, AND THAT IS A CORRECTION RATHER THAN A CUT
+# =========================================================================
+#
+# This stage used to download db-4.8.30.NC from download.oracle.com, verify it against a
+# digest traced through Bitcoin Core's depends/packages/bdb.mk, patch its atomic.h for
+# modern glibc, and compile it to /opt/bdb48 -- several minutes of work whose output this
+# commit cannot use.
+#
+# MEASURED 2026-11-22 in the clone at ARG GRIDCOIN_COMMIT: `src/bdb53/` is VENDORED, 9190
+# files with its own CMakeLists.txt and LICENSE, and CMakeLists.txt:148 declares
+# `option(SYSTEM_BDB "Find system installation of Berkeley DB CXX 5.3" OFF)`. With it OFF --
+# the default, and what this image builds -- src/CMakeLists.txt:48-52 runs
+# `add_subdirectory(bdb53)`. The build supplies its own Berkeley DB and never looks for
+# /opt/bdb48. Turning SYSTEM_BDB ON would ask for 5.3, not 4.8, so there is no flag that
+# makes the old stage useful.
+#
+# THE CONSEQUENCE IS A WALLET-FORMAT CHANGE AND IT IS NAMED HERE BECAUSE NOTHING ELSE WOULD
+# SAY IT: a wallet.dat this image writes is BDB 5.3, which a Berkeley DB 4.8 build cannot
+# open. That is a one-way door for any datadir this daemon is pointed at. The 4.8 digest and
+# its provenance are not lost -- they are in git history and in
+# docs/gridcoin_regtest_2026_11_22.md -- and ARG BDB_VERSION / ARG BDB_SHA256 are removed
+# rather than left unused, because an ARG nothing reads is rule 9's dead name with a
+# plausible story attached.
 
 WORKDIR /src
 RUN set -eux; \
@@ -121,15 +139,58 @@ RUN set -eux; \
     [ "$got" = "${GRIDCOIN_COMMIT}" ] \
       || { echo "REFUSED: ${GRIDCOIN_REF} resolves to $got but ARG GRIDCOIN_COMMIT pins ${GRIDCOIN_COMMIT}. The tag moved, or the ref was changed without changing the commit. This daemon holds a wallet: establish which commit you mean with \`git ls-remote\`, change BOTH args together, and do not delete this check." >&2; exit 1; }; \
     echo "gridcoin source verified: ${GRIDCOIN_REF} = $got"; \
-    ./autogen.sh; \
-    ./configure \
-      --without-gui \
-      --disable-tests \
-      --disable-bench \
-      LDFLAGS="-L/opt/bdb48/lib" \
-      CPPFLAGS="-I/opt/bdb48/include"; \
-    make -j"$(nproc)"; \
-    strip src/gridcoinresearchd src/gridcoinresearch-cli || true
+    cmake -S . -B /build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DENABLE_GUI=OFF \
+      -DENABLE_TESTS=OFF \
+      -DENABLE_DAEMON=ON; \
+    cmake --build /build -j"$(nproc)"; \
+    strip /build/bin/gridcoinresearchd || true
+
+# =========================================================================
+# IT USED TO RUN ./autogen.sh AND COULD NOT BUILD AT ALL
+# =========================================================================
+#
+# The three lines above replace `./autogen.sh; ./configure --without-gui ...; make`.
+# MEASURED 2026-11-22 in the clone at ARG GRIDCOIN_COMMIT:
+#
+#     autogen.sh    ABSENT      CMakeLists.txt:1  "# CMake is the official build system
+#     configure.ac  ABSENT                         for Gridcoin."
+#     configure     ABSENT      build_targets.sh  present
+#     Makefile.am   ABSENT      grep -in cmake <this file> -> no match
+#
+# There is no autotools entry point at this commit, or at 5.5.1.0. So the old step died at
+# `./autogen.sh: not found` -- INSIDE `set -eux`, three lines after the commit pin had
+# already printed `gridcoin source verified`, and after the apt layer and the whole Berkeley
+# DB compile had been paid for. The pin was fine; everything after it was unreachable.
+#
+# THIS FILE WAS ALREADY CORRECTED ONCE FOR BEING UNBUILDABLE, on 2026-11-21, because the ref
+# it named did not exist -- the comment above still says "THIS IMAGE COULD NOT BE BUILT AT
+# ALL". It remained unbuildable for a different reason three lines further down, and the
+# reason that was not caught is in this file's own header: "nothing in the suite or in CI
+# builds it (there is no docker daemon in the environment these files are written in)".
+# Fixing the first thing that stops a build tells you nothing about the second.
+#
+# MOST OF THE OLD FLAGS HAVE NO CMAKE EQUIVALENT TO PORT, which is why three became three
+# and not six: ENABLE_GUI, ENABLE_TESTS and ENABLE_DOCS already default OFF
+# (CMakeLists.txt:98-100) and ENABLE_DAEMON defaults ON (:97). They are passed explicitly
+# anyway, because a default is a thing upstream may change and this image holds a wallet.
+# The LDFLAGS/CPPFLAGS pointing at /opt/bdb48 are gone with the stage that built it.
+#
+# WHAT IS ESTABLISHED AND WHAT IS NOT (rule 16, rule 17). This exact cmake invocation was
+# run NATIVELY to completion on 2026-11-22 -- `cmake --build` exited 0 with zero errors and
+# produced a binary that reported `Gridcoin Core v5.5.1.7-30a89f2ab0bb`, served RPC on
+# regtest and answered every measurement in docs/gridcoin_regtest_2026_11_22.md. It has NOT
+# been run as a `docker build`: apt cannot bootstrap through the proxy in the environment
+# this file was edited in, which is the same gap that let the autotools breakage survive.
+# So this build stage is a PROPOSAL whose first real test is a build on a host with docker.
+#
+# THE OUTPUT PATH MOVED, which is why the COPY lines below changed: cmake puts the daemon at
+# /build/bin/gridcoinresearchd, not /src/src/. And `strip` names ONE binary now, because
+# THERE IS NO CLI TARGET -- `cmake --build --target help` offers gridcoinresearchd,
+# gridcoin_util and leveldbutil and nothing else. `gridcoin-cli` does not exist at this
+# commit, so the old `strip`'s second argument and the second COPY were both naming a file
+# the build never produced.
 
 FROM debian:bookworm-slim AS runtime
 
@@ -148,8 +209,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libcurl4 openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /src/src/gridcoinresearchd /usr/local/bin/gridcoinresearchd
-COPY --from=build /src/src/gridcoinresearch-cli /usr/local/bin/gridcoinresearch-cli
+# /build/bin/ AND NOT /src/src/, because cmake writes its output into the build directory
+# the step above named. The old path was autotools' in-tree layout.
+COPY --from=build /build/bin/gridcoinresearchd /usr/local/bin/gridcoinresearchd
+
+# THERE IS NO SECOND COPY, AND THE MISSING FILE IS gridcoinresearch-cli. This used to copy
+# it from /src/src/ and would have failed even with the path corrected: measured 2026-11-22,
+# `cmake --build --target help` at ARG GRIDCOIN_COMMIT offers `gridcoinresearchd`,
+# `gridcoin_util` and `leveldbutil`, and no CLI target exists. Nothing in this repository
+# used it -- every Gridcoin caller in this tree reaches the daemon over JSON-RPC through
+# chains/base.RPCAdapter, and `grep -c gridcoinresearch-cli` over the repository finds this
+# comment and nothing else -- so its absence costs nothing here. It is called out rather
+# than silently dropped because an operator used to `bitcoin-cli` will look for it, and
+# because regtest/daemons.ChainConfig has a `cli_path` field that has nothing to point at
+# for this chain.
 
 # uid 1000 so a datadir the operator created is writable without a chown that would
 # change ownership of a live wallet on the host.

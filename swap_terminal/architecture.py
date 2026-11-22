@@ -444,8 +444,25 @@ UPSTREAM_SOURCE = {
         ref_is_pinned=False,
         commit_pin_variable="GRIDCOIN_COMMIT",
         commit_verified=True,
-        fetches_from=("download.oracle.com", "github.com"),
-        digest_verified=True,
+        # BOTH OF THESE CHANGED ON 2026-11-22 BECAUSE THE BERKELEY DB 4.8 STAGE WENT AWAY,
+        # and the test below is what forced the edit rather than letting the table drift.
+        #
+        # The Dockerfile used to download db-4.8.30.NC from download.oracle.com and verify
+        # it with sha256sum against a digest traced through Bitcoin Core's
+        # depends/packages/bdb.mk. Measured that day in the clone at GRIDCOIN_COMMIT:
+        # `src/bdb53/` is VENDORED (9190 files, its own CMakeLists.txt) and
+        # `option(SYSTEM_BDB ... OFF)` means the build runs `add_subdirectory(bdb53)` and
+        # supplies its own Berkeley DB. The 4.8 stage built something nothing could use, so
+        # it is gone -- and with it the only download this image made BY DIGEST.
+        #
+        # SO `digest_verified=False` IS NOT A WEAKENING OF THE PROVENANCE, and saying which
+        # is this table's whole job. Nothing is fetched by digest because nothing is fetched
+        # that HAS one: the source arrives as a git clone whose `git rev-parse HEAD` is
+        # compared against GRIDCOIN_COMMIT, which is what `commit_verified=True` above
+        # records and is a stronger guarantee than a tarball checksum. The flag means
+        # "no checksum check runs", and that is now exactly true.
+        fetches_from=("github.com",),
+        digest_verified=False,
         license_in_image="/usr/share/licenses/gridcoin/COPYING",
     ),
 }
