@@ -102,9 +102,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential cmake pkg-config bison xxd python3 bsdmainutils \
       libevent-dev libboost-dev libboost-system-dev libboost-filesystem-dev \
       libboost-iostreams-dev libboost-test-dev libboost-thread-dev \
-      libssl-dev libminiupnpc-dev libzmq3-dev libcurl4-openssl-dev \
+      libssl-dev libminiupnpc-dev libzmq3-dev libcurl4-openssl-dev zlib1g-dev \
       ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
+
+# zlib1g-dev WAS MISSING FROM THE FIRST VERSION OF THIS LIST, AND THE REASON IS A FLAW IN
+# HOW THE LIST WAS DERIVED. It was built by running `cmake -S . -B <dir>` natively and
+# adding packages until configure stopped refusing -- which can only ever find what THAT
+# machine lacked. The machine already had zlib's headers, so CMakeLists.txt:281
+# `find_package(ZLIB REQUIRED)` passed there and failed here, on the first real image
+# build, with "Could NOT find ZLIB (missing: ZLIB_LIBRARY ZLIB_INCLUDE_DIR)".
+#
+# debian:bookworm-slim IS THE ONLY HONEST REFERENCE for this list, which is the same point
+# the build step below makes about itself: a native run establishes that the invocation
+# compiles, not that the image has what it needs. Measured 2026-11-22 on the first run that
+# got this far -- apt layer built, clone verified against GRIDCOIN_COMMIT, configure refused.
+#
+# AND IT IS NOW DERIVED FROM THE SOURCE RATHER THAN FROM TRIAL AND ERROR, so the next
+# failure should not be a missing package. Every unconditional `find_package(... REQUIRED)`
+# in CMakeLists.txt was enumerated: Atomics (:198) and Threads (:199) are compiler
+# features, Boost (:256) with components, OpenSSL (:272), CURL (:278), ZLIB (:281), Rt
+# (:397) which is in libc, and Python3 Interpreter (:715). Every OTHER find_package sits
+# behind an option that defaults OFF and is therefore not reached by this build:
+# BerkeleyDB (SYSTEM_BDB), leveldb (SYSTEM_LEVELDB), SECP256K1, UNIVALUE, Qt5/Qt6
+# (ENABLE_GUI), QRENCODE, CapnProto and Libmultiprocess (ENABLE_MULTIPROCESS).
 
 # =========================================================================
 # THE BERKELEY DB 4.8 STAGE IS GONE, AND THAT IS A CORRECTION RATHER THAN A CUT
