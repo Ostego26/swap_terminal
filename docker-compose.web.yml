@@ -204,6 +204,44 @@ services:
       # EXPLICIT, NEVER THE DEFAULT. config.py falls back to a path under its own
       # BASE_DIR (§3.2), which inside the image is the image -- a database that
       # looks like it works and is discarded by `docker compose down`.
+      # =====================================================================
+      # THE NETWORK SWITCH, PASSED THROUGH RATHER THAN DEFAULTED HERE
+      # =====================================================================
+      #
+      # swap_terminal/network_switch.py is the one module that reads these, and the
+      # payout path runs in THIS container -- so a switch the container cannot see is a
+      # switch that does nothing. That is not a guess: it is what
+      # tests/test_env_example_covers_every_compose_variable.py said when ST_NETWORK was
+      # documented in .env.example and read by no compose file.
+      #
+      # `:-` WITH AN EMPTY DEFAULT AND NOT `:-test`, which looks like the cautious choice
+      # and is the wrong one. Two reasons:
+      #
+      #   ONE PLACE DECIDES. network_switch treats unset AND empty as test, with the
+      #   reasoning written there. A `:-test` here would be a second copy of that default
+      #   -- rule 8's bug with a delay on it, in the file that decides which blockchain
+      #   real money moves on. If the default ever changes it must change once.
+      #
+      #   AND A LITERAL HERE WOULD OUTRANK THE OPERATOR'S .env. `${X:-test}` substitutes
+      #   when X is unset OR empty, so an operator who set ST_NETWORK=main in .env and had
+      #   it fail to load would get `test` silently -- which sounds safe until you notice
+      #   it is the same silent-substitution mechanism that made CONTAINER_*_RPC_HOST
+      #   necessary further down this file, where `${GRC_RPC_HOST:-host.docker.internal}`
+      #   quietly overrode a correct 127.0.0.1 from the operator's own .env.
+      #
+      # THE ARMING VARIABLES ARE PASSED ONE PER CHAIN, spelled out rather than globbed,
+      # because compose cannot pass a prefix and because six explicit lines are what makes
+      # "this chain is armed" greppable. network_switch requires BOTH the target and the
+      # chain's own arming before any mainnet endpoint is allowed, so none of these alone
+      # changes anything.
+      ST_NETWORK: "${ST_NETWORK:-}"
+      ST_MAINNET_ARMED_BTC: "${ST_MAINNET_ARMED_BTC:-}"
+      ST_MAINNET_ARMED_LTC: "${ST_MAINNET_ARMED_LTC:-}"
+      ST_MAINNET_ARMED_GRC: "${ST_MAINNET_ARMED_GRC:-}"
+      ST_MAINNET_ARMED_SOL: "${ST_MAINNET_ARMED_SOL:-}"
+      ST_MAINNET_ARMED_XRP: "${ST_MAINNET_ARMED_XRP:-}"
+      ST_MAINNET_ARMED_ICP: "${ST_MAINNET_ARMED_ICP:-}"
+
       SWAP_DB_PATH: /data/swap_terminal.db
       ST_WORKER_RUN_DIR: /runtime
       SWAP_TERMINAL_HOST: "0.0.0.0"
