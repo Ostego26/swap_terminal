@@ -908,6 +908,29 @@ def current_height(run: HasAChainNode) -> int:
     return int(run.node(wallet=False).call("getblockcount"))
 
 
+def _wait_for_blocks_to(run: Run, target: int, tip: int) -> None:
+    """Announce the wait, then poll until the tip reaches the ABSOLUTE height `target`.
+
+    `tip` IS PASSED IN RATHER THAN READ, and that is the entire point of this function
+    existing. Every caller already holds a tip it computed its target from; reading the
+    chain again here would be a second observation of a moving value, and on Gridcoin
+    testnet -- where a block lands roughly every GRC_SECONDS_PER_BLOCK seconds -- the two
+    readings genuinely differ. See the defect note in _mine() and wait_or_mine_to().
+
+    ONE COPY OF THIS MESSAGE, reached from two directions (rule 8). It is the line an
+    operator stares at for however long the wait takes, so the two paths into it must not
+    be able to describe the same wait differently.
+    """
+    run.say(
+        f"this chain cannot be told to produce a block, so WAITING for {max(0, target - tip)} more "
+        f"(tip {tip} -> {target}). Gridcoin testnet targets {GRC_SECONDS_PER_BLOCK:.0f}s a block "
+        f"(modules/htlc_timelock.SECONDS_PER_BLOCK); the timeout is "
+        f"{format_duration(GRC_BLOCK_WAIT_TIMEOUT_SECONDS)} and it is set by "
+        f"ST_ADAPTOR_GRC_BLOCK_TIMEOUT_SECONDS"
+    )
+    _wait_for_height(run, target)
+
+
 def _mine(run: Run, count: int) -> None:
     """Produce `count` blocks, or wait for them if this chain cannot be told to.
 
@@ -923,22 +946,22 @@ def _mine(run: Run, count: int) -> None:
         run.say(f"mining {count} block(s) to a HARNESS WALLET address (not a throwaway key -- see resolve_mining_address)")
         run.node(wallet=False).call("generatetoaddress", count, address)
         return
-    # THE TIP IS READ ONCE. It used to be read twice -- once to compute the target and once
-    # inside the message -- and the second reading printed `(tip 51 -> 51)` while the target
-    # had been computed from 50. That is rule 14's defect in its purest form: a progress line
-    # that contradicts itself, on the one code path an operator watches for half an hour.
-    # tests/test_adaptor_regtest_harness.py found it, because a stub that answers a fixed
-    # sequence of heights cannot answer a call nobody expected.
+    # THE TIP IS READ ONCE HERE. It used to be read twice -- once to compute the target and
+    # once inside the message -- and the second reading printed `(tip 51 -> 51)` while the
+    # target had been computed from 50. That is rule 14's defect in its purest form: a
+    # progress line that contradicts itself, on the one code path an operator watches for
+    # half an hour.
+    #
+    # THE COMMENT HERE USED TO CREDIT tests/test_adaptor_regtest_harness.py WITH FINDING IT,
+    # AND THAT FILE DOES NOT EXIST. It was deleted in 802e5b7 together with
+    # adaptor_regtest_verify.py, so for every reader since, this paragraph has pointed at a
+    # test that could not have been protecting anything. A wrong comment is a bug (rule 16),
+    # and this one was load-bearing: it is why the identical shape surviving ACROSS the
+    # boundary into wait_or_mine_to() read as already covered. Confirmed 2026-11-22 by
+    # driving the real functions with a stub whose height advances between reads -- the
+    # overshoot was exactly one block per block that arrived, 0/1/2/3/5 in and the same out.
     tip = current_height(run)
-    target = tip + count
-    run.say(
-        f"this chain cannot be told to produce a block, so WAITING for {count} more "
-        f"(tip {tip} -> {target}). Gridcoin testnet targets {GRC_SECONDS_PER_BLOCK:.0f}s a block "
-        f"(modules/htlc_timelock.SECONDS_PER_BLOCK); the timeout is "
-        f"{format_duration(GRC_BLOCK_WAIT_TIMEOUT_SECONDS)} and it is set by "
-        f"ST_ADAPTOR_GRC_BLOCK_TIMEOUT_SECONDS"
-    )
-    _wait_for_height(run, target)
+    _wait_for_blocks_to(run, tip + count, tip)
 
 
 def _wait_for_height(run: Run, target: int) -> int:
@@ -2038,10 +2061,54 @@ def mempool_reject_reason(run: Run, raw_hex: str) -> str:
 
 
 def wait_or_mine_to(run: Run, target: int) -> None:
-    """Advance to `target`: mine the difference, or WAIT for it on a chain that cannot mine."""
+    """Advance to the ABSOLUTE height `target`: mine the difference, or wait for it.
+
+    =========================================================================
+    THE TARGET IS ABSOLUTE AND STAYS ABSOLUTE
+    =========================================================================
+
+    CONFIRMED 2026-11-22. This used to read the tip, hand `_mine()` a RELATIVE count, and
+    `_mine()` read the tip a second time to rebuild the target from it:
+
+        tip = current_height(run)              # first reading
+        _mine(run, max(0, target - tip))       # -> _mine reads the tip again, target = tip2 + count
+
+    On BTC/LTC regtest nothing moves between those two readings, so it never mattered there.
+    On Gridcoin testnet a block lands roughly every GRC_SECONDS_PER_BLOCK seconds, so any
+    block arriving in between raised the recomputed target above the caller's by exactly one
+    per block. Measured by driving the real functions with a stub whose height advances:
+    0, 1, 2, 3 and 5 blocks arriving produced 0, 1, 2, 3 and 5 blocks of overshoot.
+
+    THE CONSEQUENCE IS BOUNDED AND IS NOT A WRONG VERDICT. Nothing here decides what is
+    sent, to whom, or for how much; the cost is real waiting an operator did not ask for,
+    plus the output printing two different targets one line apart -- rule 14's
+    self-contradicting progress line, on the path that is watched the longest.
+
+    IT WAS LIVE RATHER THAN LATENT, which is why it is fixed rather than noted. Both callers
+    are in grc_htlc_verify.py, which builds its Run without ever calling
+    step_3_capabilities, so `run.mines` is unconditionally False there and the waiting
+    branch is the ONLY branch this function has ever taken.
+
+    AND IT SURVIVED BECAUSE _mine() CARRIES A COMMENT SAYING THIS EXACT SHAPE WAS ALREADY
+    FIXED -- "THE TIP IS READ ONCE" -- crediting a test file that no longer exists. The
+    claim was true WITHIN _mine(); the same two-reads shape had simply moved across the
+    function boundary, where that comment could not see it.
+
+    So the non-mining path now goes straight to the absolute target with the tip it already
+    has. The mining path still takes a count, because `generatetoaddress` takes a count.
+    """
     tip = current_height(run)
     run.say(f"advancing from tip={tip} to height {target} so the cancel becomes final")
-    _mine(run, max(0, target - tip))
+    if run.mines:
+        _mine(run, max(0, target - tip))
+        return
+    if target <= tip:
+        # SAID RATHER THAN RETURNED SILENTLY. "already there" and "waited for nothing" are
+        # different outcomes and an operator reading a pasted run has to be able to tell
+        # which happened (rule 14).
+        run.say(f"tip={tip} is already at or past {target}, so there is nothing to wait for")
+        return
+    _wait_for_blocks_to(run, target, tip)
 
 
 
