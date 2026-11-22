@@ -204,7 +204,29 @@ RUN set -eux; \
 # regtest and answered every measurement in docs/gridcoin_regtest_2026_11_22.md. It has NOT
 # been run as a `docker build`: apt cannot bootstrap through the proxy in the environment
 # this file was edited in, which is the same gap that let the autotools breakage survive.
-# So this build stage is a PROPOSAL whose first real test is a build on a host with docker.
+# IT HAS NOW BEEN BUILT AS AN IMAGE, and this paragraph is corrected rather than deleted
+# because the distinction it drew is the one worth keeping. Measured on the operator's host,
+# 2026-11-22: all 16 steps, `Successfully tagged swap-terminal/grc-desk:local`. The run
+# before it failed at `find_package(ZLIB REQUIRED)` and nowhere else, which is what made the
+# dep list above derived-from-source rather than guessed. So this build stage is a FIX, not
+# a proposal. What the image log confirmed, each of which was a separate claim here:
+#
+#   the commit pin     printed `gridcoin source verified: 5.5.1.7-testnet = 30a89f2ab0bb...`
+#                      and PASSED, rather than merely sitting ahead of a failure
+#   the vendored BDB   `Performing configure step for 'BerkeleyDB_Project'` then
+#                      `BerkeleyDB_Project build command succeeded` -- the build really does
+#                      supply its own Berkeley DB, so dropping the 4.8 stage was correct
+#   the output path    `[100%] Linking CXX executable ../bin/gridcoinresearchd`, and
+#                      `Step 10/16 : COPY --from=build /build/bin/gridcoinresearchd` succeeded
+#   no CLI target      the build completed with ONE binary copied. Had a CLI existed and been
+#                      wanted, step 10 would have been two COPYs; had the old second COPY
+#                      survived, the build would have failed on a missing file
+#   the OFF defaults   "Multiprocess (IPC) build: disabled", secp256k1 static with tests OFF,
+#                      no Qt probe at all -- so -DENABLE_GUI=OFF et al landed as intended
+#
+# WHAT IS STILL UNPROVEN IS DOWNSTREAM OF THE IMAGE, not in it: no container built from this
+# image has been STARTED, so the runtime stage's library set, the uid-1000 datadir ownership
+# and the CMD are untested. docs/gridcoin_regtest_2026_11_22.md keeps that list.
 #
 # THE OUTPUT PATH MOVED, which is why the COPY lines below changed: cmake puts the daemon at
 # /build/bin/gridcoinresearchd, not /src/src/. And `strip` names ONE binary now, because

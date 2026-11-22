@@ -197,7 +197,17 @@ keeping this tree's shape is written at the site, in
 - **No HTLC has been funded or spent on a Gridcoin regtest chain.** Everything above is the
   chain and the daemon, not a swap. `sendtoaddress` is blocked by the devbuild cripple, so a
   real GRC regtest HTLC run needs `-devbuild=override`, which has not been exercised here.
-- **The replacement Dockerfile build stage has not been built as an image**, only natively.
+- ~~**The replacement Dockerfile build stage has not been built as an image**, only natively.~~
+  **IT HAS, later the same day, on the operator's host: all 16 steps and
+  `Successfully tagged swap-terminal/grc-desk:local`.** The run before it failed at exactly
+  one thing -- `find_package(ZLIB REQUIRED)`, because the dep list had been derived by
+  running cmake on a machine that already had zlib's headers -- and the fix was one package
+  plus enumerating every unconditional `find_package` from the source instead. The image log
+  independently confirmed the vendored Berkeley DB 5.3 building itself
+  (`BerkeleyDB_Project build command succeeded`), the `/build/bin/` output path, and that no
+  CLI target exists. **What is still untested is one layer further out: no container from
+  that image has been STARTED**, so the runtime stage's library set, the uid-1000 `/data`
+  ownership and the CMD are unproven.
 - **Nothing was measured about 5.5.1.0**, the version this tree's own command table describes.
   It has no regtest at all, so none of this page applies to it, and which Gridcoin a GRC leg is
   pointed at is a decision rather than a measurement.

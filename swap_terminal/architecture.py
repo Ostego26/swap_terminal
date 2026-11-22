@@ -194,8 +194,36 @@ SERVICES = {
         profile="",
         starts_by_default=False,
         processes=("gridcoinresearchd",),
-        role="the desk's Gridcoin daemon. NOT in docker-compose.yml's include:, so it "
-             "needs an explicit -f. Never built or run anywhere yet",
+        # "Never built or run anywhere yet" UNTIL 2026-11-22, when the image built on the
+        # operator's host -- all 16 steps, `Successfully tagged swap-terminal/grc-desk:local`.
+        # The distinction is kept because it is still half true and the halves differ: the
+        # IMAGE exists and is proven, no CONTAINER from it has ever been started, so the
+        # runtime stage's library set, the uid-1000 /data ownership and the CMD are untested.
+        role="the desk's Gridcoin daemon, on TESTNET at 25779. NOT in docker-compose.yml's "
+             "include:, so it needs an explicit -f. The image BUILDS (2026-11-22); no "
+             "container from it has been started",
+    ),
+    "grc-regtest": Service(
+        declared_in="docker-compose.grc-regtest.yml",
+        profile="",
+        starts_by_default=False,
+        processes=("gridcoinresearchd -regtest",),
+        # ONE IMAGE, TWO SERVICES, AND THAT IS WHY THIS ENTRY EXISTS SEPARATELY. The image
+        # chooses no chain -- docker/grc-desk.Dockerfile produces only the binary -- so this
+        # service is the same `swap-terminal/grc-desk:local` with `command:` replacing the
+        # CMD. It carries no `build:` key on purpose: a second build stanza would be a second
+        # place to change a pinned ref (rule 8), and the ref decides which daemon holds a
+        # wallet.
+        #
+        # ITS CHAIN IS ON THE COMMAND LINE AND THAT IS A SAFETY PROPERTY, not a style
+        # choice. Measured at 5.5.1.0: `-regtest` is registered nowhere, so passing it as an
+        # argument makes that binary REFUSE TO START, while a conf-file `regtest=1` is
+        # silently ignored and the node comes up on MAINNET. The network therefore never
+        # goes in a conf, on any version.
+        role="a throwaway Gridcoin REGTEST chain on 35715 -- 1,000,000 GRC premined at "
+             "genesis, CLTV active from block 1, blocks on demand. Mining needs setmocktime "
+             "PLUS generatetoaddress: it is proof of stake and generatetoaddress alone "
+             "stalls near tip 26. See docs/gridcoin_regtest_2026_11_22.md",
     ),
 }
 

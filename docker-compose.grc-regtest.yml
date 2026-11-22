@@ -1,0 +1,151 @@
+# A Gridcoin REGTEST node: the same pinned image, a different network.
+#
+# Role: compose file (one service, one chain, no wallet of consequence)
+# Reads: GRC_REGTEST_DATADIR, GRC_REGTEST_HOST_PORT
+# Writes: the service writes its datadir
+# Can move funds: no. Its coins are a genesis premine on a chain that exists only
+#       on this host and cannot be sold. It holds no key that controls anything.
+# Live-safe: yes, and structurally rather than by configuration -- `-regtest` is on
+#       the command line below, and a Gridcoin regtest chain shares no genesis, no
+#       port and no peers with mainnet or testnet.
+#
+# =========================================================================
+# WHY THIS EXISTS SEPARATELY FROM docker-compose.grc-desk.yml
+# =========================================================================
+#
+# THE IMAGE IS NETWORK-AGNOSTIC AND THE SERVICE IS NOT. docker/grc-desk.Dockerfile
+# produces one artifact -- /usr/local/bin/gridcoinresearchd -- and nothing in it
+# chooses a chain. Its CMD happens to name testnet's 25779 because that is what the
+# desk service wants; `command:` below replaces that wholesale. So this is a second
+# service on one image, not a second image, and `docker build` is not repeated.
+#
+# IT IS A DIFFERENT FILE RATHER THAN A SECOND SERVICE IN THAT ONE because the two
+# have opposite risk profiles and the volume line is where that shows. grc-desk's
+# datadir is a REAL WALLET and its `:?` message spends six lines telling the reader
+# how to prove it is not the customer's. This datadir holds a throwaway chain; the
+# worst outcome of pointing it somewhere wrong is a deleted test chain. Putting both
+# in one file would mean one reader deciding which warning applies to them.
+#
+# =========================================================================
+# WHAT THIS GIVES YOU, measured 2026-11-22 against this exact binary
+# =========================================================================
+#
+# Gridcoin 5.5.1.7 has a full regtest network -- which the tree believed it did not,
+# because it probed for `generateblock`, the one block-production RPC absent at every
+# Gridcoin tag. docs/gridcoin_regtest_2026_11_22.md has the whole measurement. The
+# part that matters here:
+#
+#   genesis premine    10 UTXOs, 1,000,000.00 GRC, by `listunspent` on a fresh node.
+#                      No faucet, no sync, no waiting.
+#   CLTV from genesis  block 1 reports version 14, so there is no activation height
+#                      to mine past.
+#   blocks on demand   `generatetoaddress` works -- but it is PROOF OF STAKE and is
+#                      bounded by mature stake. From the premine alone the chain
+#                      reaches about tip 26 and then refuses with
+#                      "CreateCoinStake: no stake found (need a mature UTXO with
+#                      sufficient weight)". Interleaving `setmocktime` with small
+#                      batches mined 1921 blocks -- the full production initiator
+#                      locktime -- in 6.3µfn (7.6s).
+#
+# SO ANYTHING DRIVING THIS NODE MUST MINE WITH setmocktime PLUS generatetoaddress.
+# A caller that uses generatetoaddress alone, the way the BTC and LTC regtest legs
+# do, stalls around block 26 and then fails on a wait timeout complaining that the
+# chain is not advancing. That is the single most load-bearing difference between
+# this chain and the other two.
+#
+# =========================================================================
+# THE CONF IS NOT OPTIONAL AND IT DOES NOT GO WHERE YOU WOULD PUT IT
+# =========================================================================
+#
+# Measured, after three restarts spent finding it. The daemon logs
+# `Using data directory <datadir>/regtest` and reads its config from
+# `<datadir>/regtest/gridcoinresearch.conf` -- the NET SUBDIRECTORY, not the datadir
+# root. A conf at the root does not supply RPC credentials: the daemon answers 401
+# with `ThreadRPCServer incorrect password attempt`.
+#
+# AND IF THAT FILE IS ABSENT THE DAEMON WRITES ONE, with a RANDOM rpcuser and
+# rpcpassword (536 bytes, those two keys plus six addnode lines). That is the real
+# mechanism behind regtest/daemons.GRC_CREDENTIALS_ARE_PER_NETWORK: the credentials
+# are per-network because the conf is per-network AND IS GENERATED per network. If
+# you do not place it first, you do not know the password.
+#
+# `-rpcpassword` ON THE COMMAND LINE DOES NOT HELP. Measured: the daemon still exits
+# with `To use the "-server" option, you must set a rpcpassword in the configuration
+# file:` -- a message which, note, ends in a colon and names no file.
+#
+# So before the first start, create `<GRC_REGTEST_DATADIR>/regtest/gridcoinresearch.conf`
+# carrying at least rpcuser, rpcpassword, rpcport=35715 and server=1. The credential
+# is yours to choose and is not written in this repository.
+
+services:
+  grc-regtest:
+    # NO `build:` KEY, DELIBERATELY. The image is built by
+    # docker-compose.grc-desk.yml or by `docker build -f docker/grc-desk.Dockerfile`.
+    # A second build stanza would be a second place to change a pinned ref (rule 8),
+    # and the ref is the thing that decides which daemon holds a wallet.
+    image: swap-terminal/grc-desk:local
+    container_name: swap-grc-regtest
+
+    # 35715 IS GRIDCOIN'S OWN REGTEST RPC PORT, not a free port this file chose:
+    # src/chainparamsbase.cpp returns it for CBaseChainParams::REGTEST, beside
+    # mainnet's 15715 and testnet's 25715. Bound to loopback only.
+    #
+    # network_target.CHAIN_PORTS["GRC"] does NOT list it -- its test_ports are
+    # {25715, 25779, 9876} -- so anything in the application pointed here needs
+    # that table extended first. Named because the omission is silent: a port that
+    # is not in the table is not refused, it is simply not recognized as a test one.
+    ports:
+      - "127.0.0.1:${GRC_REGTEST_HOST_PORT:-35715}:35715"
+
+    volumes:
+      # `:?` AND NO DEFAULT, for a weaker reason than grc-desk's but the same shape:
+      # this file must not guess a path that a daemon will then create a chain in.
+      # The stakes are lower -- there is no wallet here worth anything -- so the
+      # message is one line rather than six.
+      #
+      # It must be writable by uid 1000, which is the `gridcoin` user the image runs
+      # as. A directory the operator created is already theirs; this only matters if
+      # it was made by root.
+      - "${GRC_REGTEST_DATADIR:?set GRC_REGTEST_DATADIR to a NEW, EMPTY directory for the throwaway regtest chain. Do not point it at a Gridcoin datadir that holds a wallet. Create <that directory>/regtest/gridcoinresearch.conf with rpcuser, rpcpassword, rpcport=35715 and server=1 BEFORE the first start, or the daemon generates that file with a random password you will not know}:/data"
+
+    # THE CHAIN IS SELECTED ON THE COMMAND LINE AND THAT IS A SAFETY DECISION.
+    # Measured at 5.5.1.0: `-regtest` is registered nowhere, so passing it there
+    # makes the daemon REFUSE TO START -- fail-safe. A conf-file `regtest=1` against
+    # that same binary is SILENTLY IGNORED and the node comes up on MAINNET with one
+    # log line about an unknown configuration value. So the network never goes in the
+    # conf, on any Gridcoin version, however convenient it would be.
+    #
+    # -printtoconsole so `docker compose logs` has something in it; without it the
+    # daemon writes debug.log inside the datadir and the container's log is empty,
+    # which is rule 14's silence on the one process you are waiting for.
+    #
+    # NO -daemon. Forking would make pid 1 exit and take the container with it.
+    command:
+      - gridcoinresearchd
+      - -regtest
+      - -datadir=/data
+      - -printtoconsole
+
+    # on-failure:5 rather than unless-stopped, matching grc-desk and for its reason:
+    # a daemon that cannot open its datadir must be visible as exited with that
+    # error, not restarting every second behind it.
+    restart: on-failure:5
+
+    # 30s, NOT grc-desk's 120s, and the difference is measured rather than tuned.
+    # grc-desk needs two minutes because it flushes a wallet and a block index on a
+    # 3.3M-block chain. This chain starts at height 0 and its wallet lives in a
+    # MOCKED, IN-MEMORY Berkeley DB environment (src/init.cpp calls bitdb.MakeMock()
+    # under IsMockableChain), so there is no wallet file to flush and nothing
+    # persists across restarts anyway. A long grace period here would only make a
+    # stop feel broken.
+    stop_grace_period: 30s
+
+    # THE REAPER, named here per rule 13: the runtime's stop of pid 1, delivered as
+    # SIGTERM by the image's dumb-init entrypoint. The PROOF is not docker's exit
+    # code -- read the pid from /data/regtest/gridcoinresearchd.pid BEFORE stopping
+    # and poll until it is gone, which is what regtest/daemons.stop_daemon() does for
+    # the BTC and LTC legs and what was done by hand when this was measured.
+    #
+    # The datadir lock is the backstop: a daemon that survived leaves the next start
+    # failing loudly rather than quietly running twice.
+    init: false
