@@ -487,6 +487,32 @@ def test_the_gridcoin_build_records_its_own_weaker_provenance():
             f"{row.built_by} has {row.ref_variable}={ref}, which is "
             f"{'a commit SHA' if looks_like_a_sha else 'NOT a commit SHA -- a tag upstream can move'}"
         )
+        # THE COMMIT PIN, DERIVED THE SAME WAY THE REF IS. Added 2026-11-22 with
+        # commit_verified itself: a field in architecture.py that no test derives is
+        # exactly the unasserted claim this module exists to stop, and it would have
+        # sat there reading True for as long as nobody checked.
+        if row.commit_pin_variable:
+            pin = re.search(rf"^ARG\s+{re.escape(row.commit_pin_variable)}=(\S+)", text, re.MULTILINE)
+            assert pin, (
+                f"{asset}: architecture.py names {row.commit_pin_variable} as the commit pin and "
+                f"{row.built_by} has no such ARG"
+            )
+            assert re.fullmatch(r"[0-9a-f]{40}", pin.group(1)), (
+                f"{asset}: {row.commit_pin_variable}={pin.group(1)!r} is not a 40-character commit "
+                f"SHA, so it pins nothing -- a tag in the commit slot is the defect this field was "
+                f"added for"
+            )
+            compares_it = (
+                "rev-parse HEAD" in text and f"${{{row.commit_pin_variable}}}" in text
+            )
+        else:
+            compares_it = False
+        assert row.commit_verified == compares_it, (
+            f"{asset}: architecture.py records commit_verified={row.commit_verified} and "
+            f"{row.built_by} {'does' if compares_it else 'does NOT'} compare `git rev-parse HEAD` "
+            f"against ${{{row.commit_pin_variable or 'a commit ARG'}}}. A tag fetches; only the "
+            f"comparison accepts -- and this image holds a wallet"
+        )
         runs_a_check = "sha256sum" in text or "sha256 -c" in text
         assert row.digest_verified == runs_a_check, (
             f"{asset}: architecture.py records digest_verified={row.digest_verified} and "

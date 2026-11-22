@@ -117,35 +117,29 @@ yfinance>=0.2,<2.0
 # It is listed here as a comment rather than a requirement because pip cannot
 # satisfy it, and a line pip cannot satisfy would break `pip install -r`.
 
-# --- Keccak-256, for Monero addresses (chains/monero_keys.py) -----------------
-# KECCAK-256 IS NOT SHA3-256 AND hashlib HAS ONLY THE SECOND. Monero predates the
-# SHA-3 standard and uses original Keccak padding. Measured 2026-09-27 in this
-# container:
+# --- CULLED 2026-11-21: pycryptodome, and its own justification outlived its code
+# This slot held `pycryptodome>=3.20,<4.0` under thirty lines explaining Keccak-256
+# versus SHA3-256, naming chains/monero_keys.py as its only importer and "the 26
+# tests in tests/test_monero_keys.py". Every one of those files is gone.
 #
-#     Keccak-256(b"")      c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
-#     hashlib.sha3_256(b"") a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a
+# MEASURED 2026-11-21, by grepping the NAME across the tree rather than the import
+# graph (rule 2): chains/monero_keys.py does not exist, tests/test_monero_keys.py
+# does not exist, `find swap_terminal -name '*monero*'` returns nothing, and no file
+# anywhere imports `Crypto` or `Cryptodome` -- the only matches for "Crypto" in the
+# tree are the string "CryptoCompare" in transactions.py's price sources.
 #
-# Different functions. Reaching for sha3_256 because the name is close produces an
-# address whose 4-byte checksum every wallet rejects, and the 95-character string
-# looks perfectly ordinary while it does.
+# So this was a package installed onto a host holding wallet RPC credentials for no
+# reason, kept alive by an argument that was correct, well-measured, and about code
+# that had been culled. That is rule 16's wrong comment in its most convincing form:
+# thirty lines of sound reasoning are harder to doubt than one stale line.
 #
-# WHY A DEPENDENCY RATHER THAN ~100 LINES OF Keccak-f[1600] HERE. Hand-rolling a
-# hash function to avoid a dependency is the trade
-# docs/dleq_cross_curve_design.md section 7 already refused for the DLEQ proof
-# itself, and refused in favor of reviewed code other people run. This is the same
-# call, and it is a much easier one: Keccak-256 is a standardized, widely
-# implemented primitive with published test vectors, where the cross-curve DLEQ is
-# a three-page note with no audited implementation anywhere.
+# NOTHING LOSES IT. The full requirements.txt does not declare it either, and
+# pycryptodome still arrives transitively with xrpl-py for any host that installs
+# the paying set. The deletion only removes it from the MINIMAL set, which is the
+# safe direction: fewer packages on the read-only host.
 #
-# Needed only by chains/monero_keys.py, which exists for the one address
-# monero-wallet-rpc cannot build: the 2-of-2 shared key an atomic GRC<->XMR swap
-# locks its XMR to, whose two halves are held by different parties. Every ordinary
-# Monero address still comes from the wallet via chains/monero.py.
-#
-# Imported as `Crypto`, distributed as `pycryptodome`. The range is measured:
-# 3.23.0 is the version the 26 tests in tests/test_monero_keys.py pass against,
-# and 4.0 is the next major above it.
-pycryptodome>=3.20,<4.0
+# tests/test_optional_dependency_posture.py now fails on any distribution declared
+# here that nothing in the tree imports, so the next one cannot sit for weeks.
 
 # QR codes for a deposit instruction, drawn on the SERVER.
 #

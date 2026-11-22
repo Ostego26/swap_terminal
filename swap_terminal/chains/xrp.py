@@ -1793,11 +1793,34 @@ class XRPAdapter:
             from xrpl.models.transactions import Payment  # noqa: PLC0415 -- checked: optional dependency
             from xrpl.transaction import submit_and_wait  # noqa: PLC0415 -- checked: optional dependency
         except ImportError as error:
+            # THE CLAUSE "and the whole test suite" WAS IN THIS MESSAGE UNTIL 2026-11-21
+            # AND IT WAS FALSE. Measured that day by building a venv from
+            # swap_terminal/requirements.txt (which deliberately omits xrpl-py, per the
+            # comment above) and running the full suite:
+            #
+            #     24 failed, 5513 passed, 17 skipped   -- against 5868 passed, 6 skipped
+            #     329 tests DISAPPEARED via pytest.importorskip
+            #
+            # The 329 are the SOL and XRP modules skipping themselves, which is the
+            # mechanism working. The 24 FAILURES are not: among them
+            # test_the_XRP_PAYOUT_BLOCKER_IS_NOT_THE_RESERVE, which asserts WHY an XRP
+            # payout is blocked -- with the library absent the reason changes from the
+            # reserve to the missing import, and the assertion is about the reason.
+            #
+            # So the optional-dependency posture is sound for a DEPLOYMENT and was
+            # overstated for a DEVELOPER: a read-only deposit watcher genuinely does not
+            # need a signing library, and the suite genuinely does.
+            # requirements-dev.txt now documents the full set for that reason, and
+            # tests/test_optional_dependency_posture.py pins both halves so neither
+            # claim can drift again. The message below no longer mentions the suite,
+            # because an operator reading a refusal on a payout path is not the audience
+            # for a test count.
             raise XRPRPCError(
                 "xrpl-py is not importable, so this payment was NOT signed and NOT submitted. It is an "
-                "optional dependency on purpose -- the preview path, every guard and the whole test "
-                "suite work without it -- so a missing signing library is a refusal here rather than a "
-                "crash at import. `pip install xrpl-py` if this host is meant to pay XRP out."
+                "optional dependency on purpose -- the preview path and every guard work without it, so "
+                "a host that never pays XRP out does not need it -- which makes a missing signing "
+                "library a refusal here rather than a crash at import. `pip install xrpl-py` if this "
+                "host is meant to pay XRP out."
             ) from error
 
         wallet = derive_and_check(seed, plan["source"])

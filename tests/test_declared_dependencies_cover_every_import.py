@@ -19,19 +19,30 @@ modules/atomic_htlc_scripts.py. The fix was to walk the AST and declare what was
 found. The method it names is the part that matters here: "collecting every
 TOP-LEVEL import".
 
-IT HAPPENED AGAIN, and the top-level restriction is exactly why. Measured
-2026-11-21, every third-party import under swap_terminal/ at any depth:
+WHAT THIS FILE IS FOR IS THE FULL SET, AND THE FIRST VERSION OF THIS DOCSTRING GOT
+THE REASON WRONG. It said the three XRP/SOL packages were "invisible to the audit
+meant to catch them" because a top-level AST walk cannot see a function-local
+import -- i.e. that their absence from swap_terminal/requirements.txt was an
+oversight. It is not. Measured 2026-11-21, every third-party import under
+swap_terminal/ at any depth:
 
-    base58  bech32  ecdsa        imported at MODULE level   all three declared
-    xrpl    nacl    httpx        imported ONLY inside       NONE of the three
-                                 functions                  declared
+    base58  bech32  ecdsa        imported at MODULE level   in BOTH files
+    xrpl    nacl    httpx        imported ONLY inside       in the FULL file only,
+                                 functions                  DELIBERATELY
 
-The three function-local ones live in chains/xrp.py, chains/xrp_submit.py and
-chains/xrp_signing.py, each marked `# noqa: PLC0415 -- checked: optional
-dependency`. They are function-local ON PURPOSE: a deployment with no XRP
-configured must refuse cleanly rather than fail at import. That same choice made
-them invisible to the audit meant to catch them, and an AST walk that stops at
-column zero cannot see a dependency deliberately placed below it.
+chains/xrp.py:1786 states the design: "xrpl-py is an OPTIONAL dependency,
+chains/registry.py imports this module unconditionally, and a module-level import
+would make a signing library mandatory in order to start a read-only deposit
+watcher." chains/solana_signing.py:514 says the same for PyNaCl. So the minimal
+file omits them ON PURPOSE, and merging the two lists -- the obvious fix for two
+lists that differ -- would put a signing library on a host that must not have one.
+tests/test_optional_dependency_posture.py now pins that, and the correction is left
+here rather than overwritten because reading a deliberate posture as drift is the
+more expensive mistake of the two.
+
+THE DEFECT WAS NARROWER THAN THAT AND REAL: requirements-dev.txt told a DEVELOPER
+to install the deployment-minimal set. A developer needs the paying set, because
+the suite needs it.
 
 WHAT IT COST, measured the same day by building a venv with exactly the command
 requirements-dev.txt used to document (`-r swap_terminal/requirements.txt -r
@@ -138,17 +149,82 @@ def local_module_names() -> set[str]:
     `import supervisor` is NOT a third-party import and must not be demanded of a
     requirements file.
     """
-    names = {p.stem for p in APP.rglob("*.py")}
-    names |= {p.name for p in APP.rglob("*") if p.is_dir()}
+    def is_ours(path: Path) -> bool:
+        # NODE_MODULES AND .venv ARE EXCLUDED, AND THIS LINE IS A FIX TO THIS FILE'S
+        # FIRST VERSION (2026-11-21, hours old when it was found). The first version
+        # collected EVERY directory name under swap_terminal/, and
+        # swap_terminal/grc-sol-swap/abstergo_exchange/node_modules/ holds an npm
+        # package called `dotenv` -- so the npm directory shadowed Python's
+        # `from dotenv import load_dotenv` at transactions.py:57 and the gate silently
+        # exempted python-dotenv from the coverage it was written to assert.
+        #
+        # MEASURED, because the hole's width is the point and not the one name that
+        # fell through it: 460 directory names inside node_modules against 14 outside
+        # it, of which 457 are not local modules at all. Exactly one, `dotenv`,
+        # currently collides with a Python package this repository uses -- but any
+        # future dependency whose import name matches one of those 457 npm packages
+        # would have been exempted the same way, with no error anywhere. A gate with a
+        # 457-name blind spot reports clean for the same reason a 40-pattern spelling
+        # scan reported zero British spellings: the denominator is what it was told to
+        # look at (rule 3).
+        return "node_modules" not in path.parts and ".venv" not in path.parts
+
+    names = {p.stem for p in APP.rglob("*.py") if is_ours(p)}
+    names |= {p.name for p in APP.rglob("*") if p.is_dir() and is_ours(p)}
     return names | {"swap_terminal", "tests", "conftest", "prose", "param_ids"}
 
 
-def third_party_imports() -> dict[str, set[str]]:
-    """{import name: {"path:line", ...}} for every import at ANY nesting depth.
+def _imported_root_names(node: ast.AST) -> list[str]:
+    """The top-level package names one import statement brings in, or [] if it is not one.
+
+    EXTRACTED FROM third_party_imports() 2026-11-21 because ruff raised C901 on it,
+    and CLAUDE.md rule 12 is explicit that the fix is to extract the decision rather
+    than raise the ceiling: "A main() past the ceiling is orchestration that has
+    swallowed decisions ... the fix is to extract the decision so it can be called
+    with seeded inputs."
+
+    `node.level > 0` is an explicit relative import (`from .x import y`), which is
+    never third-party and must not be demanded of a requirements file.
+    """
+    if isinstance(node, ast.Import):
+        return [alias.name.split(".")[0] for alias in node.names]
+    if isinstance(node, ast.ImportFrom):
+        return [node.module.split(".")[0]] if node.module and node.level == 0 else []
+    return []
+
+
+def _scope_matches(node: ast.AST, scope: str) -> bool:
+    """Whether this node sits in the requested scope.
+
+    `col_offset == 0` IS THE WHOLE DEFINITION, and it is the one that matters: an
+    import at column zero runs when the file is imported, which makes its package
+    mandatory in order to start the process. Anything indented runs only when its
+    enclosing function is called.
+    """
+    if scope == "module":
+        return node.col_offset == 0
+    if scope == "nested":
+        return node.col_offset != 0
+    return True
+
+
+def third_party_imports(scope: str = "any") -> dict[str, set[str]]:
+    """{import name: {"path:line", ...}} for third-party imports in the given SCOPE.
 
     ast.walk() rather than a scan of module-level nodes, which is the whole point of
     this file: the three that went missing are inside function bodies.
+
+    SCOPE IS WHAT MAKES THIS REUSABLE, and it exists because the distinction is
+    load-bearing twice over rather than only here. "module" is `col_offset == 0`,
+    i.e. an import that runs when the file is imported and therefore makes its
+    package MANDATORY to start the process. "nested" is everything indented, which
+    runs only when its function is called and therefore keeps its package optional.
+    tests/test_optional_dependency_posture.py asserts the signing libraries are
+    nested and NEVER module-level, which is the invariant chains/xrp.py's own
+    comment relies on; this file asserts coverage regardless of scope. One walk, two
+    questions (rule 8).
     """
+    assert scope in {"any", "module", "nested"}, f"unknown scope {scope!r}"
     local = local_module_names()
     found: dict[str, set[str]] = {}
     for path in sorted(APP.rglob("*.py")):
@@ -159,12 +235,15 @@ def third_party_imports() -> dict[str, set[str]]:
         except SyntaxError:  # pragma: no cover -- a syntax error is another test's job
             continue
         for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                names = [alias.name.split(".")[0] for alias in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                # level > 0 is an explicit relative import, which is never third-party.
-                names = [node.module.split(".")[0]] if node.module and node.level == 0 else []
-            else:
+            # NAMES FIRST, SCOPE SECOND, and the order is a fix rather than a style
+            # choice: ast.walk() yields the Module node and every other node type, and
+            # `Module` has no col_offset at all -- asking it for one raised
+            # AttributeError on the first run of tests/test_optional_dependency_posture.py.
+            # _imported_root_names() returns [] for anything that is not an import, so
+            # checking it first means _scope_matches() only ever sees a node that has a
+            # column.
+            names = _imported_root_names(node)
+            if not names or not _scope_matches(node, scope):
                 continue
             for name in names:
                 if name in sys.stdlib_module_names or name in local or name.startswith("_"):

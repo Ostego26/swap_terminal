@@ -883,6 +883,40 @@ WHAT DID NOT MOVE, and is named work rather than a baseline (rule 19):
     would make the tree look clean while the keys stayed published. Remediation
     is the operator's -- sweep, rotate, then purge history (the one rewrite
     rule 4 allows).
+
+    RE-MEASURED 2026-11-22, and this item is now THREE different facts, only one
+    of which is still true. Measured with git itself rather than by looking at
+    the working tree, and WITHOUT reading any value -- `--name-only` and
+    `git grep -l` print paths, never content:
+
+      the two files      GONE, and from more than the working tree. No path
+                         named `important` and none ending `/test.py` appears
+                         anywhere in `git log --all --diff-filter=A --name-only`.
+                         They are not in the reachable history under those names
+                         at all.
+      the .env backup    GONE. No `.env.bak`, no `*.bak`, no `wallet.dat`, no
+                         `*.pem`, no `id_rsa`, no `keypair` filename appears
+                         anywhere in all history; the only secret-shaped names
+                         ever committed are `.env.example`, a template, and
+                         `chains/solana_payout_keypair.py`, a module. The
+                         2026-09-24 force-push did what rule 4 licensed it to.
+      what IS still      e48e81e is an ancestor of HEAD and FOUR files at that
+      there              commit assign an RPC password in source:
+                         grc-sol-swap/abstergo_exchange/server.js, identity.py,
+                         modules/rpc_clients.py and transactions.py. Whether any
+                         of those four is a LIVE credential rather than a
+                         regtest one cannot be established without reading it,
+                         and reading a credential back is the one thing the
+                         chain-safety rules forbid outright. So the question is
+                         the operator's, and it is the only part of this item
+                         that is.
+
+    AND THE NOTE'S OWN WARNING CAME TRUE IN THE MIDDLE OF IT. It said the files
+    were "NOT deleted" because "deleting would make the tree look clean while
+    the keys stayed published". They have since been deleted, by somebody, and
+    this paragraph is what a reader would otherwise have used to conclude the
+    keys were still sitting in the tree. docs/credential_remediation.md carries
+    the measured state and the procedure.
   - grc-sol-swap/abstergo_exchange/swap_intents.json is still the Express
     server's authority for a fund-releasing decision.
 
@@ -899,10 +933,39 @@ in the document that forbids it:
     the participant and refund addresses being one value. encode_script_number()
     and modules/htlc_timelock.py are the replacements;
     tests/test_htlc_locktime_encoding.py's DEFECT assertions are inverted and
-    tests/test_htlc_timelock.py covers the derivation. NOT PROVEN ON A CHAIN:
-    no contract built with the corrected script has been funded, redeemed or
-    refunded anywhere, and the refund branch is still the branch that has never
-    run. That is the proof this file asks for and it is still outstanding.
+    tests/test_htlc_timelock.py covers the derivation.
+
+    THAT PARAGRAPH ENDED "NOT PROVEN ON A CHAIN ... the refund branch is still
+    the branch that has never run. That is the proof this file asks for and it
+    is still outstanding" UNTIL 2026-11-21, AND IT HAD BEEN FALSE FOR WEEKS.
+    The proof arrived on 2026-09-28/29 and was recorded in
+    docs/branch_coverage.md, which this sentence was never re-read against --
+    the exact wrong-comment bug (rule 16) this block's own preamble names, in
+    the file that forbids it, about the very claim the file says to back with a
+    txid (rule 17's closing line). Measured from docs/branch_coverage.md:
+
+      refund after expiry, BTC   SPENT  7cc92abdbad07a99..., real refund_contract()
+      refund after expiry, LTC   SPENT  59ed52a9f4255332..., real refund_contract()
+      refund at the locktime,
+                            GRC  SPENT  9495082ef304c4ca... 2026-09-28,
+                                        re-established by step 8 as
+                                        ee9dc216bf055b22... through the real
+                                        refund_contract()
+
+    SO THE REFUND BRANCH HAS RUN ON ALL THREE CHAINS, and CLTV is ENFORCED on
+    all three -- BTC and LTC both at the mempool and at `generateblock`, GRC via
+    grc_htlc_verify.py OK=11 FAIL=0, where step 6 refused a FINAL refund before
+    the locktime and step 8 accepted the identical outpoint, script and fee at
+    it.
+
+    THE ASYMMETRY IS KEPT RATHER THAN SMOOTHED, because it is the part a reader
+    acts on. docs/branch_coverage.md:48 still records `refund after expiry, GRC`
+    as NONE: the harness's `--chain` offers `btc`, `ltc`, `both`, and Gridcoin
+    is not an option and never has been. GRC's refund branch was exercised by a
+    DEDICATED SCRIPT, not by the harness every other chain goes through, so a
+    regression in the GRC refund path would not be caught by the run that
+    catches BTC's and LTC's. That gap is named work and belongs to whoever adds
+    `grc` to `--chain`; it is not a reason to keep calling the branch unrun.
   - two payout workers paid the same swap twice -- 2 sends, 1 swap_id, 2
     'broadcast' rows. Fixed with both halves the measurement argued for: the
     claim-by-UPDATE in services/payout_service.claim_swap_for_payout() and the

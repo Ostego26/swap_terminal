@@ -65,13 +65,30 @@ into the image, because the thing that must not happen is shipping the two MIT
 notices alone -- accurate about Bitcoin Core and Litecoin Core, and false about
 what is inside the binaries.
 
-NOT PROVEN AT ALL, and it is the gap that matters most: no image was built. There
-is no docker daemon in the environment this was written in (`docker info` ->
-"Cannot connect to the Docker daemon at unix:///var/run/docker.sock", client
-29.9.2). Everything here is source-level. The fail-closed behavior the design rests
-on WAS measured, but with the host's own coreutils 9.4 rather than inside
-debian:bookworm-slim, which ships 9.1 -- see
-test_a_manifest_that_covers_nothing_downloaded_fails_the_build.
+PROVEN SINCE 2026-11-22, AND THE PARAGRAPH THIS REPLACES WAS WRONG ABOUT WHY. It
+said "no image was built. There is no docker daemon in the environment this was
+written in", citing `docker info` against the default socket. A daemon starts here
+perfectly well with a short --exec-root -- the first attempt failed on "unix socket
+path too long (> 104)", a sun_path limit, not a privilege -- so the blocker was the
+route, not the capability.
+
+What was then measured, by running this stage's own RUN script verbatim with real
+downloads from bitcoincore.org and download.litecoin.org:
+
+    pinned ok: bitcoin-28.1-x86_64-linux-gnu.tar.gz
+    pinned ok: litecoin-0.21.4-x86_64-linux-gnu.tar.gz
+    bitcoin-28.1-x86_64-linux-gnu.tar.gz: OK
+    litecoin-0.21.4-x86_64-linux-gnu.tar.gz: OK
+    bitcoind --version  -> Bitcoin Core version v28.1.0
+    litecoind --version -> Litecoin Core version v0.21.4
+
+STILL NOT PROVEN, narrowed to what it actually is: docker's own layer and COPY
+mechanics for this stage. The `apt-get install ca-certificates curl` step cannot
+run here because this session's egress is a CONNECT-only proxy -- apt over http://
+gets 405, and apt over https:// cannot bootstrap in debian:bookworm-slim, which has
+no ca-certificates until that step installs them. The coreutils caveat below is
+also narrower than it was, because the build no longer depends on
+`--ignore-missing`'s zero-match exit status at all.
 """
 
 from __future__ import annotations
@@ -296,24 +313,19 @@ def test_every_downloaded_tarball_is_verified_before_it_is_extracted(dockerfile)
     first_extraction = min(extractions)
 
     verifies = [m.start() for m in re.finditer(r"sha256sum\s", text)]
-    if dockerfile.name == "grc-desk.Dockerfile":
-        # NAMED, NOT SILENTLY EXCUSED, and this is not a baseline (rule 19): nothing
-        # about grc-desk is tolerated by this branch. The weakness is recorded as
-        # DATA in architecture.UPSTREAM_SOURCE["GRC"].digest_verified = False and
-        # asserted by its own test below, which fails the day somebody adds a check
-        # and leaves the table saying there is none. Why it is not fixed here is
-        # rule 16's line: grc-desk is the one image that holds a WALLET, and I
-        # cannot establish the right digest from this container --
-        # download.oracle.com is not on this session's allow-list and
-        # github.com/gridcoin-community returns 403 at the proxy. Changing how a
-        # fund-holding daemon is built is the operator's call, not a side effect of
-        # a hygiene pass.
-        assert verifies == [], (
-            "grc-desk.Dockerfile now runs a checksum check. That is an improvement and this "
-            "branch is now wrong: delete it, set architecture.UPSTREAM_SOURCE['GRC']."
-            "digest_verified = True, and let the ordering assertion below cover this file too"
-        )
-        return
+    # THE grc-desk EXEMPTION WAS DELETED 2026-11-22, as its own message instructed.
+    # It read: "grc-desk.Dockerfile now runs a checksum check. That is an improvement
+    # and this branch is now wrong: delete it, set
+    # architecture.UPSTREAM_SOURCE['GRC'].digest_verified = True, and let the ordering
+    # assertion below cover this file too." That is exactly what happened: grc-desk now
+    # verifies Berkeley DB's tarball against ARG BDB_SHA256 before extracting it, the
+    # table says digest_verified=True, and this file is covered by the same ordering
+    # assertion as the harness.
+    #
+    # WORTH NAMING because it is the opposite of a ratchet (rule 19): the exemption
+    # carried the instruction for its own removal and FAILED THE DAY the gap closed,
+    # rather than going quiet and letting the branch outlive the defect. A baseline
+    # would have reported green and said nothing.
 
     assert verifies, (
         f"{dockerfile.name} downloads {[d['template'] for d in downloads(dockerfile)]} and never "
@@ -458,11 +470,15 @@ def test_a_manifest_that_covers_nothing_downloaded_fails_the_build():
     behavior under us, or somebody replacing `--ignore-missing` with a flag that
     tolerates a total miss.
 
-    NOT MEASURED, and it is this change's first operator hand-off:
-    debian:bookworm-slim ships coreutils 9.1 and this runs on the host's 9.4.
-    `--ignore-missing` has existed since coreutils 8.25 so the flag is present; the
-    exit status on 9.1 is reasoned from 9.4, not observed. There is no docker daemon
-    here to settle it.
+    NO LONGER LOAD-BEARING, and that is the point of the change above it.
+    debian:bookworm-slim ships coreutils 9.1 and this runs on the host's 9.4, and
+    9.1's exit status with zero files verified was never observed -- ftp.gnu.org is
+    403 at this session's proxy and deb.debian.org does not resolve. Rather than
+    leave a fail-closed claim resting on an unobserved exit status,
+    harness.Dockerfile grew the `grep -Eq "^[0-9a-f]{64}  ${want}$"` coverage loop
+    that refuses on every coreutils ever shipped. This test still earns its place:
+    it keeps the belt-and-braces half honest, and would catch coreutils changing the
+    behavior under anyone who does rely on it.
     """
     import tempfile  # noqa: PLC0415 -- used only by this test
 

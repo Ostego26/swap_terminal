@@ -375,11 +375,28 @@ class UpstreamSource(NamedTuple):
     #: Whether that ARG's value is a commit SHA. DERIVED: 40 hex characters or not.
     #:
     #: A TAG IS NOT A PIN, and this field says so out loud rather than leaving it to
-    #: be noticed. docs/vendoring_upstream_daemon_code.md already states the standard
-    #: this build misses -- "The upstream project, path, and COMMIT SHA. Not a
-    #: version string and not a branch name" -- and grc-desk.Dockerfile:44 is
-    #: `ARG GRIDCOIN_REF=5.5.1.7`, cloned with `--branch`, which upstream can move.
+    #: be noticed. docs/vendoring_upstream_daemon_code.md states the standard -- "The
+    #: upstream project, path, and COMMIT SHA. Not a version string and not a branch
+    #: name" -- and GRIDCOIN_REF is still a tag name, so this stays False.
+    #:
+    #: FALSE HERE NO LONGER MEANS UNPINNED, which is why commit_verified exists
+    #: beside it. The tag is how the build REACHES the bytes; the commit is what it
+    #: ACCEPTS. Reading this field alone, as of 2026-11-21, understates the build.
     ref_is_pinned: bool
+    #: The ARG holding the commit the build must end up on, or "" if there is none.
+    commit_pin_variable: str
+    #: Whether the build VERIFIES the checked-out commit against that ARG. DERIVED
+    #: from the Dockerfile running `git rev-parse HEAD` and comparing it.
+    #:
+    #: ADDED 2026-11-21, AND THE MEASUREMENT THAT FORCED IT IS WORSE THAN THE FIELD
+    #: IT SITS NEXT TO. `GRIDCOIN_REF` was `5.5.1.7`, and measured against the real
+    #: remote with `git ls-remote`, THERE IS NO SUCH REF -- no tag, no branch, across
+    #: all 512 tag refs the only match is `5.5.1.7-testnet`. So this image could not
+    #: be built at all, and the table's `ref_is_pinned=False` described it as
+    #: buildable-from-a-movable-tag. A flag that was too generous about a
+    #: wallet-holding image is exactly what this module exists to prevent, and it
+    #: took reading the remote rather than the Dockerfile to see it.
+    commit_verified: bool
     #: Every host its build stage fetches from. DERIVED from the clone and curl
     #: lines, and it is what keeps UPSTREAM_BINARIES' coverage test from demanding a
     #: row for Berkeley DB's tarball.
@@ -390,29 +407,45 @@ class UpstreamSource(NamedTuple):
     license_in_image: str
 
 
-#: NOT CHANGED BY THIS WORK, AND THAT IS DELIBERATE (rule 16). grc-desk is the one
-#: image in this repository that holds a WALLET, its provenance is weaker than the
-#: harness's in both ways a build can be weak -- a moving tag for the source and no
-#: digest at all for Berkeley DB 4.8.30 from download.oracle.com -- and I cannot
-#: establish the right commit SHA from here, because github.com/gridcoin-community
-#: returns 403 at this session's proxy and download.oracle.com is not allow-listed.
-#: Changing how a fund-holding daemon is built is the operator's.
+#: CLOSED 2026-11-22, AT THE OPERATOR'S INSTRUCTION, AND THE GAP WAS NOT WHAT THIS
+#: COMMENT SAID IT WAS. It read: "NOT CHANGED BY THIS WORK, AND THAT IS DELIBERATE
+#: (rule 16) ... a moving tag for the source and no digest at all for Berkeley DB
+#: ... I cannot establish the right commit SHA from here, because
+#: github.com/gridcoin-community returns 403 at this session's proxy and
+#: download.oracle.com is not allow-listed."
 #:
-#: WHAT THIS WORK DOES INSTEAD is make the gap VISIBLE AS DATA, with a test that
-#: fails the day the tree and the table disagree in either direction: somebody pins
-#: a real SHA and leaves this saying False, so the table understates the tree's
-#: safety and the next reader redoes the work; or somebody replaces a SHA with a
-#: moving tag and leaves it saying True, which overstates it on an image holding a
-#: wallet. That is a recorded fact, not a ratchet: nothing is tolerated by appearing
-#: here, and the flag is derived rather than allowed.
+#: BOTH BLOCKERS WERE WRONG, and both were wrong because a 403 from the GitHub API
+#: was read as "the repository is unreachable":
+#:
+#:   the commit SHA   `git ls-remote` needs no API, no credential and no clone, and
+#:                    the git proxy serves anonymous reads of public repositories.
+#:                    It resolved every one of the 512 tag refs in seconds -- and
+#:                    showed that `5.5.1.7` IS NOT ONE OF THEM. The ref this image
+#:                    cloned does not exist, so the image could not be built at all.
+#:   the BDB digest   download.oracle.com is still unreachable and did not need to
+#:                    be. Bitcoin Core's own depends/packages/bdb.mk pins
+#:                    db-4.8.30.NC.tar.gz from the identical path, and that file was
+#:                    read out of a source tarball whose sha256 was confirmed
+#:                    against bitcoincore.org's published SHA256SUMS.
+#:
+#: Rule 17's failure in its quietest form, twice: "I could not reach it" where what
+#: was true is "the route I tried was refused". A 403 looks like an answer.
+#:
+#: THE FLAGS BELOW ARE STILL DERIVED, which is what makes them worth reading: they
+#: fail the day the tree and the table disagree in either direction -- a real SHA
+#: pinned while commit_verified says False understates the tree and the next reader
+#: redoes the work; a check deleted while it says True overstates it on the one
+#: image here that holds a wallet.
 UPSTREAM_SOURCE = {
     "GRC": UpstreamSource(
         project="Gridcoin Research",
         built_by="docker/grc-desk.Dockerfile",
         ref_variable="GRIDCOIN_REF",
         ref_is_pinned=False,
+        commit_pin_variable="GRIDCOIN_COMMIT",
+        commit_verified=True,
         fetches_from=("download.oracle.com", "github.com"),
-        digest_verified=False,
+        digest_verified=True,
         license_in_image="/usr/share/licenses/gridcoin/COPYING",
     ),
 }

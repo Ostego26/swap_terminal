@@ -41,8 +41,55 @@
 
 FROM debian:bookworm-slim AS build
 
-ARG GRIDCOIN_REF=5.5.1.7
+# THE REF DID NOT EXIST, AND THAT IS WORSE THAN THE MOVING TAG IT WAS RECORDED AS.
+# This said `ARG GRIDCOIN_REF=5.5.1.7` until 2026-11-21, cloned below with
+# `--branch`, and swap_terminal/architecture.py recorded it as `ref_is_pinned=False`
+# -- "a tag upstream can move". Measured 2026-11-21 against the real remote, with
+# `git ls-remote`, which needs no clone and no credential:
+#
+#     git ls-remote <repo> 5.5.1.7              -> NO OUTPUT
+#     git ls-remote --heads <repo> | grep 5.5.1 -> nothing
+#     grep '5\.5\.1\.7' over all 512 tag refs   -> refs/tags/5.5.1.7-testnet ONLY
+#
+# There is no tag `5.5.1.7` and no branch `5.5.1.7`. `git clone --branch 5.5.1.7`
+# fails with "Remote branch 5.5.1.7 not found in upstream origin", so THIS IMAGE
+# COULD NOT BE BUILT AT ALL -- not "could be built from a ref that might move". The
+# image that holds this project's GRC wallet was unbuildable and nothing said so,
+# because nothing in the suite or in CI builds it (there is no docker daemon in the
+# environment these files are written in).
+#
+# `5.5.1.7-testnet` is the ref this was reaching for -- the only published ref whose
+# version matches, and the desk container is a testnet desk. It is a LIGHTWEIGHT tag,
+# so the SHA below is the commit itself rather than a tag object.
+ARG GRIDCOIN_REF=5.5.1.7-testnet
+
+# A TAG IS NOT A PIN, so the tag FETCHES and this SHA is what the build verifies it
+# got. Same shape as docker/upstream_binaries.sha256 for the harness tarballs: the
+# mutable name is how you reach the bytes, the immutable digest is what you accept.
+# A retagged or force-pushed upstream now fails the build instead of silently
+# building a different daemon onto a host that holds a wallet.
+#
+# MEASURED 2026-11-21: refs/tags/5.5.1.7-testnet -> this commit, via git ls-remote.
+ARG GRIDCOIN_COMMIT=30a89f2ab0bb4f7134ca7a9c74e233e76130ebd8
+
 ARG BDB_VERSION=4.8.30.NC
+
+# BERKELEY DB'S DIGEST, AND IT DID NOT COME FROM download.oracle.com. That host is
+# not reachable from the environment this was written in, so the pin is taken from
+# BITCOIN CORE'S OWN depends/packages/bdb.mk, which fetches the identical file from
+# the identical path:
+#
+#     $(package)_download_path=https://download.oracle.com/berkeley-db
+#     $(package)_file_name=db-4.8.30.NC.tar.gz
+#     $(package)_sha256_hash=12edc0df75bf9abd7f82f821795bcee50f42cb2e5f76a6a281b85732798364ef
+#
+# That file was read out of bitcoin-28.1.tar.gz, whose own sha256 was confirmed
+# against bitcoincore.org's published SHA256SUMS
+# (c5ae2dd041c7f9d9b7c722490ba5a9d624f7e9a089c67090615e1ba4ad0883ba). So the chain
+# is: a digest-verified Bitcoin Core source release pins this exact filename from
+# this exact path. That is a stronger provenance than an unverified fetch and a
+# weaker one than reading Oracle's own checksum, and saying which is rule 17's job.
+ARG BDB_SHA256=12edc0df75bf9abd7f82f821795bcee50f42cb2e5f76a6a281b85732798364ef
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential libtool autotools-dev automake pkg-config bsdmainutils \
@@ -57,6 +104,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /bdb
 RUN set -eux; \
     curl -fsSLO "https://download.oracle.com/berkeley-db/db-${BDB_VERSION}.tar.gz"; \
+    echo "${BDB_SHA256}  db-${BDB_VERSION}.tar.gz" | sha256sum -c - \
+      || { echo "REFUSED: db-${BDB_VERSION}.tar.gz did not match ARG BDB_SHA256. Until 2026-11-21 this stage verified NOTHING and built a wallet daemon against whatever TLS served. If you are bumping BDB_VERSION, take the new digest from a source you can verify -- Bitcoin Core's depends/packages/bdb.mk is where this one came from -- and do not delete this check to get past it." >&2; exit 1; }; \
     tar -xzf "db-${BDB_VERSION}.tar.gz"; \
     sed -i 's/__atomic_compare_exchange/__atomic_compare_exchange_db/' \
       "db-${BDB_VERSION}/src/dbinc/atomic.h"; \
@@ -68,6 +117,10 @@ WORKDIR /src
 RUN set -eux; \
     git clone --depth 1 --branch "${GRIDCOIN_REF}" \
       https://github.com/gridcoin-community/Gridcoin-Research.git .; \
+    got="$(git rev-parse HEAD)"; \
+    [ "$got" = "${GRIDCOIN_COMMIT}" ] \
+      || { echo "REFUSED: ${GRIDCOIN_REF} resolves to $got but ARG GRIDCOIN_COMMIT pins ${GRIDCOIN_COMMIT}. The tag moved, or the ref was changed without changing the commit. This daemon holds a wallet: establish which commit you mean with \`git ls-remote\`, change BOTH args together, and do not delete this check." >&2; exit 1; }; \
+    echo "gridcoin source verified: ${GRIDCOIN_REF} = $got"; \
     ./autogen.sh; \
     ./configure \
       --without-gui \

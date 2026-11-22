@@ -141,10 +141,40 @@ RUN set -eux; \
 # BITCOIN_VERSION refuses; a bumped LITECOIN_VERSION refuses after BTC passes; a
 # 63-hex typo refuses; an uppercased manifest refuses; an unsupported arch refuses.
 #
-# STILL NOT MEASURED, and it is the honest limit on all of the above: there is no
-# docker daemon in this environment (`docker info` -> "Cannot connect to the Docker
-# daemon at unix:///var/run/docker.sock", client 29.9.2), so this stage has never
-# been BUILT. The shell was proven; the image was not.
+# A DOCKER DAEMON DOES RUN IN THIS ENVIRONMENT, measured 2026-11-22, and the
+# earlier claim that none could is withdrawn. `docker info` fails against the
+# default socket, which is what every previous session read as "no daemon here";
+# started explicitly it works:
+#
+#     dockerd --data-root <scratch> --exec-root /dk/e --host unix:///dk/d.sock \
+#             --iptables=false --bridge=none
+#     ->  Server Version: 29.9.2, Storage Driver: overlayfs, buildkit initialized
+#
+# THE FIRST ATTEMPT FAILED FOR A REASON THAT HAD NOTHING TO DO WITH PRIVILEGES:
+# "unix socket path too long (> 104)" -- the scratchpad path is longer than the
+# kernel's sun_path limit. One short --exec-root fixed it. So "there is no docker
+# daemon in this environment" was, again, "the route I tried was refused".
+#
+# WHAT STILL CANNOT BE BUILT HERE, and it is an environment limit rather than a
+# defect in this file: the `apt-get install ca-certificates curl` step. This
+# session's egress is a CONNECT-only proxy, so apt over http:// gets 405 Method Not
+# Allowed, and apt over https:// cannot bootstrap because debian:bookworm-slim has
+# no ca-certificates until that very step installs them.
+#
+# SO THE STAGE'S OWN SCRIPT WAS RUN INSTEAD, VERBATIM, WITH REAL DOWNLOADS from
+# bitcoincore.org and download.litecoin.org -- the whole RUN above apart from the
+# install prefix, under /usr/bin/dash:
+#
+#     pinned ok: bitcoin-28.1-x86_64-linux-gnu.tar.gz
+#     pinned ok: litecoin-0.21.4-x86_64-linux-gnu.tar.gz
+#     bitcoin-28.1-x86_64-linux-gnu.tar.gz: OK
+#     litecoin-0.21.4-x86_64-linux-gnu.tar.gz: OK
+#     -> bitcoind --version   Bitcoin Core version v28.1.0
+#     -> litecoind --version  Litecoin Core version v0.21.4
+#
+# Both guards passed, both digests verified, both tars extracted, both installs
+# landed, and the installed daemons RUN. What remains unproven is docker's own
+# layer and COPY mechanics for this stage, not the logic in it.
 #
 # ON A HOST WHERE THESE TWO HOSTS ARE BLOCKED, WHICH IS MOST OF THEM HERE: the
 # curls fail and the build stops at this stage with curl's own error. That is the
