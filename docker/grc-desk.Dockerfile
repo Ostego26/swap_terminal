@@ -246,10 +246,43 @@ FROM debian:bookworm-slim AS runtime
 # text requires be carried.
 COPY --from=build /src/COPYING /usr/share/licenses/gridcoin/COPYING
 
+# libboost-iostreams1.74.0 WAS MISSING AND THE CONTAINER COULD NOT START.
+#
+# Measured on the operator's host, 2026-11-22, on the FIRST run of a container from this
+# image -- the image having already built clean:
+#
+#     gridcoinresearchd: error while loading shared libraries:
+#     libboost_iostreams.so.1.74.0: cannot open shared object file
+#
+# repeated once per restart attempt behind `restart: on-failure:5`. The build stage installs
+# libboost-iostreams-dev, so the binary links against it; this stage listed system,
+# filesystem and thread and not iostreams, so the runtime had a link-time dependency with no
+# run-time counterpart. The image was correct and the container was dead, which is why
+# "it builds" and "it runs" had to stay separate claims.
+#
+# THE SET IS NOW TAKEN FROM THE BINARY RATHER THAN FROM THE BUILD STAGE'S -dev LIST.
+# `ldd` on a gridcoinresearchd compiled from this same commit reports exactly three boost
+# libraries -- filesystem, iostreams and thread -- and notably NOT boost_system, which is
+# header-only in modern boost and arrives transitively. Everything else it needs is either
+# in the base image or pulled in by libcurl4's own dependencies, which is what installed
+# libbrotli1, libkrb5-3, libldap-2.5-0, libsasl2-2, librtmp1, libssh2-1, libnghttp2-14 and
+# libpsl5 on the run above without any of them being named here.
+#
+# THAT ldd WAS RUN ON A DIFFERENT DISTRIBUTION and the distinction matters (rule 17): the
+# binary was built natively on Ubuntu with boost 1.83, so what carries over is the SET of
+# libraries, not the package names or the soname suffixes. Debian bookworm's are 1.74.0,
+# which is why these read 1.74.0. The gnutls-vs-openssl difference in that ldd's curl chain
+# is the same artifact and is why no curl dependency is named here beyond libcurl4 itself.
+#
+# libzmq5 AND libevent ARE KEPT THOUGH THAT ldd DID NOT SHOW THEM, deliberately rather than
+# by oversight. Neither appeared in the native binary's link set, so both may be removable;
+# establishing that needs an ldd of THIS image's binary, which is one `docker run` away and
+# has not been done. Dropping a runtime library on the strength of a different distribution's
+# build is the shape of the mistake this comment is about.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       dumb-init libevent-2.1-7 libevent-pthreads-2.1-7 libboost-system1.74.0 \
-      libboost-filesystem1.74.0 libboost-thread1.74.0 libminiupnpc17 libzmq5 \
-      libcurl4 openssl ca-certificates \
+      libboost-filesystem1.74.0 libboost-iostreams1.74.0 libboost-thread1.74.0 \
+      libminiupnpc17 libzmq5 libcurl4 openssl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # /build/bin/ AND NOT /src/src/, because cmake writes its output into the build directory
