@@ -999,6 +999,62 @@ END;
 
 SCHEMA = SCHEMA + ICP_DEPOSIT_SUBACCOUNT_SCHEMA
 
+# ICP SUBACCOUNT SWEEPS -- the record of moving a credited deposit out of its
+# per-swap subaccount and into the desk's own account, where a payout can spend it.
+#
+# A TABLE AND NOT A COLUMN ON icp_deposit_subaccounts, deliberately. That table's
+# triggers make its rows immutable and undeletable on purpose -- "owner,
+# subaccount_index and swap_id are immutable once allocated" -- so a `swept_at`
+# column there could never be filled in. The allocation and the sweep are also two
+# different events with two different failure modes, and one row per event is what
+# lets a second sweep attempt be a row rather than an overwrite.
+#
+# APPEND-ONLY, FOR THE REASON CLAUDE.md RULE 7 GIVES: "Never delete that record to
+# save space. If disk is the problem, the answer is a churn table, not the record of
+# what the system did with money." A sweep is a signed ledger transfer; the row is
+# the only thing in this repository that says it happened.
+#
+# NO UNIQUE CONSTRAINT ON subaccount_index, and that is not an oversight. A sweep
+# can be attempted more than once -- the first may have returned no block index, or
+# died between the ledger accepting it and this row being written -- and each
+# attempt is a fact. What makes a RE-SWEEP harmless is not a constraint here but the
+# balance: chains/icp.ICPAdapter.sweep_subaccount_to_desk() refuses when the
+# subaccount holds no more than the ledger fee, so an already-swept subaccount
+# sweeps nothing. Idempotence by state, recorded by history.
+ICP_SUBACCOUNT_SWEEP_SCHEMA = """
+CREATE TABLE IF NOT EXISTS icp_subaccount_sweeps (
+    owner TEXT NOT NULL,
+    subaccount_index INTEGER NOT NULL,
+    swap_id TEXT NOT NULL,
+    amount_e8s INTEGER NOT NULL,
+    fee_e8s INTEGER NOT NULL,
+    block_index TEXT NOT NULL,
+    swept_at TEXT NOT NULL,
+    CONSTRAINT icp_sweep_index_is_allocatable CHECK (subaccount_index >= 1),
+    CONSTRAINT icp_sweep_amount_is_positive CHECK (amount_e8s > 0),
+    FOREIGN KEY (swap_id) REFERENCES swaps(id)
+);
+
+-- Reading "has this subaccount been swept" is the only query shape this table has.
+CREATE INDEX IF NOT EXISTS idx_icp_sweeps_by_subaccount
+    ON icp_subaccount_sweeps(owner, subaccount_index);
+
+CREATE TRIGGER IF NOT EXISTS icp_subaccount_sweeps_are_never_deleted
+BEFORE DELETE ON icp_subaccount_sweeps
+BEGIN
+    SELECT RAISE(ABORT, 'icp_subaccount_sweeps rows are never deleted: each row is the record of a signed ledger transfer that moved real funds out of a customer deposit subaccount, and it is the only record of it in this repository (CLAUDE.md rule 7)');
+END;
+
+CREATE TRIGGER IF NOT EXISTS icp_subaccount_sweeps_are_never_amended
+BEFORE UPDATE ON icp_subaccount_sweeps
+BEGIN
+    SELECT RAISE(ABORT, 'icp_subaccount_sweeps rows are immutable: a sweep either happened with these numbers or it did not, and amending the amount or the block index of a transfer already on the ledger would make this table disagree with the chain rather than correcting anything');
+END;
+"""
+
+SCHEMA = SCHEMA + ICP_SUBACCOUNT_SWEEP_SCHEMA
+
+
 
 # The one live payout per swap, as a CONSTRAINT rather than a convention.
 #
@@ -1730,6 +1786,14 @@ def apply_migrations(conn: sqlite3.Connection) -> dict:
     # where the repair has to either refuse or overwrite silently. IF NOT EXISTS
     # throughout, so this is idempotent and cannot fail on an existing database.
     conn.executescript(INVENTORY_CORRECTIONS_SQL)
+    conn.commit()
+
+    # THE SWEEPS TABLE GOES UP HERE FOR THE SAME REASON THE CORRECTIONS TABLE DOES:
+    # the early return below must not skip it. Without it a host that upgraded rather
+    # than created its database has the sweep code and nowhere for its audit row to
+    # land -- and the sweep is a signed ledger transfer, so the row is the only
+    # record of it. IF NOT EXISTS throughout, so this is idempotent.
+    conn.executescript(ICP_SUBACCOUNT_SWEEP_SCHEMA)
     conn.commit()
 
     duplicates = duplicate_live_payouts(conn)

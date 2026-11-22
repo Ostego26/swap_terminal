@@ -72,6 +72,7 @@ import logging
 import re
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 from .coin_amounts import amount_to_base_units
@@ -294,8 +295,38 @@ def redact_secrets(text: str) -> str:
     return "\n".join(kept)
 
 
-def transfer_argument(
-    *, to_account: str, e8s: int, fee_e8s: int, created_at_time_nanos: int, memo: int = 0
+def _from_subaccount_clause(subaccount_index: int | None) -> str:
+    """`null`, or the candid `opt blob` for one allocated subaccount.
+
+    SPLIT OUT SO THE DEFAULT IS PROVABLY UNCHANGED. transfer_argument() is the one
+    string in this repository that decides where money goes, and the whole risk of
+    teaching it a new field is that the EXISTING callers' output moves. With the
+    branch in a named function, "null when no index is given" is one assertion
+    (tests/test_icp_adapter.py) rather than a property of an f-string.
+
+    `blob` AND NOT `vec {...}`, which is the opposite choice from
+    ICPAdapter._account_argument() a few hundred lines down, and the difference is
+    the candid TYPE rather than a preference. The legacy `transfer` record declares
+    `from_subaccount : opt SubAccount` where `SubAccount = blob`, so it takes the
+    same escaped-blob form as `to`; the ICRC-1 `Account` record declares
+    `subaccount : opt vec nat8`, which is why the balance query spells the identical
+    32 bytes as a vec. Two spellings of one value, each required by the method that
+    reads it -- recorded at both sites per rule 8, because a reader who finds one
+    will assume the other is wrong.
+    """
+    if subaccount_index is None:
+        return "null"
+    return f"opt {_hex_to_blob(subaccount_from_index(subaccount_index).hex())}"
+
+
+def transfer_argument(  # noqa: PLR0913 -- checked: all six are KEYWORD-ONLY, so the positional transposition this rule exists to catch (sending fee_e8s as the amount) is impossible by construction. The sixth is from_subaccount_index, added 2026-11-22; the COUNT trips the rule, not the hazard, and bundling the six into an object would add a type without removing a parameter.
+    *,
+    to_account: str,
+    e8s: int,
+    fee_e8s: int,
+    created_at_time_nanos: int,
+    memo: int = 0,
+    from_subaccount_index: int | None = None,
 ) -> str:
     """The candid argument for the ledger's legacy `transfer`. THE MONEY-MOVING STRING.
 
@@ -304,6 +335,14 @@ def transfer_argument(
     `created_at_time_nanos` are all ints, and transposing the first two would send
     the fee as the amount. That is the transposition hazard ruff's PLR0913 exists to
     flag, answered by naming rather than by a suppression (rule 19).
+
+    THAT LAST SENTENCE NEEDED A FOOTNOTE ONCE A SIXTH PARAMETER ARRIVED. With five
+    keyword-only arguments the rule did not fire and naming was the whole answer;
+    with six it fires on the COUNT, which keyword-only-ness does not change. The
+    suppression on the signature carries the claim rather than hiding it: the hazard
+    is still impossible here, because nothing can be passed positionally. A reader
+    who takes "answered by naming rather than by a suppression" at face value and
+    then finds a suppression deserves to be told which part changed.
 
     EXTRACTED 2026-10-07, when fund_desk.py needed to build the same record to MINT.
     A mint is this identical call -- the legacy `transfer`, from the ledger's
@@ -323,6 +362,31 @@ def transfer_argument(
     the first failed transfer: omitting the keyword made candid read 32 bytes as
     `text` and answer "Not valid unicode text / Failed to create argument blob".
 
+    from_subaccount WAS HARDCODED `null` UNTIL 2026-11-22, AND THAT WAS THE WHOLE OF
+    THE ICP INVENTORY DEFECT. Every send debited the owner principal's DEFAULT
+    subaccount, while customer deposits land at allocated subaccounts with index >= 1
+    (deposit_address() refuses index 0). So a deposit was detected and credited, the
+    coins sat where nothing could spend them, and get_balance() -- which both the
+    payout and the create-time funding gate read -- never saw them. An X -> ICP swap
+    was then REFUSED AT CREATION once the hand-minted default balance drained, while
+    the desk actually held the coins. A halt and the safe direction, and still a desk
+    poorer than it is.
+
+    MEASURED: `grep from_subaccount` over every .py, .rs and .did returned three hits
+    -- this line, one comment, and tests/test_icp_adapter.py's assertion that payouts
+    carry `null`. That assertion is CORRECT and unchanged: a payout leaves the desk's
+    own account. What was missing was any caller that could say otherwise.
+
+    THE DEFAULT IS STILL `null`, so both existing callers -- the payout here and
+    fund_desk.py's mint -- produce a byte-identical argument. Only the sweep passes
+    an index.
+
+    NOT A NEW KEY, AND THAT IS WHY NO CANISTER CHANGES. A subaccount is 32 bytes
+    hashed with the principal into an account identifier, not a separate keypair, so
+    the dfx identity that already signs ICP payouts authorizes every subaccount of
+    its principal. icp/threshold_custody and icp/operator_admin are untouched and
+    still cannot sign.
+
     created_at_time IS REQUIRED HERE TOO, as an int rather than an optional. The
     ledger deduplicates on (from, to, amount, fee, memo, created_at_time), so a
     caller that has no key to pass must be made to decide rather than handed a null
@@ -333,7 +397,7 @@ def transfer_argument(
         f"(record {{ memo = {memo} : nat64; "
         f"amount = record {{ e8s = {e8s} : nat64 }}; "
         f"fee = record {{ e8s = {fee_e8s} : nat64 }}; "
-        "from_subaccount = null; "
+        f"from_subaccount = {_from_subaccount_clause(from_subaccount_index)}; "
         f"to = {_hex_to_blob(to_account)}; "
         f"created_at_time = opt record {{ timestamp_nanos = {created_at_time_nanos} : nat64 }} }})"
     )
@@ -743,6 +807,144 @@ class ICPAdapter:
         self.payout_refusal = "" if self.can_spend else missing_identity_refusal()
 
     # -- derivation, no I/O -------------------------------------------------
+
+    def sweep_subaccount_to_desk(self, subaccount_index: int) -> tuple[int, int, str]:
+        """Move one allocated deposit subaccount's balance to the desk's own account.
+
+        Returns (amount_e8s, fee_e8s, block_index) -- WHAT IT MOVED, not what a caller
+        should ask again. The balance and the fee are read here to decide the amount,
+        so handing them back costs nothing and removes the second read that would
+        otherwise be needed to record the sweep. A caller asking the ledger again
+        could see a different balance and write an audit row that disagrees with the
+        transfer it claims to describe.
+
+        created_at_time IS NOT A PARAMETER, which is the opposite of
+        send_to_address() and is deliberate. That method refuses a missing key to
+        force its caller to decide, because a payout's identity is the swap's. A
+        sweep has no such key available: see the idempotence note below, which
+        settles the policy here rather than at every call site.
+
+        =====================================================================
+        WHY THIS DID NOT EXIST, AND WHAT ITS ABSENCE COST
+        =====================================================================
+
+        transfer_argument() hardcoded `from_subaccount = null`, so every send debited
+        the owner principal's DEFAULT subaccount. Customer deposits land at allocated
+        subaccounts with index >= 1 -- deposit_address() refuses index 0 -- and
+        subaccount_balance() had NO production caller at all, only a test. So a
+        deposit was detected and credited and then sat where nothing could spend it.
+
+        get_balance() reads the default subaccount, and it is what BOTH the payout and
+        the create-time funding gate (services/payout_capacity) price against. So:
+
+          X -> ICP   refused at creation once the hand-minted default balance drains,
+                     while the desk actually holds the coins. A halt and the safe
+                     direction, costing the customer a retry.
+          ICP -> X   the desk pays out on the other chain and receives ICP it cannot
+                     spend. Not lost -- the owner principal controls it -- but it
+                     never becomes inventory and /admin shows the desk poorer.
+
+        MAKING get_balance() SUM SUBACCOUNTS WOULD HAVE BEEN THE WRONG FIX, and this
+        is the part worth stating. The funding gate and the payout read the same
+        number; teaching the gate to count coins the payout cannot spend turns a
+        creation-time refusal into an InsufficientFunds AFTER the deposit is
+        irreversible -- trading the safe direction for the expensive one. The funds
+        have to be MOVED, not re-counted.
+
+        =====================================================================
+        WHAT AUTHORIZES IT, AND WHAT IS STILL UNVERIFIED
+        =====================================================================
+
+        NO NEW KEY AND NO CANISTER CHANGE. A subaccount is 32 bytes hashed with the
+        principal into an account identifier, not a separate keypair, so the dfx
+        identity that already signs ICP payouts authorizes every subaccount of its
+        principal. icp/threshold_custody and icp/operator_admin are untouched and
+        tests/test_icp_canister_cannot_sign.py still holds.
+
+        verify_derivation() IS CALLED FIRST, and it is the only guard that answers the
+        one question this method cannot survive getting wrong.
+        chains/icp_payout_identity.py:131 says out loud that nothing verifies the
+        armed identity's principal equals ICP_OWNER_PRINCIPAL -- "a PEM for an
+        identity whose principal is not ICP_OWNER_PRINCIPAL reads True ... and fails
+        later ... with an InsufficientFunds from the ledger, since that identity's own
+        account is empty". For a PAYOUT that is a loud failure after a deposit. For a
+        SWEEP it would be worse and quieter: the transfer would be signed by a
+        principal that owns none of these subaccounts, move nothing, and leave the
+        operator reading a refusal about funds they can see in the ledger. The check
+        is read-only queries, so it costs nothing to ask every time.
+
+        =====================================================================
+        IDEMPOTENCE IS BY STATE, NOT BY created_at_time, AND THAT IS DELIBERATE
+        =====================================================================
+
+        send_to_address()'s header records that the ledger deduplicates on
+        (from, to, amount, fee, memo, created_at_time) for 24 HOURS and refuses a key
+        outside that window with TxTooOld. A sweep keyed on the swap's own
+        created_at would therefore become unretryable the day after the swap -- which
+        is exactly when a stuck sweep needs retrying.
+
+        So the key is a fresh timestamp each attempt, and the idempotence comes from
+        the BALANCE: once a subaccount is swept it is empty, and the refusal below
+        makes a second attempt a no-op. That also fails in the safe direction if the
+        ledger accepts a transfer whose SQL record is never written -- the re-run sees
+        an empty subaccount and sweeps nothing, rather than sending twice.
+
+        E8S THROUGHOUT, never the float ICP amounts. This decides how much leaves an
+        account, and subaccount_balance()/chain_fee() divide by 10**8 for display.
+        Subtracting two floats and multiplying back would put a rounding step inside
+        a fund-moving decision; the ledger's own numbers are integers and stay that
+        way (CLAUDE.md rule 6 draws the same boundary for times).
+
+        THE FEE IS CHARGED TO THE SUBACCOUNT, so the amount swept is balance minus
+        fee. A deposit at or below the ledger fee cannot be swept at all, which is
+        this defect meeting the dust-floor one: 10,000 e8s on the local replica.
+
+        Returns:
+            The ledger's block index for the transfer.
+
+        Raises:
+            ICPCallFailed: if the derivation does not verify, or the subaccount holds
+                no more than the fee, or the ledger returns no block index.
+        """
+        verified, why = self.verify_derivation(subaccount_index)
+        if not verified:
+            raise ICPCallFailed(
+                f"refusing to sweep subaccount {subaccount_index}: {why}. NOTHING was sent. A sweep "
+                f"signed by a principal that does not own this subaccount moves nothing and reports "
+                f"a confusing failure, so this is checked before the transfer rather than after."
+            )
+        balance_e8s = self._nat("icrc1_balance_of", self._account_argument(subaccount_index))
+        fee_e8s = self._nat("icrc1_fee")
+        amount_e8s = balance_e8s - fee_e8s
+        if amount_e8s <= 0:
+            raise ICPCallFailed(
+                f"subaccount {subaccount_index} holds {balance_e8s} e8s and the ledger fee is "
+                f"{fee_e8s} e8s, so there is nothing to sweep ({amount_e8s} e8s would be sent). "
+                f"NOTHING was sent. This is also what makes a re-run a no-op: a subaccount already "
+                f"swept is empty, which is where this method's idempotence comes from."
+            )
+        argument = transfer_argument(
+            to_account=self.own_address(),
+            e8s=amount_e8s,
+            fee_e8s=fee_e8s,
+            # A FRESH TIMESTAMP, for the reason in the idempotence note above: the
+            # ledger refuses a key more than 24 hours old with TxTooOld, so anything
+            # derived from the swap's own history becomes unretryable exactly when a
+            # stuck sweep needs retrying. Within one attempt this still gives the
+            # ledger a key to deduplicate on; across attempts the BALANCE is what
+            # makes a repeat a no-op.
+            created_at_time_nanos=time.time_ns(),
+            from_subaccount_index=subaccount_index,
+        )
+        out = self._call(self.ledger_canister_id, "transfer", argument)
+        index = transfer_block_index(out)
+        if index:
+            return amount_e8s, fee_e8s, index
+        raise ICPCallFailed(
+            f"sweep of {amount_e8s} e8s from subaccount {subaccount_index} to the desk's own account "
+            f"did not return a block index. Whether anything moved is NOT established by this "
+            f"message -- read the ledger before retrying. The reply was: {out[:400]}"
+        )
 
     def own_address(self) -> str:
         """The desk's own 64-hex account identifier: the default subaccount.

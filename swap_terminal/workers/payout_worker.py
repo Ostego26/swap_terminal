@@ -61,6 +61,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import Config
 from db import SCHEMA, apply_migrations, db_session
+from services.icp_sweep_service import sweep_credited_deposits, sweep_note
 from services.payout_service import (
     process_pending_payouts,
     refresh_wallet_inventory,
@@ -179,6 +180,25 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
                     # happen and the operator should see that BEFORE the RPC call,
                     # not in a summary line that appears once it has completed.
                     print(f"  {WORKER_NAME} cycle={cycle}: {pending} swap(s) pending payout, broadcasting now", flush=True)
+                # THE ICP SWEEP RUNS BEFORE THE INVENTORY REFRESH, and the order is the
+                # point: a deposit swept this cycle has to be visible to
+                # refresh_wallet_inventory() in the SAME cycle, or the coins are
+                # spendable and the inventory row still says they are not until the next
+                # poll -- which is the funding gate refusing a swap against money the
+                # desk already holds.
+                #
+                # IT IS IN THIS WORKER AND NOT THE RECONCILE ONE because a sweep is a
+                # signed ledger transfer. workers/reconcile_worker.py's header says "Can
+                # move funds: no -- it calls neither sendtoaddress nor any signing
+                # method" and workers/deposit_watcher.py says the same; putting it there
+                # would have made a module header false in the one field an operator
+                # reads to decide what a process may do. This file already says "Can move
+                # funds: YES".
+                #
+                # NOTHING MOVES ON AN UNARMED HOST: sweep_credited_deposits() returns a
+                # not-armed summary when ICP_PAYOUT_IDENTITY is absent, which is an
+                # ordinary deposit-watching deployment rather than a fault.
+                sweep = sweep_credited_deposits(db, config, adapters, should_stop)
                 # should_stop, because this runs BEFORE process_pending_payouts() and makes
                 # one get_balance per configured chain -- a whole timeout after SIGTERM for
                 # balances this cycle is about to discard.
@@ -198,9 +218,18 @@ def main(poll_seconds: int = DEFAULT_POLL_SECONDS) -> int:
                     cycle,
                     time.monotonic() - started,
                     {"pending_at_start": pending, "broadcast": len(completed), "failed_total": failed},
-                    notes=(
-                        "pending_at_start=0 while swaps are open may mean deposit_watcher is not running; "
-                        "failed_total is cumulative, not this cycle"
+                    notes=" -- ".join(
+                        note
+                        for note in (
+                            "pending_at_start=0 while swaps are open may mean deposit_watcher is not running; "
+                            "failed_total is cumulative, not this cycle",
+                            # "" when this host is unarmed or had nothing to sweep, so an
+                            # ordinary cycle's line is unchanged. A cycle that MOVED a
+                            # customer's deposit into the hot wallet, or REFUSED to, says
+                            # so here rather than only in the log (rule 14).
+                            sweep_note(sweep),
+                        )
+                        if note
                     ),
                 ),
                 flush=True,

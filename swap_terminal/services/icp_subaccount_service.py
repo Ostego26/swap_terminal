@@ -198,6 +198,84 @@ def principal_to_text_checked(owner: str) -> str:
     return owner
 
 
+#: Allocated subaccounts whose swap has a CREDITED deposit and no recorded sweep.
+#:
+#: THE ENUMERATION DID NOT EXIST UNTIL 2026-11-22. This module could allocate an
+#: index, find the index for a swap and find the swap for an index -- and nothing
+#: could ask "which subaccounts hold deposits". So the sweep that turns a credited
+#: ICP deposit into spendable inventory had no list to walk, which is half of why it
+#: was never written.
+#:
+#: SQL AND NOT A PYTHON LOOP (rule 20): this is a filter and a join over rows already
+#: in swap_terminal.db. A per-row loop would do the same work where only its author
+#: can inspect it, and would half-apply on any row that raised.
+#:
+#: `status != 'awaiting_deposit'` IS THE CREDITED TEST, and it is deliberately the
+#: weak one. A swap leaves awaiting_deposit only once a deposit has been credited, so
+#: this cannot include a subaccount nobody has paid into -- and it CAN include one
+#: whose swap later failed or went to under_review, which is correct: those coins are
+#: in the desk's subaccount either way and belong in inventory. Reading
+#: deposit_events instead would be narrower and wrong for exactly that case.
+#:
+#: THE SWEEP JOIN IS AN OPTIMIZATION, NOT THE GUARD. Excluding subaccounts with a
+#: recorded sweep keeps the ledger queries proportional to UNSWEPT deposits rather
+#: than to every deposit ever taken. What actually makes a re-sweep harmless is the
+#: balance: chains/icp.ICPAdapter.sweep_subaccount_to_desk() refuses when the
+#: subaccount holds no more than the ledger fee. So a sweep that reached the ledger
+#: and never got its row written is swept again, finds an empty subaccount, and
+#: sends nothing -- the safe direction.
+_UNSWEPT_SQL = """
+SELECT a.subaccount_index AS subaccount_index, a.swap_id AS swap_id, s.status AS status
+  FROM icp_deposit_subaccounts AS a
+  JOIN swaps AS s ON s.id = a.swap_id
+ WHERE a.owner = ?
+   AND s.status != 'awaiting_deposit'
+   AND NOT EXISTS (
+         SELECT 1 FROM icp_subaccount_sweeps AS w
+          WHERE w.owner = a.owner AND w.subaccount_index = a.subaccount_index
+       )
+ ORDER BY a.subaccount_index
+"""
+
+
+def unswept_deposit_subaccounts(db, owner: str) -> list[dict]:
+    """[{subaccount_index, swap_id, status}] for deposits not yet moved to the desk.
+
+    The list the sweep walks. Returns [] when there is nothing to do, which is the
+    ordinary case and is not an error.
+
+    OWNER IS A PARAMETER rather than read from config here, for the same reason every
+    other function in this module takes it: one principal per database is the current
+    deployment and not a property this module is entitled to assume.
+    """
+    return [dict(row) for row in db.execute(_UNSWEPT_SQL, (principal_to_text_checked(owner),)).fetchall()]
+
+
+def record_subaccount_sweep(  # noqa: PLR0913 -- checked: seven of the eight are KEYWORD-ONLY, so the positional transposition this rule exists to catch (amount_e8s and fee_e8s are both ints) cannot happen. Every one is a column of the row being written; bundling them into an object would add a type without removing a parameter, and the object would have to be unpacked into this same INSERT.
+    db, *, owner: str, subaccount_index: int, swap_id: str, amount_e8s: int, fee_e8s: int, block_index: str, swept_at: str
+) -> None:
+    """Append the record of one completed sweep. AFTER the ledger accepted it.
+
+    KEYWORD-ONLY, because five of the seven are strings or ints and `amount_e8s` and
+    `fee_e8s` are transposable at a call site -- the same hazard
+    chains/icp.transfer_argument() answers the same way.
+
+    WRITTEN AFTER THE TRANSFER, NEVER BEFORE, and the ordering is the decision.
+    Writing first would mean a crash between the two leaves a row claiming a sweep
+    that never happened, and the enumeration above would then skip a subaccount that
+    still holds a customer's deposit -- money stranded by its own audit record.
+    Written after, the failure leaves no row, the subaccount is enumerated again, and
+    the balance check makes the retry a no-op if the ledger did accept it. One
+    direction loses funds silently; the other repeats a question.
+    """
+    db.execute(
+        "INSERT INTO icp_subaccount_sweeps (owner, subaccount_index, swap_id, amount_e8s, fee_e8s, "
+        "block_index, swept_at) VALUES (?,?,?,?,?,?,?)",
+        (principal_to_text_checked(owner), subaccount_index, swap_id, amount_e8s, fee_e8s, block_index, swept_at),
+    )
+    db.commit()
+
+
 def subaccount_index_for_swap(db, swap_id: str) -> int | None:
     """The index already allocated to `swap_id`, or None.
 
