@@ -45,7 +45,9 @@ with no harness are the work.
 | CLTV refuses an early refund, BTC | **ENFORCED 2026-09-29** | OK=37 FAIL=0. 8b's MEMPOOL said `mandatory-script-verify-flag-failed (Locktime requirement not satisfied)` at height 677 with BIP65 active from 1; 8c's `generateblock` refused the block. Both layers, and the mempool's own wording already said consensus |
 | CLTV refuses an early refund, LTC | **ENFORCED 2026-09-29, BY A DIFFERENT PATH** | OK=38 FAIL=0. 8b's mempool said `non-mandatory-script-verify-flag (Locktime requirement not satisfied)` -- CLTV RAN and refused, but on Litecoin Core v0.21.4 it is not in the flag set the mempool calls mandatory, so that refusal alone is RELAY POLICY. 8c is what establishes consensus here: `generateblock` refused with `TestBlockValidity failed`. See the note below -- 8c is load-bearing on LTC in a way it is not on BTC |
 | hashlock spend, GRC | SPENT | three live swaps, `docs/atomic_swap_runs_2026_09_27.md` |
-| **refund after expiry, GRC** | **NONE** | `--chain` offers `btc`, `ltc`, `both`. **Gridcoin is not an option and never has been.** See §5 |
+| **refund after expiry, GRC** | **NONE** -- for a measured reason since 2026-11-23 | `--chain grc` EXISTS now and reaches the refund at the PRODUCTION locktime (tip+1920, mined by stake). Gridcoin regtest's mempool then refuses it -- real `refund_contract()` and control alike -- with `bad-txns-nonstandard-inputs` before any script runs: `AcceptToMemoryPool` rejects a non-template P2SH redeem script `&& !OnTestnet()`. So the branch is still unexercised by THIS harness, now because the chain will not relay it. Until 2026-11-23 this cell read "`--chain` offers `btc`, `ltc`, `both`. Gridcoin is not an option and never has been" |
+| fund an HTLC through the real `create_contract()`, GRC regtest | SPENT-equivalent: FUNDED 2026-11-23 | `--chain grc --wipe`, steps 6 [A] and [B]: `a5cc27bf68d60fb5…:1` and `082cf790eabe294f…:1`, script and value read back off the funding transaction (Gridcoin has no `gettxout`) |
+| hashlock spend / refund, GRC **regtest** | **REFUSED, by standardness -- proves nothing about either branch** | 7 of 7 spends. The daemon RETURNED `bad-txns-nonstandard-inputs` through `testmempoolaccept` for the 3 the harness asked about (the controls 7c, 8b and 9b); for all 7 its own debug.log carries the matching line, by count -- 10 `nonstandard transaction input` = 7 broadcasts + those 3 probes -- though the lines name no txid, so that half is a count and not a per-transaction attribution. Not graded REFUSED in this table's sense: that grade means a GATE in the script held, and here no script ran |
 | CLTV executes on GRC | **ENFORCED 2026-09-29** | `grc_htlc_verify.py` OK=11 FAIL=0. Step 6 REFUSED a FINAL refund (nLockTime 3296544 = tip, so `IsFinalTx` passed) against a script locktime of 3296548; step 8 ACCEPTED the same outpoint, same script, same fee, with nLockTime 3296548. The daemon logged `ConnectInputs() : 23148431f9 VerifySignature failed` -- that txid IS step 6's, and `validation.cpp:669` is reached only when the script fails under CONSENSUS flags alone. See §5b |
 | CLTV allows a refund AT the locktime, GRC | SPENT 2026-09-28 | `9495082ef304c4ca…` spends the P2SH `8468aa40f9:0` with nLockTime 3296363 and sequence 0xfffffffe, paying 0.13 GRC to the wallet. Re-established 2026-09-29 by step 8, `ee9dc216bf055b22…`, through the real `refund_contract()` |
 | ~~CLTV executes on GRC~~ (the old grade) | ~~NONE~~ | the three GRC swaps took the HASHLOCK branch; `OP_CHECKLOCKTIMEVERIFY` sits in the `OP_ELSE` and never ran. What is established is that Gridcoin ACCEPTS a script CONTAINING it |
@@ -402,6 +404,43 @@ always spend, and let the hashlock branch keep its in-process key -- changes wha
 builds. That is live posture and the operator's call (rule 16). `docs/atomic_swap_runs_2026_09_27.md`
 says it "should be made before this driver touches a chain where the coins matter", and that
 sentence is unchanged.
+
+**d. GRIDCOIN'S MEMPOOL REFUSES EVERY HTLC SPEND OFF TESTNET -- MEASURED ON REGTEST, READ FOR MAINNET.**
+Found 2026-11-23 by the first `regtest_htlc_verify.py --chain grc --wipe`, run twice against
+Gridcoin 5.5.1.7-30a89f2ab0bb on regtest. Steps 1-6 passed (OK=21), including the REAL
+`GRCClient.create_contract()` funding both contracts. Then **7 of 7 spends** -- 7a, 7b and 7c on
+the hashlock branch; 8b real and control; 9a and 9b on the refund at the production locktime,
+tip+1920 -- were refused. HOW EACH IS ATTRIBUTED, because they are not the same evidence:
+`testmempoolaccept` RETURNED `bad-txns-nonstandard-inputs` for the 3 control spends the harness
+asked it about; the 4 real-client spends got only `-22 TX rejected` back, and are attributed by
+the daemon's own debug.log, whose run held exactly 10 `nonstandard transaction input` lines -- 7
+broadcasts plus the 3 probes -- and 2 `nonstandard transaction type` for 8a (the non-final one)
+and its probe. Those log lines name no txid, so that half is a COUNT that accounts for every
+attempt, not a per-transaction reading. An 8th refusal, 8a, is non-final and is not one of the 7.
+
+THE RULE, read off the source rather than inferred. `AcceptToMemoryPool` runs
+`if (!AreInputsStandard(tx, mapInputs) && !OnTestnet())` -- `src/validation.cpp:2254` at the
+pinned 5.5.1.7 and `:2362` at the **5.5.3.0 release**, commit `7d8d4125…`, unchanged. For a P2SH
+input `AreInputsStandard` requires `Solver(subscript)` to recognize the REDEEM SCRIPT as a standard
+template (`src/policy/policy.cpp:162`), and an HTLC's `OP_IF … OP_ELSE … OP_ENDIF` is no template.
+Bitcoin Core dropped that rule in 0.10; Gridcoin kept it. It is relay POLICY, not consensus, and it
+has no command-line override.
+
+WHY TESTNET NEVER SHOWED IT: testnet is the one network the rule exempts. Every GRC row above that
+reads SPENT -- three hashlock claims, Tx_punish, the CLTV refund -- was on testnet.
+
+WHAT IT MEANS FOR MAINNET, AND THE GRADE IT DESERVES. **READ, not measured**: nothing in this tree
+has broadcast to Gridcoin mainnet. But the release source applies the same refusal there, so a
+mainnet node -- the operator's own included -- would refuse to accept a GRC HTLC redeem or refund
+into its mempool, and stakers build blocks from their mempools. A GRC HTLC funded on mainnet would
+then have no ordinary way out by EITHER branch. That is fund movement and armed state (rule 16):
+whether any mainnet GRC HTLC path is reachable, and what to do about it, is the operator's call,
+and no payout or swap code was changed for it.
+
+WHAT THE HARNESS DOES ABOUT IT. It scores none of these refusals as the timelock holding:
+`REFUSAL_NONSTANDARD` is its own kind, step 8 grades it FAIL, and the verdict says neither branch
+was EXERCISED rather than that either is broken. The regtest leg therefore exits 1 on an unmodified
+Gridcoin node, and that is the correct result.
 
 ## What was removed on 2026-09-29, and where its evidence went
 

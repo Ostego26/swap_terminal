@@ -966,6 +966,19 @@ in the document that forbids it:
     regression in the GRC refund path would not be caught by the run that
     catches BTC's and LTC's. That gap is named work and belongs to whoever adds
     `grc` to `--chain`; it is not a reason to keep calling the branch unrun.
+
+    `grc` WAS ADDED TO `--chain` ON 2026-11-23, and the gap did not close -- it
+    changed shape, and the paragraph above is kept because it is what the work
+    was asked to do. Against a Gridcoin regtest node built from the pinned
+    commit, `--chain grc --wipe` funds both contracts through the REAL
+    create_contract() and then every spend, redeem and refund, real client and
+    control, is refused `bad-txns-nonstandard-inputs` at mempool entry, before
+    any script runs. Gridcoin rejects a non-template P2SH redeem script
+    `&& !OnTestnet()`, unchanged in the 5.5.3.0 release. So the row stays NONE
+    for a measured reason, and the reason is a fund-movement question for the
+    operator, not harness work: read in source but NOT measured on mainnet, a
+    mainnet node would refuse to relay any GRC HTLC redeem or refund.
+    docs/branch_coverage.md §5 gap d carries it.
   - two payout workers paid the same swap twice -- 2 sends, 1 swap_id, 2
     'broadcast' rows. Fixed with both halves the measurement argued for: the
     claim-by-UPDATE in services/payout_service.claim_swap_for_payout() and the

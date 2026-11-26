@@ -55,9 +55,11 @@ measurement, by asking the daemon to MINE an early cancel and recording what it 
 
 WHY GRIDCOIN IS HANDLED DIFFERENTLY, AND IT IS NOT A SHORTCUT.
 
-Gridcoin has no regtest mode and no local mining: it is proof of stake with research
-rewards, and a testnet block arrives about every 90 seconds whether anybody is waiting
-or not. Three consequences, all of them named on screen when --chain grc runs:
+Gridcoin TESTNET has no local mining: it is proof of stake with research rewards, and a
+testnet block arrives about every 90 seconds whether anybody is waiting or not. (This
+sentence said "Gridcoin has no regtest mode" until 2026-11-23. It has one, which
+regtest_htlc_verify.py --chain grc drives; this harness runs Gridcoin on TESTNET, and that
+is what the three consequences below are about.) Three consequences, all of them named on screen when --chain grc runs:
 
   - THIS HARNESS NEVER STARTS OR STOPS A GRIDCOIN DAEMON. The operator's testnet daemon
     is a long-running staking wallet; a harness that stopped it would be taking a live
@@ -451,11 +453,11 @@ def resolve_config(asset: str) -> ChainConfig:
     """The connection parameters for one chain, from the environment.
 
     BTC and LTC delegate to daemons.resolve_chain_config(), which is the one place the
-    ST_REGTEST_* vocabulary lives (rule 8). GRC is built here because that table has no
-    Gridcoin row and adding one would tell daemons.py -- whose assert_regtest() demands
-    `chain == "regtest"` unconditionally -- about a chain that has no regtest mode. The
-    divergence is named at this site; the other site is daemons.CHAIN_DEFAULTS, which a
-    reader arrives at from here.
+    ST_REGTEST_* vocabulary lives (rule 8). GRC is built HERE, and never delegated, because
+    this harness drives Gridcoin TESTNET and daemons.resolve_chain_config("GRC") returns a
+    REGTEST config (daemons.GRC_REGTEST_DEFAULTS, added 2026-11-23). This said the table had
+    no Gridcoin row and Gridcoin "has no regtest mode"; both stopped being true that day, and
+    the `if asset != "GRC"` below is now what keeps the two networks apart, not an absence.
 
     THERE IS NO DEFAULT GRIDCOIN PORT. network_target.py records why: an unset
     GRC_RPC_PORT once fell through to 15715, which is MAINNET, and the serving path

@@ -132,7 +132,7 @@ missing is the thing worth recording. The first draft of this module stated that
 script<->script swap had ever completed, and said so in the register of a measurement:
 "grepped atomic_swap.py for OK=, FAIL=, COMPLETED and PROVEN". That grep was run and
 found nothing -- of the file it was pointed at. The evidence is in
-docs/branch_coverage.md:156, with six txids, and the claim was false for three days
+docs/branch_coverage.md:158, with six txids, and the claim was false for three days
 before anybody wrote it down. Rule 17's exact shape: the denominator of a grep is the
 files it searched, and a reason to believe something is not the same as having checked
 it.
@@ -256,7 +256,7 @@ PROVEN_LIVE: dict[str, str] = {
 #: that claim was false. It said "no completed script<->script swap is recorded anywhere
 #: in this tree", measured by grepping atomic_swap.py for OK=, FAIL=, COMPLETED and
 #: PROVEN -- which is a measurement of ONE FILE presented as a statement about the tree.
-#: docs/branch_coverage.md:156 records BTC -> GRC completing OK=13 FAIL=0 on 2026-09-30
+#: docs/branch_coverage.md:158 records BTC -> GRC completing OK=13 FAIL=0 on 2026-09-30
 #: with six txids. Rule 17 exactly: a reason to believe something is not the same as
 #: having checked it, and the denominator of a grep is the files it was pointed at.
 #:

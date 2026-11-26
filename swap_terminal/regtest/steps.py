@@ -5,7 +5,8 @@ Role: module (the stages the root entry point runs; each stage owns one
       regtest.txbuild, regtest.keys, and the REAL modules under test)
 Reads: a regtest daemon over JSON-RPC; the real modules
        modules.atomic_htlc_scripts, modules.htlc_timelock, modules.utils,
-       modules.atomic_btc_client, modules.atomic_ltc_client
+       modules.atomic_btc_client, modules.atomic_ltc_client,
+       modules.atomic_grc_client (through the entry point's build_real_client)
 Writes: the regtest chain and the regtest wallet -- mined blocks, funded
        contracts, broadcast spends
 Can move funds: YES on regtest, and nowhere else. regtest.daemons.assert_regtest
@@ -136,6 +137,34 @@ CONTRACTS_PER_RUN = 4
 # BLOCKS, never a duration.
 MINE_BATCH_BLOCKS = 144
 
+# PROOF-OF-STAKE MINING, for Gridcoin regtest. Measured 2026-11-23 against Gridcoin
+# 5.5.1.7-30a89f2ab0bb on a fresh regtest chain, every figure a count out of the stated
+# total (rule 3):
+#
+#   bare generatetoaddress, 1 per call       stalled at tip 25: "CreateCoinStake: no
+#                                            stake found (need a mature UTXO with
+#                                            sufficient weight)"
+#   +16s / +64s / +600s per 10-block batch   20 of 20 batches failed at each step
+#   +3600s per 10-block batch                500 blocks, 0 of 50 batches failed,
+#                                            6.5µfn (7.9s)
+#   +14400s per 10-block batch               500 blocks, 0 of 50 batches failed
+#   +3600s per 50-block batch                41 of 41 batches failed partway
+#   +14400s per 100-block batch              27 of 27 batches failed partway
+#
+# So the batch is TEN and the clock moves an hour before each one. Larger batches
+# exhaust the stake weight the clock step bought and fail partway through; a mine that
+# fails partway is the worst shape, because the height it reached is not the height
+# asked for. These are COUNTS OF BLOCKS and a clock step in SECONDS passed to an RPC --
+# interface values, not reported durations (rule 6).
+STAKE_BATCH_BLOCKS = 10
+STAKE_CLOCK_STEP_SECONDS = 3600
+# How far past the tip's timestamp the clock is put before any wallet send or spend. A
+# Gridcoin transaction carries an nTime that must not precede its inputs', and the wallet
+# stamps it with the node's clock -- so a clock behind the tip makes the wallet refuse to
+# select ANY coin ("CreateTransaction: Failed to select coins", measured 2026-11-23 on a
+# restarted node whose blocks were 402 hours ahead of the wall clock).
+CLOCK_MARGIN_SECONDS = 60
+
 # sendrawtransaction's maxfeerate, in coin per kvB. Zero disables the check,
 # and it is passed only on the harness's own CONTROL spends -- never on the
 # real client's redeem, which broadcasts at the node's default so that the run
@@ -181,6 +210,17 @@ class ChainFacts:
 
     cltv_activation_height: int | None = None
     cltv_height_source: str = "(none: not looked up yet)"
+    # THE MOCK CLOCK, for a chain that mines by stake (ChainConfig.mines_by_stake). A
+    # unix timestamp, an INTERFACE value passed to `setmocktime` and written into a
+    # transaction's nTime -- never a reported duration, so it is never converted
+    # (rule 6). 0 means "never set", and every setter only ever moves it FORWARD: see
+    # _clock_past_tip() for why a clock that moved back would refuse every send.
+    mock_clock: int = 0
+    # ASKED OF THE DAEMON in step 3 (probe_spend_rpcs), never assumed from the asset.
+    # The defaults are Bitcoin Core's answers, so a step that runs before the probe
+    # behaves exactly as it did before these fields existed.
+    has_gettxout: bool = True
+    sendraw_takes_maxfeerate: bool = True
 
 
 @dataclass
@@ -310,6 +350,10 @@ class ChainOutcome:
     # Whether contract [B] -- the one the refund spends -- was created by the
     # real create_contract() or funded by the harness. Same distinction as [A].
     real_create_contract_b: str = SKIP
+    # True once any spend in this run was refused by INPUT STANDARDNESS -- before any
+    # script ran (REFUSAL_NONSTANDARD). The verdict reads it, because "neither branch
+    # was shown to spend" sends a reader to the script, and the script never ran.
+    refused_before_any_script: bool = False
     notes: list[str] = field(default_factory=list)
 
     def note_signer_reached(self, attempt: RedeemAttempt) -> None:
@@ -412,6 +456,13 @@ class ChainOutcome:
                 "path is broken"
             )
 
+        if self.refused_before_any_script:
+            return (
+                "NEITHER BRANCH WAS EXERCISED, and not because either is broken: this daemon's mempool refused the "
+                "spends by INPUT STANDARDNESS before any script ran. It rejects a P2SH input whose redeem script is "
+                "not a standard template on every network but testnet, and an HTLC is not one -- so this chain can "
+                "fund an HTLC through the real client and cannot relay a transaction out of it"
+            )
         return "neither branch was shown to spend; read the failures above before concluding anything"
 
     def cltv_verdict(self) -> str:
@@ -453,10 +504,27 @@ class ChainOutcome:
                 f"block (step 8c). The mempool refusal was '{self.refund_refusal_kind}' and is relay policy only, "
                 f"so a miner could include an early refund. {where}."
             )
+        return self._cltv_verdict_from_the_mempool(where)
+
+    def _cltv_verdict_from_the_mempool(self, where: str) -> str:
+        """cltv_verdict() when step 8c settled nothing: grade by WHICH LAYER refused 8b.
+
+        Extracted 2026-11-23 when the standardness branch took cltv_verdict() to seven
+        returns against PLR0911's six. The ceiling is not raised (rule 12): the four
+        branches below share one subject -- the mempool's refusal kind, with no block
+        asked -- and the three left above share another, a block that was or was not
+        mined.
+        """
         if self.refund_refusal_kind == REFUSAL_CONSENSUS:
             return (
                 "CHECKLOCKTIMEVERIFY refused the early refund with `mandatory-script-verify-flag-failed`, which is "
                 f"the script failing under the flags the chain applies. Step 8c was not run ({where})."
+            )
+        if refusal_proves_nothing_about_the_script(self.refund_refusal_kind):
+            return (
+                "CHECKLOCKTIMEVERIFY: NOT ESTABLISHED on this chain. The early refund was refused by INPUT "
+                "STANDARDNESS before any script ran, so the timelock was never asked -- this daemon's mempool "
+                f"rejects every HTLC spend that way off testnet. {where}."
             )
         if self.refund_refusal_kind == REFUSAL_POLICY:
             return (
@@ -611,13 +679,56 @@ def step_2_daemon(run: Run) -> bool:
     else:
         run.say(f"CHECKLOCKTIMEVERIFY becomes consensus-enforced at height {height} (a height, not a duration)")
         run.say(f"read from {source}")
+    # AFTER the network is established and BEFORE anything sends: on a stake-mined chain
+    # an adopted or restarted daemon starts on the wall clock, behind its own tip.
+    _clock_past_tip(run, "before any wallet send, because a daemon starts on the wall clock")
     return we_started_it
 
 
+def probe_spend_rpcs(run: Run) -> None:
+    """Ask the daemon two things the spend steps depend on, and record the answers.
+
+    BOTH WERE MEASURED ON GRIDCOIN 5.5.1.7 ON 2026-11-23, and both are ASKED rather than
+    keyed on the asset, because `help <method>` answers the question exactly:
+
+      gettxout        ABSENT on Gridcoin (`help gettxout` -> "help: unknown command").
+                      _assert_output_on_chain() asks it first on every other chain.
+      maxfeerate      Gridcoin's sendrawtransaction takes ONE argument: passing the
+                      second made it answer -32700 with its own usage text instead of
+                      looking at the transaction. Bitcoin Core 28.1 and Litecoin 0.21.4
+                      both document `maxfeerate` in that help text.
+
+    Printed either way, so a pasted run shows which route the later steps took.
+    """
+    node = run.node(wallet="")
+    run.facts.has_gettxout = daemons.method_exists(node, "gettxout")
+    try:
+        help_text = str(node.call("help", "sendrawtransaction"))
+    except RPCError as exc:
+        help_text = ""
+        run.say(f"`help sendrawtransaction` failed ({exc}); assuming it takes ONE argument, the safe reading")
+    run.facts.sendraw_takes_maxfeerate = "maxfeerate" in help_text.lower()
+    run.say(
+        f"spend RPCs: gettxout={'present' if run.facts.has_gettxout else 'ABSENT -- outputs are read off the funding transaction instead'}; "
+        f"sendrawtransaction maxfeerate={'accepted' if run.facts.sendraw_takes_maxfeerate else 'NOT accepted -- broadcasts pass the hex alone'}"
+    )
+
+
 def step_3_wallet(run: Run) -> dict:
-    run.step(3, f"create or load the wallet {run.wallet!r}")
-    daemons.ensure_wallet(run.console, run.config, run.wallet)
+    if not run.wallet:
+        # ONE WALLET, BUILT IN, AND NO MULTIWALLET RPCs AT ALL. Measured 2026-11-23 on
+        # Gridcoin regtest: listwallets, loadwallet and createwallet are all "help: unknown
+        # command". The daemon's own wallet is the wallet, and on regtest it lives in a
+        # MOCKED in-memory Berkeley DB environment (src/init.cpp, bitdb.MakeMock()), so
+        # there is nothing on disk to create or load. The genesis premine -- 10 UTXOs,
+        # 1,000,000 GRC on a fresh chain -- is in it from the first start.
+        run.step(3, "use the daemon's built-in wallet (this chain has no multiwallet RPCs)")
+        run.say("no wallet to create or load: listwallets/loadwallet/createwallet do not exist on this daemon")
+    else:
+        run.step(3, f"create or load the wallet {run.wallet!r}")
+        daemons.ensure_wallet(run.console, run.config, run.wallet)
     capabilities = daemons.probe_capabilities(run.console, run.config, wallet=run.wallet)
+    probe_spend_rpcs(run)
     if capabilities.get("descriptor_wallet") is True:
         run.say(
             "this is a DESCRIPTOR wallet. importaddress and importprivkey exist but REFUSE on one -- `code=-4, "
@@ -661,8 +772,44 @@ class Mined:
         return self.hashes[0] if self.hashes else None
 
 
+def _tip_time(node) -> int:
+    """The timestamp in the tip block's header -- a unix time, an interface value."""
+    return int(node.call("getblock", node.call("getbestblockhash"))["time"])
+
+
+def _clock_past_tip(run: Run, why: str) -> None:
+    """Put a stake-mined chain's mock clock just past its tip. A no-op on every other chain.
+
+    WHY EVERY WALLET SEND NEEDS THIS, measured 2026-11-23. Stake mining (below) moves the
+    mock clock an hour per ten blocks, so the tip's timestamp runs far ahead of the wall
+    clock: this loop moves it 360s per block, about 100 hours per 1000 blocks, and the node
+    measured on 2026-11-23 stood 402 hours ahead after 2157 blocks mined while finding which
+    clock steps work, some of them four hours a batch. A daemon that restarts, or that this harness
+    adopts, comes up on the WALL clock, and then every UTXO the wallet holds looks newer
+    than "now": `sendtoaddress` fails with "CreateTransaction: Failed to select coins",
+    with or without -devbuild=override. The same send succeeded the moment the clock was
+    put past the tip.
+
+    MONOTONIC BY CONSTRUCTION: max(what this run last set, the tip's own time) plus a
+    margin, so nothing this function does can put a transaction's nTime before an input
+    the harness already created.
+    """
+    if not run.config.mines_by_stake:
+        return
+    node = run.node(wallet="")
+    tip_time = _tip_time(node)
+    run.facts.mock_clock = max(run.facts.mock_clock, tip_time) + CLOCK_MARGIN_SECONDS
+    node.call("setmocktime", run.facts.mock_clock)
+    run.say(
+        f"mock clock set to {run.facts.mock_clock}, {CLOCK_MARGIN_SECONDS}s past the tip's timestamp {tip_time} "
+        f"({why}) -- a unix time passed to setmocktime, not a reported duration"
+    )
+
+
 def _mine(run: Run, blocks: int) -> Mined:
     """Mine `blocks` blocks in batches, printing progress. Returns tip and hashes."""
+    if run.config.mines_by_stake:
+        return _mine_by_stake(run, blocks)
     node = run.node()
     address = node.call("getnewaddress", "regtest-harness-mining")
     started = time.monotonic()
@@ -683,9 +830,57 @@ def _mine(run: Run, blocks: int) -> Mined:
     return Mined(height=int(node.call("getblockcount")), hashes=hashes)
 
 
+def _mine_by_stake(run: Run, blocks: int) -> Mined:
+    """_mine() for a proof-of-stake regtest: advance the mock clock, mine ten, repeat.
+
+    See STAKE_BATCH_BLOCKS for the measurement that fixes both numbers. A Gridcoin regtest
+    chain can only produce a block when some UTXO has matured enough stake weight, and
+    weight accrues with TIME, so the clock is what mining spends. generatetoaddress alone
+    -- the BTC and LTC route above -- stalls at about block 25 and then fails, which is
+    why this is a separate loop and not a smaller batch on that one.
+
+    Progress is printed every MINE_BATCH_BLOCKS blocks and at the end, not per batch:
+    the production GRC locktime is tip+1920, which is 192 batches, and 192 lines say
+    less than 14 (rule 14 is about silence, not volume).
+
+    THE CLOCK IS LEFT PAST THE NEW TIP on the way out (_clock_past_tip), so the step that
+    called this can send from the wallet immediately -- which every caller does.
+    """
+    node = run.node(wallet="")
+    address = node.call("getnewaddress", "regtest-harness-mining")
+    started = time.monotonic()
+    hashes: list[str] = []
+    mined = 0
+    next_report = MINE_BATCH_BLOCKS
+    while mined < blocks:
+        batch = min(STAKE_BATCH_BLOCKS, blocks - mined)
+        run.facts.mock_clock = max(run.facts.mock_clock, _tip_time(node)) + STAKE_CLOCK_STEP_SECONDS
+        node.call("setmocktime", run.facts.mock_clock)
+        try:
+            produced = node.call("generatetoaddress", batch, address) or []
+        except RPCError as exc:
+            raise _mining_failure(run, exc, mined, blocks) from exc
+        hashes.extend(produced)
+        mined += batch
+        if mined >= next_report or mined == blocks:
+            next_report += MINE_BATCH_BLOCKS
+            run.say(
+                f"mined {mined}/{blocks} blocks BY STAKE, height={int(node.call('getblockcount'))} (a height, not a "
+                f"duration), {format_duration(time.monotonic() - started)} elapsed, mock clock {run.facts.mock_clock}"
+            )
+    height = int(node.call("getblockcount"))
+    _clock_past_tip(run, "after mining, so the next wallet send can select coins")
+    return Mined(height=height, hashes=hashes)
+
+
 # The daemon's wording when a block it assembled for itself fails validation
 # with a transaction that has no inputs. See _mining_failure().
 _VIN_EMPTY_MARKERS = ("bad-txns-vin-empty", "testblockvalidity")
+
+# Gridcoin's wording when its stake miner cannot produce a block, measured 2026-11-23:
+# "Failed to mine block 1 of 1: CreateCoinStake: no stake found (need a mature UTXO with
+# sufficient weight)". Lowercased, like the markers above.
+_NO_STAKE_MARKERS = ("createcoinstake", "no stake found")
 
 
 def _mining_failure(run: Run, exc: RPCError, mined_so_far: int, requested: int) -> RegtestSetupError:
@@ -710,6 +905,16 @@ def _mining_failure(run: Run, exc: RPCError, mined_so_far: int, requested: int) 
         f"{run.asset}: mining failed after {mined_so_far} of {requested} blocks "
         f"(a count of blocks, not a duration): {exc}"
     )
+    if any(marker in lowered for marker in _NO_STAKE_MARKERS):
+        return RegtestSetupError(
+            f"{detail}. THE STAKE MINER FOUND NO MATURE STAKE. This chain mines by proof of stake, and the harness "
+            f"moves the mock clock {STAKE_CLOCK_STEP_SECONDS}s before every {STAKE_BATCH_BLOCKS}-block batch "
+            f"because that is what was measured to work on 2026-11-23 (500 of 500 blocks, 0 failed batches). "
+            "Seeing this means that measurement no longer holds for this daemon -- a larger batch or a smaller "
+            "clock step reproduces it -- or the daemon was started WITHOUT -devbuild=override, which disables "
+            "staking on a development build outside testnet (src/init.cpp). Step 2's `starting` line shows the "
+            "arguments it was given; an ADOPTED daemon's are not known to this harness."
+        )
     if not any(marker in lowered for marker in _VIN_EMPTY_MARKERS):
         return RegtestSetupError(
             f"{detail}. This harness broadcasts nothing between mining batches, so a block the daemon assembled "
@@ -1097,6 +1302,9 @@ def _attempt_real_create_contract(run: Run, client, contract: Contract) -> Outpo
 
 def _assert_output_on_chain(run: Run, contract: Contract, outpoint: Outpoint, label: str) -> None:
     """gettxout: the P2SH output exists, unspent, with the expected script and value."""
+    if not run.facts.has_gettxout:
+        _assert_output_in_funding_tx(run, contract, outpoint, label)
+        return
     entry = run.node().call("gettxout", outpoint.txid, outpoint.vout)
     if not entry:
         run.check(f"[{label}] contract output on chain", None,
@@ -1122,6 +1330,48 @@ def _assert_output_on_chain(run: Run, contract: Contract, outpoint: Outpoint, la
         ">= 1",
         OK if int(entry.get("confirmations", 0)) >= 1 else FAIL,
     )
+
+
+def _assert_output_in_funding_tx(run: Run, contract: Contract, outpoint: Outpoint, label: str) -> None:
+    """_assert_output_on_chain() for a daemon with no `gettxout`: read the funding tx itself.
+
+    THE SAME THREE CHECKS, AND ONE THAT CANNOT BE MADE, said as such. The script, the value
+    and the confirmation count are all in the confirmed funding transaction, which
+    Gridcoin's `getrawtransaction <txid> true` returns with no -txindex (measured
+    2026-11-23). What it cannot say is UNSPENT -- that is the UTXO set, and `gettxout` is
+    the RPC that reads it. Every output asserted here was funded by this run and has not
+    yet been handed to a spender, so the missing check is not hiding a known risk; it is
+    printed anyway, because a check that was not made must not read like one that passed
+    (rule 14).
+    """
+    raw_tx = _verbose_tx(run.node(wallet=""), outpoint.txid)
+    outputs = raw_tx.get("vout", [])
+    entry = next((out for out in outputs if int(out.get("n", -1)) == outpoint.vout), None)
+    if entry is None:
+        run.check(f"[{label}] contract output on chain", None,
+                  f"an output at {outpoint.txid}:{outpoint.vout}", FAIL)
+        return
+    got_script = entry.get("scriptPubKey", {}).get("hex")
+    run.check(
+        f"[{label}] contract scriptPubKey (read from the funding tx: this daemon has no gettxout)",
+        got_script,
+        contract.p2sh_script.hex(),
+        OK if got_script == contract.p2sh_script.hex() else FAIL,
+    )
+    got_value = coins_to_satoshis(entry.get("value", 0))
+    run.check(
+        f"[{label}] contract value in satoshis",
+        got_value,
+        outpoint.value_satoshis,
+        OK if got_value == outpoint.value_satoshis else FAIL,
+    )
+    run.check(
+        f"[{label}] confirmations (a count, never a duration)",
+        raw_tx.get("confirmations"),
+        ">= 1",
+        OK if int(raw_tx.get("confirmations", 0)) >= 1 else FAIL,
+    )
+    run.say(f"[{label}] UNSPENT was NOT checked: that is the UTXO set, and this daemon has no gettxout to read it")
 
 
 def step_6_fund(run: Run, client, contract: Contract, outcome: ChainOutcome) -> tuple[Outpoint, Outpoint]:
@@ -1173,7 +1423,16 @@ def step_6_fund(run: Run, client, contract: Contract, outcome: ChainOutcome) -> 
 
 
 def _broadcast(run: Run, raw_hex: str) -> str:
-    """sendrawtransaction with the fee ceiling removed. See NO_FEE_LIMIT."""
+    """sendrawtransaction with the fee ceiling removed. See NO_FEE_LIMIT.
+
+    The ceiling argument is passed only where the daemon's own help text names it
+    (probe_spend_rpcs). Gridcoin's sendrawtransaction takes the hex alone and has no
+    node-side ceiling to remove -- passing the second argument there made it answer
+    -32700 with its usage text, which step 8 would have scored as a refusal of the
+    transaction when the transaction had never been looked at.
+    """
+    if not run.facts.sendraw_takes_maxfeerate:
+        return run.node().call("sendrawtransaction", raw_hex)
     return run.node().call("sendrawtransaction", raw_hex, NO_FEE_LIMIT)
 
 
@@ -1606,12 +1865,21 @@ def _control_redeem(run: Run, contract: Contract, outpoint: Outpoint, outcome: C
         fee_satoshis=coins_to_satoshis(CONTROL_FEE),
         locktime=0,
         secret=contract.secret,
+        ntime=_control_ntime(run),
     )
     run.say(f"control scriptSig = {describe_script_sig(script_sig)}")
     try:
         txid = _broadcast(run, raw_hex)
     except RPCError as exc:
-        outcome.control_redeem = run.check("control hashlock spend", f"RPCError: {exc}", "a broadcast txid", FAIL)
+        kind, text = _refusal_detail(run, exc, raw_hex)
+        outcome.control_redeem = run.check("control hashlock spend", text, "a broadcast txid", FAIL)
+        if refusal_proves_nothing_about_the_script(kind):
+            # NOT "points at the redeem SCRIPT", which is what the sentence below says and
+            # what would be false here: nothing executed the script at all.
+            run.say(f"the control was {NONSTANDARD_EXPLANATION}.")
+            outcome.notes.append(f"every hashlock spend was refused as {REFUSAL_NONSTANDARD} -- the script never ran")
+            outcome.refused_before_any_script = True
+            return
         run.say(
             "the control could not spend the hashlock branch either. That points at the redeem SCRIPT rather than "
             "at redeem_contract(), and is a different bug with a different fix."
@@ -1786,7 +2054,18 @@ def _attempt_real_refund(run: Run, client, contract: Contract, outpoint: Outpoin
     return txid, ""
 
 
-def _build_refund(contract: Contract, outpoint: Outpoint, nlocktime: int) -> tuple[str, bytes]:
+def _control_ntime(run: Run) -> int | None:
+    """The nTime a control spend carries: the run's mock clock on Gridcoin, else None.
+
+    The mock clock is the node's own "now" (setmocktime), it only moves forward, and
+    every funding transaction this run made was stamped by the wallet with an earlier
+    value of it -- so a control spend stamped with it cannot precede its input, which is
+    the rule Gridcoin's ConnectInputs enforces on nTime.
+    """
+    return run.facts.mock_clock if run.config.tx_carries_ntime else None
+
+
+def _build_refund(run: Run, contract: Contract, outpoint: Outpoint, nlocktime: int) -> tuple[str, bytes]:
     return build_branch_spend(
         outpoint=outpoint,
         redeem_script=contract.redeem_script,
@@ -1795,6 +2074,7 @@ def _build_refund(contract: Contract, outpoint: Outpoint, nlocktime: int) -> tup
         fee_satoshis=coins_to_satoshis(CONTROL_FEE),
         locktime=nlocktime,
         secret=None,
+        ntime=_control_ntime(run),
     )
 
 
@@ -1806,12 +2086,25 @@ def _build_refund(contract: Contract, outpoint: Outpoint, nlocktime: int) -> tup
 REFUSAL_CONSENSUS = "consensus"
 REFUSAL_POLICY = "policy"
 REFUSAL_NON_FINAL = "non-final"
+# REFUSED BY INPUT STANDARDNESS, BEFORE ANY SCRIPT RAN, and therefore evidence about
+# NOTHING in the script -- not the hashlock, not the timelock. Added 2026-11-23, when
+# the first Gridcoin regtest run refused all seven of its spends this way and step 8
+# scored two of them OK as "the early refund is refused". They were refused; CLTV was
+# never asked. Gridcoin's AcceptToMemoryPool (src/validation.cpp:2254 at 5.5.1.7, :2362
+# at the 5.5.3.0 release) rejects a P2SH input whose REDEEM SCRIPT is not a standard
+# template, `&& !OnTestnet()` -- so on regtest and mainnet alike -- and an HTLC's
+# OP_IF/OP_ELSE is no template. Bitcoin Core dropped that rule in 0.10; Gridcoin kept it.
+REFUSAL_NONSTANDARD = "nonstandard-inputs"
 REFUSAL_OTHER = "other"
 
 # Checked in this order. `non-mandatory-script-verify-flag` must be tested
 # first: it contains the word "mandatory", and scoring a policy refusal as a
-# consensus one is exactly the overclaim this step exists to avoid.
+# consensus one is exactly the overclaim this step exists to avoid. The
+# standardness markers come before both for the same reason in the other
+# direction: a refusal that never reached a script must not be read as a
+# script's verdict.
 _REFUSAL_MARKERS = (
+    (REFUSAL_NONSTANDARD, ("bad-txns-nonstandard-inputs", "nonstandard transaction input")),
     (REFUSAL_POLICY, ("non-mandatory-script-verify-flag",)),
     (REFUSAL_CONSENSUS, ("mandatory-script-verify-flag-failed",)),
     (REFUSAL_NON_FINAL, ("non-final", "non-bip68-final")),
@@ -1819,7 +2112,7 @@ _REFUSAL_MARKERS = (
 
 
 def classify_refusal(message: str) -> str:
-    """Which layer said no: consensus, relay policy, finality, or something else."""
+    """Which layer said no: standardness, consensus, relay policy, finality, or something else."""
     lowered = message.lower()
     for kind, markers in _REFUSAL_MARKERS:
         if any(marker in lowered for marker in markers):
@@ -1827,16 +2120,81 @@ def classify_refusal(message: str) -> str:
     return REFUSAL_OTHER
 
 
+def daemon_reject_reason(run: Run, raw_hex: str) -> str:
+    """The daemon's own reason for refusing `raw_hex`, via testmempoolaccept, or "".
+
+    WHY THIS EXISTS: Gridcoin's sendrawtransaction answers `-22 TX rejected` for EVERY
+    refusal -- standardness, finality, a failed script -- so the message carries none of
+    the words classify_refusal() reads. Its testmempoolaccept reports the reason
+    ("best-effort", in its own help text, measured 2026-11-23), and asking it costs one
+    round trip on a transaction that has already been refused. The answer is quoted
+    verbatim beside the refusal, so a reader sees the daemon's words and not a guess.
+
+    "" WHEN IT CANNOT SAY -- no such method, a failed call, or no reason in the answer --
+    which classify_refusal() then grades on the broadcast message alone, as before. It
+    never manufactures a reason (rule 17).
+    """
+    node = run.node(wallet="")
+    if not daemons.method_exists(node, "testmempoolaccept"):
+        return ""
+    try:
+        answer = node.call("testmempoolaccept", [raw_hex])
+    except RPCError as exc:
+        run.say(f"testmempoolaccept could not say why ({exc}); the refusal is graded on the broadcast message alone")
+        return ""
+    entry = answer[0] if isinstance(answer, list) and answer else {}
+    return str(entry.get("reject-reason", "")) if isinstance(entry, dict) else ""
+
+
+def _refusal_detail(run: Run, exc: Exception, raw_hex: str) -> tuple[str, str]:
+    """(kind, the text to print) for a refused broadcast of `raw_hex`. One owner.
+
+    The broadcast message first, the daemon's reason after it, both verbatim, and the
+    kind is graded over both -- so a Core daemon whose message already names the flag
+    set grades exactly as it did before this existed.
+    """
+    reason = daemon_reject_reason(run, raw_hex) if classify_refusal(str(exc)) == REFUSAL_OTHER else ""
+    text = f"RPCError: {exc}" + (f" -- testmempoolaccept reject-reason: {reason}" if reason else "")
+    return classify_refusal(f"{exc} {reason}"), text
+
+
+def refusal_proves_nothing_about_the_script(kind: str) -> bool:
+    """A refusal that came before any script ran. Such a refusal is never a step-8 pass.
+
+    One decision, at the bottom (rule 10): the two step-8 sites and the verdict all ask
+    it, rather than each comparing against the constant.
+    """
+    return kind == REFUSAL_NONSTANDARD
+
+
+NONSTANDARD_EXPLANATION = (
+    "refused by INPUT STANDARDNESS before any script ran: the daemon's mempool rejects a P2SH input whose "
+    "redeem script is not a standard template, and an HTLC is not one. On Gridcoin that rule applies on every "
+    "network but testnet (src/validation.cpp `!AreInputsStandard(...) && !OnTestnet()`, unchanged in the "
+    "5.5.3.0 release), so this says NOTHING about the hashlock or the timelock -- neither was asked"
+)
+
+
 def _attempt_refund_expecting_refusal(run: Run, contract: Contract, outpoint: Outpoint, nlocktime: int, label: str) -> tuple[str, str]:
-    """Broadcast a refund that must be refused. Returns (outcome, refusal kind)."""
-    raw_hex, script_sig = _build_refund(contract, outpoint, nlocktime)
+    """Broadcast a refund that must be refused. Returns (outcome, refusal kind).
+
+    A NONSTANDARD refusal is scored FAIL, not OK, and that is the 2026-11-23 change. The
+    node did refuse -- but this step's claim is that the TIMELOCK refused, and a refusal
+    from before the script ran cannot support it. Scoring it OK put two passes into the
+    first Gridcoin run for a locktime nothing had checked.
+    """
+    raw_hex, script_sig = _build_refund(run, contract, outpoint, nlocktime)
     run.say(f"{label} -- nLockTime={nlocktime}, script locktime={contract.locktime} (both heights)")
     run.say(f"{label} scriptSig = {describe_script_sig(script_sig)}")
     try:
         txid = _broadcast(run, raw_hex)
     except RPCError as exc:
-        kind = classify_refusal(str(exc))
-        return run.check(f"{label} is REFUSED", f"[{kind}] RPCError: {exc}", "the node to refuse it", OK), kind
+        kind, text = _refusal_detail(run, exc, raw_hex)
+        if refusal_proves_nothing_about_the_script(kind):
+            run.say(f"{label}: {NONSTANDARD_EXPLANATION}")
+            return run.check(f"{label} is REFUSED BY THE SCRIPT", f"[{kind}] {text}",
+                             "a refusal from the script, not from standardness", FAIL), kind
+        return run.check(f"{label} is REFUSED", f"[{kind}] {text}", "the node to refuse it", OK), kind
     return (
         run.check(f"{label} is REFUSED", f"the node ACCEPTED it: txid={txid}", "the node to refuse it", FAIL),
         REFUSAL_OTHER,
@@ -1871,7 +2229,7 @@ def _attempt_refund_into_a_block(run: Run, contract: Contract, outpoint: Outpoin
             "the daemon to refuse to build the block",
             SKIP,
         )
-    raw_hex, _ = _build_refund(contract, outpoint, nlocktime)
+    raw_hex, _ = _build_refund(run, contract, outpoint, nlocktime)
     address = node.call("getnewaddress", "regtest-harness-mining")
     run.say(
         "8c: asking the daemon to MINE this same early refund into a block. The mempool's wording says which flag "
@@ -1957,11 +2315,20 @@ def step_8_refund_before_expiry(run: Run, client, contract: Contract, outpoint: 
     real_txid, real_failure = _attempt_real_refund(run, client, contract, outpoint, height)
     if real_txid is None:
         refusal_kind = classify_refusal(real_failure)
+        # A STANDARDNESS REFUSAL HERE IS A FAIL, the same as on the control path. Found by
+        # review on 2026-11-23: this branch scored every refusal OK, and only Gridcoin's
+        # message being the bare `TX rejected` -- which grades OTHER and falls through to
+        # the control below -- kept the first GRC run from printing an OK for a timelock
+        # that never ran. A daemon whose message NAMES the reason would have skipped the
+        # fallback and kept that OK.
+        if refusal_proves_nothing_about_the_script(refusal_kind):
+            outcome.refused_before_any_script = True
+            run.say(f"{label_8b} [REAL refund_contract()]: {NONSTANDARD_EXPLANATION}")
         second = run.check(
             f"{label_8b} [REAL refund_contract()] is REFUSED",
             f"[{refusal_kind}] {real_failure}",
             "the node to refuse it",
-            OK,
+            FAIL if refusal_proves_nothing_about_the_script(refusal_kind) else OK,
         )
     else:
         refusal_kind = REFUSAL_OTHER
@@ -1981,6 +2348,22 @@ def step_8_refund_before_expiry(run: Run, client, contract: Contract, outpoint: 
         second, refusal_kind = _attempt_refund_expecting_refusal(
             run, contract, outpoint, height, f"{label_8b} [control]"
         )
+        if refusal_proves_nothing_about_the_script(refusal_kind):
+            outcome.refused_before_any_script = True
+            # THE REAL CLIENT'S OK ABOVE IS WITHDRAWN, and the reason is deterministic
+            # rather than a guess. Input standardness reads only the prevout's
+            # scriptPubKey and the LAST push of the scriptSig -- the redeem script -- and
+            # both are byte-identical between the real refund and the control: same
+            # outpoint, same contract. So the control's standardness refusal is the real
+            # one's too, and crediting it to the timelock is the overclaim this step
+            # exists to refuse.
+            outcome.real_refund_before_expiry_refused = run.check(
+                f"{label_8b} [REAL refund_contract()] was refused BY THE SCRIPT",
+                "no: the identical-input control was refused for standardness, so the real client's generic "
+                "refusal above cannot be credited to the timelock",
+                "a refusal from the script",
+                FAIL,
+            )
     outcome.refund_refusal_kind = refusal_kind
     _report_refusal_strength(run, refusal_kind)
 
@@ -2008,6 +2391,9 @@ def _report_refusal_strength(run: Run, kind: str) -> None:
         return
     if kind == REFUSAL_NON_FINAL:
         run.say("8b was refused as non-final, which is the 8a condition rather than the CLTV one -- read the nLockTime above.")
+        return
+    if refusal_proves_nothing_about_the_script(kind):
+        run.say(f"8b was {NONSTANDARD_EXPLANATION}.")
         return
     run.say(f"8b's refusal did not match any known shape ({kind}); read the message above before concluding anything.")
 
@@ -2059,14 +2445,17 @@ def step_9_refund_after_expiry(run: Run, client, contract: Contract, outpoint: O
         "the REAL refund_contract() did not spend it, so the control spender runs below. A control-only refund says "
         "the SCRIPT's timelock branch is spendable and says NOTHING good about the code that is supposed to spend it."
     )
-    raw_hex, script_sig = _build_refund(contract, outpoint, contract.locktime)
+    raw_hex, script_sig = _build_refund(run, contract, outpoint, contract.locktime)
     run.say(f"9b control refund scriptSig = {describe_script_sig(script_sig)}")
     try:
         control_txid = _broadcast(run, raw_hex)
     except RPCError as exc:
-        outcome.refund_after_expiry = run.check(
-            "9b control refund after expiry", f"RPCError: {exc}", "a broadcast txid", FAIL
-        )
+        kind, text = _refusal_detail(run, exc, raw_hex)
+        outcome.refund_after_expiry = run.check("9b control refund after expiry", text, "a broadcast txid", FAIL)
+        if refusal_proves_nothing_about_the_script(kind):
+            run.say(f"9b was {NONSTANDARD_EXPLANATION}.")
+            outcome.notes.append(f"every refund was refused as {REFUSAL_NONSTANDARD} -- the script never ran")
+            outcome.refused_before_any_script = True
         return
     outcome.refund_after_expiry = run.check(
         "9b control refund after expiry", f"txid={control_txid}", "a broadcast txid", OK

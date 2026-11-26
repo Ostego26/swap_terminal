@@ -194,9 +194,26 @@ keeping this tree's shape is written at the site, in
 
 ## What is still not established
 
-- **No HTLC has been funded or spent on a Gridcoin regtest chain.** Everything above is the
-  chain and the daemon, not a swap. `sendtoaddress` is blocked by the devbuild cripple, so a
-  real GRC regtest HTLC run needs `-devbuild=override`, which has not been exercised here.
+- ~~**No HTLC has been funded or spent on a Gridcoin regtest chain.**~~ **FUNDED, 2026-11-23;
+  NOT SPENT, AND IT CANNOT BE.** `regtest_htlc_verify.py --chain grc --wipe` funded two contracts
+  through the REAL `GRCClient.create_contract()`. The sentence above said `sendtoaddress` needs
+  `-devbuild=override`, and that was HALF the cause: measured on a native build of the same commit,
+  the refusal was two stacked conditions, and the override fixes only the second --
+
+      clock behind the tip, any flags    CreateTransaction: Failed to select coins
+      clock past the tip, no override    The transaction was rejected   (the devbuild cripple)
+      clock past the tip, override       accepted, 1 confirmation
+
+  The first is the mock clock: stake mining runs the tip hundreds of hours ahead of the wall
+  clock, a restarted daemon comes up on the wall clock, and every UTXO then looks newer than
+  "now". The harness puts the clock past the tip before every send. `-staking=0` is passed too,
+  because the override also uncripples the background staker, which minted 5 blocks the harness
+  never asked for in the middle of a locktime test.
+
+  AND THE SPEND IS REFUSED BY POLICY BEFORE ANY SCRIPT RUNS: `bad-txns-nonstandard-inputs`, on
+  7 of 7 attempts (returned for 3, accounted for by the daemon's log for all 7). Gridcoin's mempool rejects a P2SH input whose redeem script is not a standard
+  template on every network but testnet -- including, by the 5.5.3.0 release source, MAINNET.
+  docs/branch_coverage.md §5 gap d carries that, and its grade.
 - ~~**The replacement Dockerfile build stage has not been built as an image**, only natively.~~
   **IT HAS, later the same day, on the operator's host: all 16 steps and
   `Successfully tagged swap-terminal/grc-desk:local`.** The run before it failed at exactly
@@ -243,6 +260,8 @@ keeping this tree's shape is written at the site, in
 - **Nothing was measured about 5.5.1.0**, the version this tree's own command table describes.
   It has no regtest at all, so none of this page applies to it, and which Gridcoin a GRC leg is
   pointed at is a decision rather than a measurement.
-- **The `setmocktime` mining loop has not been run through the harness**, only directly. The
-  figure that matters -- 1921 blocks in 6.3µfn (7.6s) -- is a floor for what the harness could
-  achieve, not a measurement of the harness achieving it.
+- ~~**The `setmocktime` mining loop has not been run through the harness**, only directly.~~ **IT HAS, 2026-11-23.** regtest/steps._mine_by_stake() mined to the production initiator locktime (tip+1920) and stopped on it exactly -- step 8 asked for 2020 and read 2020, step 9 asked for 2021 and read 2021 -- in 32.9µfn (39.8s). Slower than the 6.3µfn (7.6s) floor below because the measured safe batch is 10 blocks per +3600s, not the larger batches that floor used, and larger ones failed partway on 68 of 68 attempts.
+  The original bullet, kept for the drift (rule 1):
+  **The `setmocktime` mining loop has not been run through the harness**, only directly. The
+    figure that matters -- 1921 blocks in 6.3µfn (7.6s) -- is a floor for what the harness could
+    achieve, not a measurement of the harness achieving it.

@@ -20,13 +20,21 @@ branch that does not run -- a real fact, and not the fact anybody needed. The re
 of a Gridcoin HTLC, the one an operator needs when a counterparty vanishes, had never been
 executed at all.
 
-WHY regtest_htlc_verify.py CANNOT DO THIS, measured rather than assumed. Its `--chain` offers
-`btc`, `ltc`, `both`. Adding `grc` would not help: that harness MINES to the locktime, and
+WHY regtest_htlc_verify.py CANNOT DO THIS -- AND WHAT CHANGED, 2026-11-23. This paragraph said
+its `--chain` offers `btc`, `ltc`, `both`, and that adding `grc` would not help, because that
+harness MINES to the locktime and
 
     contract_locktime("GRC", ROLE_INITIATOR, tip) == tip + 1920
 
-is 1920 blocks at Gridcoin's 90s target -- **48 hours** of real waiting, on a chain with no
-regtest mode and no `generateblock`, `generatetoaddress` or `submitblock` to shorten it.
+is 1920 blocks at Gridcoin's 90s target -- **48 hours** of real waiting, "on a chain with no
+regtest mode and no `generateblock`, `generatetoaddress` or `submitblock` to shorten it."
+
+THAT PREMISE WAS FALSE AND THE CONCLUSION STILL HOLDS, for a different reason. Gridcoin 5.5.1.7
+has a full regtest with `generatetoaddress`, and `--chain grc` now mines tip+1920 by stake in
+about 33µfn (40s). But on regtest -- as on mainnet, by the release source -- Gridcoin's mempool
+refuses every HTLC spend as `bad-txns-nonstandard-inputs` before any script runs, and only
+TESTNET waives that (docs/branch_coverage.md §5 gap d). So the refund branch can still only be
+exercised on testnet, which is what this file does.
 
 SO THIS USES A SHORT TEST LOCKTIME, AND SAYS SO. `LOCKTIME_BLOCKS_AHEAD` below is six blocks,
 not the production value. That is honest because of what is being measured: whether the

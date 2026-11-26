@@ -1061,7 +1061,10 @@ def test_a_testnet_port_prefers_the_operators_own_conf():
 def test_a_chain_the_harness_does_not_run_gets_one_candidate():
     """GRC has no CHAIN_DEFAULTS entry, and that is correct rather than a gap.
 
-    The regtest harness runs Bitcoin and Litecoin. Gridcoin's conventional conf lives in
+    CHAIN_DEFAULTS covers Bitcoin and Litecoin; the harness's Gridcoin row lives in the
+    separate regtest/daemons.GRC_REGTEST_DEFAULTS since 2026-11-23, precisely so that it
+    does not become a credential candidate here. (This said "The regtest harness runs
+    Bitcoin and Litecoin" until then.) Gridcoin's conventional conf lives in
     ~/.GridcoinResearch, which belongs to whichever wallet runs on the DEFAULT datadir --
     typically the mainnet staking one -- which is why chains/daemon_conf.
     CONF_FALLBACK_NETWORK excludes it entirely and why this tool needs a separate flag to
@@ -1470,12 +1473,20 @@ def test_a_missing_conf_is_a_reported_result_not_a_crash(no_harness_conf, tmp_pa
     assert "BTC_RPC_USER" in printed.split("WOULD ASK FOR", 1)[1]
 
 
-def test_an_rpcauth_only_conf_says_a_hash_is_not_a_password(tmp_path, env_file, monkeypatch, capsys):
+def test_an_rpcauth_only_conf_says_a_hash_is_not_a_password(tmp_path, env_file, monkeypatch, capsys, no_harness_conf):
     """rpcauth= is a salted hash and cannot be used as a password. Saying so is the fix.
 
     chains/base.py authenticates with auth=(user, password) and has no rpcauth path, so a
     conf using it has no usable credential here -- and an operator told only "no
     rpcpassword" would go looking for a line that is deliberately absent.
+
+    `no_harness_conf` WAS MISSING HERE AND FROM THE TEST BELOW until 2026-11-23, and that
+    made both pass or fail by HOST. conf_candidates() tries the harness's own
+    ~/regtest/btc/bitcoin.conf BEFORE the DAEMON_CONFS path this test patches, so on any
+    machine where the regtest harness has ever run -- this one since 2026-11-22 08:42 --
+    the tool read that real file instead of the fixture and printed nothing about rpcauth.
+    Green where ~/regtest is absent, red where it exists: the fixture exists for exactly
+    this, and every other conf-reading test in this file already took it.
     """
     conf = tmp_path / "bitcoin.conf"
     conf.write_text("rpcauth=someuser:deadbeef$cafebabe\n")
@@ -1515,7 +1526,7 @@ def test_a_value_read_from_a_conf_is_not_ALSO_asked_for(litecoin_conf, env_file,
     assert "LTC_RPC_USER" in env_file.read_text()
 
 
-def test_the_conf_reader_uses_the_parser_that_already_exists(tmp_path, env_file, monkeypatch, capsys):
+def test_the_conf_reader_uses_the_parser_that_already_exists(tmp_path, env_file, monkeypatch, capsys, no_harness_conf):
     """Rule 8: chains/daemon_conf.parse_daemon_conf() owns the two things this gets wrong.
 
     A `#` ONLY STARTS A COMMENT AT THE START OF A LINE, which that module records against a

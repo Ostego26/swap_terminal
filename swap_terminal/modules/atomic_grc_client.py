@@ -77,7 +77,7 @@ else took is cited, not claimed).
       GRC -> XRP  23:02  GRC HTLC    9283c4c5d0df8c5b...  claim b6f7f57dc789bfb5...
 
   refund_contract(), on Gridcoin TESTNET, through THIS class -- grc_htlc_verify.py
-  step 8, `OK=11 FAIL=0` on 2026-09-29, recorded in docs/branch_coverage.md:49-50:
+  step 8, `OK=11 FAIL=0` on 2026-09-29, recorded in docs/branch_coverage.md:51-52:
   refund `ee9dc216bf055b22...` spent the contract at nLockTime 3296548, and an
   earlier hand-built refund `9495082ef304c4ca...` spent one on 2026-09-28.
 
@@ -388,7 +388,7 @@ never been exercised by anything but the regtest harness's own spender. No
 contract built with the corrected locktime encoding has been refunded on any
 chain, which is the proof CLAUDE.md asks for and it is still outstanding."
 
-ON THIS CHAIN IT IS NOT OUTSTANDING. docs/branch_coverage.md:49-50 grades "CLTV
+ON THIS CHAIN IT IS NOT OUTSTANDING. docs/branch_coverage.md:51-52 grades "CLTV
 executes on GRC" as ENFORCED 2026-09-29 and "CLTV allows a refund AT the
 locktime, GRC" as SPENT, both from grc_htlc_verify.py's `OK=11 FAIL=0` run
 against the operator's Gridcoin testnet daemon, and its step 8 drives THIS
@@ -778,7 +778,7 @@ class GRCClient:
     #               measured it on the operator's Gridcoin testnet daemon, OK=11
     #               FAIL=0, and the opcode RUNS AND ENFORCES. The module header
     #               carries the three-step table and the daemon's own log line;
-    #               docs/branch_coverage.md:49 carries the grade.
+    #               docs/branch_coverage.md:51 carries the grade.
     #
     # MEASURED 2026-10-11 BY WALKING THE AST of all three clients rather than by
     # grepping their prose, because prose is what was wrong: BTCClient,

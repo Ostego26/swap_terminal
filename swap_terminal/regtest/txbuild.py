@@ -194,12 +194,19 @@ def _serialize_input(outpoint: Outpoint, script_sig: bytes,
     )
 
 
-def serialize_transaction(
+#: Gridcoin's empty `vContracts`: a compact-size vector length of zero. See
+#: serialize_transaction() for where it goes and why it is not optional.
+EMPTY_GRIDCOIN_CONTRACTS = b"\x00"
+
+
+def serialize_transaction(  # noqa: PLR0913 -- checked: the five positional ones ARE the transaction's fields and were already here; `ntime` is keyword-only and selects the LAYOUT, which is a different question from any field's value. Bundling layout into a field would let a caller set an nTime on a Bitcoin transaction by accident.
     outpoint: Outpoint,
     script_sig: bytes,
     outputs: list[tuple[int, bytes]],
     locktime: int,
     sequence: int = SEQUENCE_NON_FINAL,
+    *,
+    ntime: int | None = None,
 ) -> bytes:
     """One-input, N-output legacy transaction. No witness, because P2SH-HTLC has none.
 
@@ -215,22 +222,44 @@ def serialize_transaction(
     two-argument `createrawtransaction` carries a FINAL sequence on every chain, so the check
     for it was comparing against bytes no daemon emits -- and passed, because the test's fake
     node was hardcoded the same way.
+
+    `ntime` SELECTS GRIDCOIN'S LAYOUT, added 2026-11-23 for the regtest GRC leg. Read off
+    Gridcoin's own source at the pinned commit (src/primitives/transaction.h,
+    CTransaction::Serialize) rather than remembered from Peercoin:
+
+        nVersion  nTime  vin  vout  nLockTime  vContracts      (when nVersion >= 2)
+
+    and confirmed against a transaction that Gridcoin regtest's own wallet built and
+    mined on 2026-11-23, whose raw bytes open `02000000` then a 4-byte time, and close
+    `00000000` (nLockTime 0) then `00`. That last byte is the EMPTY vContracts vector:
+    leave it off and the daemon reads past the end of the buffer, so it is part of the
+    layout and not padding. TX_VERSION is 2, which is the branch that writes vContracts
+    rather than the legacy hashBoinc string.
+
+    None means the Bitcoin layout, byte for byte what this function always produced, so
+    every existing caller and test is untouched.
     """
     body = struct.pack("<i", TX_VERSION)
+    if ntime is not None:
+        body += struct.pack("<I", ntime)
     body += varint(1) + _serialize_input(outpoint, script_sig, sequence)
     body += varint(len(outputs))
     for value_satoshis, script_pubkey in outputs:
         body += struct.pack("<q", value_satoshis) + varint(len(script_pubkey)) + script_pubkey
     body += struct.pack("<I", locktime)
+    if ntime is not None:
+        body += EMPTY_GRIDCOIN_CONTRACTS
     return body
 
 
-def legacy_sighash(
+def legacy_sighash(  # noqa: PLR0913 -- checked: same five fields as serialize_transaction, plus the keyword-only layout selector, for the same reason given there.
     outpoint: Outpoint,
     script_code: bytes,
     outputs: list[tuple[int, bytes]],
     locktime: int,
     sequence: int = SEQUENCE_NON_FINAL,
+    *,
+    ntime: int | None = None,
 ) -> bytes:
     """The SIGHASH_ALL digest for the single input, pre-segwit rules.
 
@@ -239,8 +268,14 @@ def legacy_sighash(
     the scriptPubKey instead produces a signature that verifies against nothing
     and fails as `Signature must be zero for failed CHECK(MULTI)SIG` or a bare
     script failure, with no hint about which of the two scripts was wrong.
+
+    ON GRIDCOIN THE nTime IS SIGNED. Its SignatureHash (src/script/interpreter.cpp)
+    copies the WHOLE transaction into a CMutableTransaction and serializes that, so
+    nTime and the vContracts byte are in the preimage exactly where they are in the
+    transaction. Signing the Bitcoin layout and broadcasting the Gridcoin one produces a
+    signature over bytes that were never sent.
     """
-    preimage = serialize_transaction(outpoint, script_code, outputs, locktime, sequence)
+    preimage = serialize_transaction(outpoint, script_code, outputs, locktime, sequence, ntime=ntime)
     preimage += struct.pack("<I", SIGHASH_ALL)
     return double_sha256(preimage)
 
@@ -282,6 +317,8 @@ def build_branch_spend(  # noqa: PLR0913, PLR0917 -- checked: these seven ARE th
     fee_satoshis: int,
     locktime: int,
     secret: bytes | None,
+    *,
+    ntime: int | None = None,
 ) -> tuple[str, bytes]:
     """Sign a spend of the contract output down one of its two branches.
 
@@ -302,6 +339,10 @@ def build_branch_spend(  # noqa: PLR0913, PLR0917 -- checked: these seven ARE th
         secret: the preimage for the redeem branch, None for the refund branch.
             Which branch is taken is decided by whether this is None, so there
             is exactly one place that decision lives.
+        ntime: Gridcoin's transaction timestamp, or None for the Bitcoin layout.
+            It must not precede the funding transaction's own nTime, and the
+            harness passes its mock clock, which only ever moves forward. See
+            serialize_transaction().
 
     Returns:
         (raw transaction hex, the scriptSig bytes) -- the scriptSig is returned
@@ -316,13 +357,13 @@ def build_branch_spend(  # noqa: PLR0913, PLR0917 -- checked: these seven ARE th
             "nothing would be left to send"
         )
     outputs = [(value_out, destination_script)]
-    digest = legacy_sighash(outpoint, redeem_script, outputs, locktime)
+    digest = legacy_sighash(outpoint, redeem_script, outputs, locktime, ntime=ntime)
     signature = _signature_for(key, digest)
     if secret is None:
         script_sig = refund_script_sig(signature, key, redeem_script)
     else:
         script_sig = redeem_script_sig(signature, key, secret, redeem_script)
-    raw = serialize_transaction(outpoint, script_sig, outputs, locktime)
+    raw = serialize_transaction(outpoint, script_sig, outputs, locktime, ntime=ntime)
     return raw.hex(), script_sig
 
 

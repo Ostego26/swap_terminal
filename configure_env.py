@@ -279,9 +279,12 @@ def conf_candidates(chain: str, port: int, overrides: Mapping[str, Path] | None 
     required argument for the same reason and says so in its header.
 
     THE HARNESS PATH COMES FROM CHAIN_DEFAULTS and is never spelled here, which is the
-    whole point of the function. GRC has no CHAIN_DEFAULTS entry -- the harness does not
-    run Gridcoin -- so it gets its conventional path and nothing else, and that is
-    correct rather than a gap.
+    whole point of the function. GRC has no CHAIN_DEFAULTS entry, so it gets its
+    conventional path and nothing else, and that is correct rather than a gap. This said
+    "the harness does not run Gridcoin" until 2026-11-23; it does now, from the separate
+    regtest/daemons.GRC_REGTEST_DEFAULTS, which this function deliberately does not read --
+    the harness's Gridcoin conf is a throwaway regtest one in a net subdirectory, never a
+    credential this tool should offer to copy.
 
     DEDUPED WITH ORDER PRESERVED, so a chain whose two tables agree is tried once and the
     output does not report looking in the same file twice (rule 14: output that

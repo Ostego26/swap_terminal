@@ -122,17 +122,23 @@ def _entry():
 
 
 def test_build_real_client_REFUSES_an_asset_it_has_no_client_for():
-    """THE DEFECT: this returned an LTCClient for GRC rather than refusing."""
+    """THE DEFECT: this returned an LTCClient for any non-BTC asset rather than refusing.
+
+    PINNED WITH DOGE SINCE 2026-11-23, when GRC got its own branch (tests/
+    test_grc_regtest_leg.py pins that one). The guard is the same; GRC simply stopped
+    being an asset it applies to, which is what the guard's own message told the person
+    adding Gridcoin to arrange.
+    """
     entry = _entry()
-    config = _config("GRC", UNUSED_DATADIR)
+    config = _config("DOGE", UNUSED_DATADIR)
 
     with pytest.raises(RegtestSetupError) as caught:
-        entry.build_real_client("GRC", config, "a_wallet")
+        entry.build_real_client("DOGE", config, "a_wallet")
 
     message = str(caught.value)
-    assert "no client for GRC" in message, message
+    assert "no client for DOGE" in message, message
     assert "LTCClient" in message, "the refusal must say what it USED to return"
-    assert "GRCClient" in message, "and where the right client lives"
+    assert "BTC, LTC and GRC" in message, "and which chains it does drive"
 
 
 def test_build_real_client_REFUSES_before_setting_a_litecoin_fee_address(monkeypatch):
@@ -146,7 +152,7 @@ def test_build_real_client_REFUSES_before_setting_a_litecoin_fee_address(monkeyp
     monkeypatch.delenv("PLATFORM_FEE_LTC_ADDRESS", raising=False)
 
     with pytest.raises(RegtestSetupError):
-        entry.build_real_client("GRC", _config("GRC", UNUSED_DATADIR), "w")
+        entry.build_real_client("DOGE", _config("DOGE", UNUSED_DATADIR), "w")
 
     assert "PLATFORM_FEE_LTC_ADDRESS" not in os.environ, (
         "the refusal happened after the environment was mutated")
@@ -169,14 +175,18 @@ def test_build_real_client_still_builds_BTC_and_LTC(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_resolve_chain_config_REFUSES_an_asset_the_table_does_not_carry():
-    """THE DEFECT: `KeyError: 'GRC'` from the middle of step 1, with no remedy."""
+    """THE DEFECT: `KeyError: 'GRC'` from the middle of step 1, with no remedy.
+
+    PINNED WITH DOGE SINCE 2026-11-23: GRC resolves now, from GRC_REGTEST_DEFAULTS, and
+    the refusal that said it never could is quoted in resolve_chain_config()'s comment.
+    """
     with pytest.raises(RegtestSetupError) as caught:
-        daemons.resolve_chain_config("GRC")
+        daemons.resolve_chain_config("DOGE")
 
     message = str(caught.value)
-    assert "CHAIN_DEFAULTS has no entry for 'GRC'" in message, message
-    assert "['BTC', 'LTC']" in message, "the refusal must state what the table DOES hold"
-    assert "funding_steps" in message, "and send the reader to the GRC-shaped path"
+    assert "no regtest configuration for 'DOGE'" in message, message
+    assert "['BTC', 'LTC']" in message, "the refusal must state what CHAIN_DEFAULTS DOES hold"
+    assert "['GRC']" in message, "and what the Gridcoin table holds, and why it is separate"
 
 
 def test_resolve_chain_config_does_not_raise_KeyError_any_more():
@@ -189,8 +199,8 @@ def test_resolve_chain_config_does_not_raise_KeyError_any_more():
         pytest.fail(f"still a bare KeyError: {exc}")
 
 
-def test_the_two_chains_the_table_carries_still_resolve():
-    for asset in ("BTC", "LTC"):
+def test_the_three_chains_the_harness_drives_all_resolve():
+    for asset in ("BTC", "LTC", "GRC"):
         config = daemons.resolve_chain_config(asset)
         assert config.asset == asset, config
 

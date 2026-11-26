@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-"""Prove -- or refute -- the HTLC atomic-swap path against real BTC and LTC regtest nodes.
+"""Prove -- or refute -- the HTLC atomic-swap path against real BTC, LTC and GRC regtest nodes.
 
 Role: file (the entry point; it runs the stages in regtest/steps.py and holds
       no decision of its own)
-Reads: local bitcoind and litecoind daemons over JSON-RPC, and the
-       ST_REGTEST_* environment variables documented below
+Reads: local bitcoind, litecoind and gridcoinresearchd daemons over JSON-RPC,
+       and the ST_REGTEST_* environment variables documented below
 Writes: starts and stops daemons; creates wallets; mines blocks; broadcasts
        transactions. With --wipe it deletes the `regtest` subdirectory of each
        datadir. It writes NOTHING into this repository.
 Can move funds: YES -- on a regtest chain, and structurally nowhere else.
 Mainnet-safe: NO, AND IT REFUSES TO BE ASKED. The first assertion after every
-       connection is that `getblockchaininfo.chain` is exactly `regtest`;
-       anything else aborts that chain before a single block is mined or a
-       single transaction is built. That refusal is unconditional and no flag
-       turns it off. It is in regtest/daemons.py::assert_regtest, called from
-       step 2 for every chain on every run.
+       connection is that the daemon is on regtest -- `getblockchaininfo.chain`
+       exactly `regtest` on BTC and LTC, and on GRC, which has no such field,
+       a genesis hash that chains/gridcoin_genesis names as Gridcoin REGTEST
+       (testnet is refused too). Anything else aborts that chain before a
+       single block is mined or a single transaction is built. That refusal is
+       unconditional and no flag turns it off. It is in
+       regtest/daemons.py::assert_regtest, called from step 2 for every chain
+       on every run.
 
 WHY THIS EXISTS, AND WHAT CHANGED ON 2026-09-25.
 
@@ -93,19 +96,46 @@ pointer still attached.
               23148431f9 VerifySignature failed`, which Gridcoin's
               `validation.cpp:656-669` reaches only after the spend has failed
               re-verification under consensus flags ALONE. Graded in
-              docs/branch_coverage.md:49-50, and §5's gap b -- "the HTLC refund
-              branch has never run on Gridcoin" -- is struck DONE at :250.
+              docs/branch_coverage.md:51-52, and §5's gap b -- "the HTLC refund
+              branch has never run on Gridcoin" -- is struck DONE at :252.
 
-WHAT IS STILL TRUE IS THE ONLY REASON A GRC SENTENCE BELONGS IN THIS FILE AT
-ALL, AND IT IS A FACT ABOUT THIS HARNESS AND NOT ABOUT GRIDCOIN: --chain takes
-`btc`, `ltc` or `both`, Gridcoin has never been an option, and nothing added
-above changes that. docs/branch_coverage.md:48 still grades "refund after expiry,
-GRC" as NONE inside the section that describes THIS file, on exactly that ground;
-the GRC rows at :49-50 are grc_htlc_verify.py's evidence, not this harness's, and
-reading them as a green run here would be the overclaim this paragraph has
-already made once in the other direction. What remains unestablished anywhere is
-the PRODUCTION locktime: grc_htlc_verify.py used tip+6 and says so, where
-contract_locktime("GRC", ROLE_INITIATOR, tip) returns tip+1920.
+THAT PARAGRAPH ENDED "--chain takes `btc`, `ltc` or `both`, Gridcoin has never
+been an option", AND SINCE 2026-11-23 IT TAKES `grc`. The two facts that made the
+old sentence true were both measured away the same day, against a Gridcoin
+5.5.1.7-30a89f2ab0bb regtest node built from the pinned commit:
+
+  "Gridcoin has no regtest"   it has a full one (docs/gridcoin_regtest_2026_11_22.md),
+                              identified here by its genesis hash
+  "cannot be stood up the     it can, as a native build of the pinned commit, which is
+   way bitcoind is"           what the 2026-11-23 runs used; regtest/daemons.
+                              GRC_REGTEST_DEFAULTS carries the six ways it is not
+                              Bitcoin Core
+
+  NOT YET THROUGH docker-compose.grc-regtest.yml, and the difference is one line. That
+  service starts `gridcoinresearchd -regtest -datadir=/data` with neither
+  -devbuild=override nor -staking=0, and this harness ADOPTS a daemon already answering
+  rather than starting one -- so pointed at the container it passes the genesis gate and
+  then fails at step 6, because the crippled wallet refuses every send. Adding both flags
+  to that `command:` would fix it; that is a PROPOSAL, untested, because no docker daemon
+  was reachable from the session that wrote this.
+
+AND THE FIRST RUN FOUND THE THING THE LEG CANNOT GET PAST. `--chain grc --wipe`
+reaches steps 1-6 cleanly -- the genesis gate, stake mining with the mock clock,
+and the REAL GRCClient.create_contract() funding both contracts, OK=21 -- and then
+every spend, real client and control alike, is refused at mempool entry with
+`bad-txns-nonstandard-inputs`, BEFORE any script runs. Gridcoin's
+AcceptToMemoryPool rejects a P2SH input whose redeem script is not a standard
+template `&& !OnTestnet()` (src/validation.cpp:2254 here, :2362 in the 5.5.3.0
+release), and an HTLC is no template. Testnet is exactly where that is waived,
+which is why grc_htlc_verify.py's testnet spends all landed. So on regtest the
+leg exits 1, steps 7-9 say WHY in the daemon's own words (testmempoolaccept), and
+nothing is scored as a timelock refusal that the timelock never made.
+
+docs/branch_coverage.md:48 therefore still grades "refund after expiry, GRC" as
+NONE for THIS harness -- for a measured reason now, not for want of a flag. The
+PRODUCTION locktime is still unestablished on a chain: this leg derives tip+1920
+and mines to it, and the refund at it is refused for standardness before CLTV
+could be asked.
 
 WHERE THE TEST HAS TO RUN, WHICH IS NOT OBVIOUS AND COST A ROUND TRIP.
 
@@ -187,7 +217,9 @@ in tests/test_regtest_harness_units.py.
 
 FLAGS
 
-    --chain {btc,ltc,both}   which chains to run. Default both.
+    --chain {btc,ltc,grc,both,all}
+                             which chains to run. Default both, which is BTC and
+                             LTC and keeps that meaning; GRC is `grc` or `all`.
     --wipe                   delete each datadir's `regtest` subdirectory
                              before starting, so the run begins on an empty
                              chain. Refuses if a daemon is still answering.
@@ -220,7 +252,13 @@ ENVIRONMENT (every default matches the operator's described machine)
     ST_REGTEST_LTC_RPC_PASSWORD  rt
     ST_REGTEST_LTC_DAEMON        litecoind
     ST_REGTEST_LTC_CLI           litecoin-cli
-    ST_REGTEST_RPC_HOST          127.0.0.1  (both chains, unless overridden)
+    ST_REGTEST_GRC_DATADIR       ~/regtest/grc  (its conf goes in regtest/ inside it)
+    ST_REGTEST_GRC_RPC_PORT      35715
+    ST_REGTEST_GRC_RPC_USER      rt
+    ST_REGTEST_GRC_RPC_PASSWORD  rt -- set it to what your conf says; Gridcoin
+                                 writes a RANDOM one if the conf is absent
+    ST_REGTEST_GRC_DAEMON        gridcoinresearchd  (there is no GRC cli)
+    ST_REGTEST_RPC_HOST          127.0.0.1  (every chain, unless overridden)
 
     Every name is ASCII and every one that is a duration says _SECONDS, which
     is rule 6's boundary: micro in what a human reads, ASCII in what a shell
@@ -263,6 +301,7 @@ if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
 from modules.atomic_btc_client import BTCClient  # noqa: E402 -- same
+from modules.atomic_grc_client import GRCClient  # noqa: E402 -- same
 from modules.atomic_ltc_client import LTCClient  # noqa: E402 -- same
 from regtest import daemons, steps  # noqa: E402 -- the sys.path line above must run first
 from regtest.console import FAIL, OK, Console  # noqa: E402 -- same
@@ -270,6 +309,17 @@ from regtest.daemons import RegtestSetupError, resolve_chain_config  # noqa: E40
 from regtest.keys import generate_key  # noqa: E402 -- same
 
 WALLET_NAME = "regtest_htlc_harness"
+
+# --chain's choices and what each runs, in ONE table: argparse's `choices` and main()'s
+# lookup both read it, so a choice cannot be accepted by one and missing from the other.
+# Until 2026-11-23 they were a literal tuple and a separate literal dict.
+CHAIN_CHOICES = {
+    "btc": ["BTC"],
+    "ltc": ["LTC"],
+    "grc": ["GRC"],
+    "both": ["BTC", "LTC"],
+    "all": ["BTC", "LTC", "GRC"],
+}
 
 # The loggers the real modules use. UNTIL 2026-09-25 this read "the loggers the
 # real modules INSTALL at import. They set themselves to DEBUG and attach their
@@ -327,6 +377,9 @@ def build_real_client(asset: str, config, wallet: str):
         os.environ["BTC_RPC_WALLET"] = wallet
         return BTCClient(config.base_url, config.rpc_user, config.rpc_password)
 
+    if asset == "GRC":
+        return _build_grc_client(config)
+
     if asset != "LTC":
         # THE FALL-THROUGH USED TO BE UNCONDITIONAL, AND IT WAS A WRONG-CHAIN PAYOUT.
         # There was no `elif asset == "LTC"` and no else-raise: every asset that is not
@@ -337,25 +390,17 @@ def build_real_client(asset: str, config, wallet: str):
         # address, so this is fund movement, not a type error, and nothing anywhere
         # refused it.
         #
-        # IT IS UNREACHABLE FROM THE CLI TODAY, which is why it is a guard rather than a
-        # bug report: --chain's choices are ("btc","ltc","both") and the dict at the
-        # callsite maps those to BTC and LTC only, so no asset but those two has ever
-        # arrived here. That is exactly the state in which a guard is cheap -- it costs
-        # nothing now and refuses the moment somebody adds a third choice, which is a
-        # thing this repository is actively considering.
-        #
-        # GRC IS NAMED IN THE MESSAGE rather than left to a generic "unsupported asset",
-        # because the reader who trips this will be adding Gridcoin and the answer they
-        # need is which client to construct and where the per-chain divergence already
-        # lives (rule 14: the refusal carries the fix, not just the fact).
+        # THE GUARD OUTLIVED THE CASE IT WAS WRITTEN FOR, and that is what it was for. It
+        # said "unreachable from the CLI today ... refuses the moment somebody adds a third
+        # choice", and on 2026-11-23 the third choice, GRC, was added -- with its own
+        # branch above, exactly as this message told the person adding it to write. What
+        # remains is every asset that is still not one of the three.
         raise RegtestSetupError(
-            f"build_real_client() has no client for {asset}. This harness drives BTC and LTC only, "
-            f"and until 2026-11-22 it would have returned an LTCClient for {asset} -- a Litecoin "
-            f"client against a {asset} daemon, with PLATFORM_FEE_LTC_ADDRESS set to a Litecoin "
-            f"address, which is a payout to the wrong chain rather than a crash. For GRC the client "
-            f"is modules.atomic_grc_client.GRCClient and it takes the BARE base_url with no "
-            f"/wallet/<name> suffix (regtest/funding_steps.py sets run.wallet = \"\" for GRC on "
-            f"purpose), so adding it here is not a one-line copy of the LTC branch."
+            f"build_real_client() has no client for {asset}. This harness drives BTC, LTC and GRC, "
+            f"and until 2026-11-22 it would have returned an LTCClient for any other asset -- a "
+            f"Litecoin client against a {asset} daemon, with PLATFORM_FEE_LTC_ADDRESS set to a "
+            f"Litecoin address, which is a payout to the wrong chain rather than a crash. A new "
+            f"chain needs its own branch here, not a fall-through to the last one."
         )
 
     # LTCClient.redeem_contract() pays a 0.25% platform fee to
@@ -371,12 +416,38 @@ def build_real_client(asset: str, config, wallet: str):
     return LTCClient(f"{config.base_url}/wallet/{wallet}", config.rpc_user, config.rpc_password)
 
 
+def _build_grc_client(config) -> GRCClient:
+    """The REAL Gridcoin client, at the bare URL, with the passphrase stated EMPTY.
+
+    THE BARE URL because Gridcoin has no multiwallet RPCs -- one built-in wallet, reached
+    without a /wallet/<name> suffix (measured 2026-11-23; ChainConfig.has_multiwallet).
+
+    wallet_passphrase="" AND NOT THE DEFAULT, and the difference is the operator's real
+    wallet. GRCClient reads chains/wallet_lock.passphrase_env_var("GRC") -- which is
+    GRIDCOIN_WALLET_PASSPHRASE, what `configure_env.py --arm grc` sets -- from the
+    environment when the argument is None (its own constructor comment draws exactly this
+    None-versus-"" line), and an operator
+    who runs this harness from a shell that has loaded the desk's .env would hand the
+    regtest client their TESTNET wallet's passphrase -- which it would then send, in a
+    `walletpassphrase` call, to a regtest daemon. The regtest wallet is not encrypted, so
+    "" is also the true answer: wallet_open_for_sending() skips locking on an empty one.
+
+    THE PLATFORM FEE ADDRESS IS DEFAULTED like LTC's below, to a throwaway regtest key, so
+    the redeem builds the fee output it builds in production rather than the no-fee
+    variant. setdefault, so an operator's own value -- worthless on this chain -- is kept.
+    """
+    os.environ.setdefault("PLATFORM_FEE_GRC_ADDRESS", generate_key().address)
+    return GRCClient(config.base_url, config.rpc_user, config.rpc_password, wallet_passphrase="")
+
+
 def run_chain(console: Console, asset: str, args: argparse.Namespace) -> steps.ChainOutcome:
     """Run all nine steps against one chain. Always tears down what it started."""
     console.banner(f"{asset} -- regtest HTLC verification, nine steps")
     config = resolve_chain_config(asset)
     outcome = steps.ChainOutcome(asset=asset)
-    run = steps.Run(console=console, config=config, wallet=WALLET_NAME)
+    # "" for a chain with one built-in wallet: run.node() then reaches the bare URL, and
+    # step 3 uses that wallet rather than trying to create one with RPCs it lacks.
+    run = steps.Run(console=console, config=config, wallet=WALLET_NAME if config.has_multiwallet else "")
     try:
         steps.step_1_binaries(run)
         # Between steps 1 and 2: after the binary is known present, before it
@@ -494,7 +565,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "REFUSES to run against any chain but regtest."
         ),
     )
-    parser.add_argument("--chain", choices=("btc", "ltc", "both"), default="both", help="which chains to run")
+    # `both` KEEPS ITS MEANING, BTC and LTC, because the operator panel and every recorded
+    # command line in docs/ use it that way; Gridcoin is `grc` alone or part of `all`.
+    parser.add_argument("--chain", choices=CHAIN_CHOICES, default="both",
+                        help="which chains to run: btc, ltc, grc, both (= btc+ltc) or all")
     parser.add_argument("--wipe", action="store_true", help="delete each datadir's regtest subdirectory first")
     parser.add_argument("--keep-running", action="store_true", help="leave the daemons up after the run")
     parser.add_argument("--verbose-clients", action="store_true", help="leave the real clients' loggers at DEBUG")
@@ -514,14 +588,19 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(args.verbose_clients)
     console = Console(total_steps=steps.TOTAL_STEPS)
 
-    assets = {"btc": ["BTC"], "ltc": ["LTC"], "both": ["BTC", "LTC"]}[args.chain]
+    assets = CHAIN_CHOICES[args.chain]
     console.banner("regtest HTLC verification harness")
     console.say(f"chains={assets}  wipe={args.wipe}  keep_running={args.keep_running}")
     console.say("network=regtest for every chain; the harness aborts a chain that reports anything else")
+    # THIS LINE SAID "used because no refund implementation exists in this tree to drive"
+    # UNTIL 2026-11-23, and that had been false since 2026-09-26, when refund_contract()
+    # landed on all three clients and steps 8 and 9 started driving it. Every pasted run
+    # since printed it, two screens above a step-9 line reading `REAL refund_contract()`.
     console.say(
         "the code under test is modules/atomic_htlc_scripts.py, modules/htlc_timelock.py and the real "
-        "BTC/LTC clients. Lines labeled `control` are the harness's own spender, used because no refund "
-        "implementation exists in this tree to drive."
+        "BTC/LTC/GRC clients' create_contract(), redeem_contract() and refund_contract(). Lines labeled "
+        "`control` are the harness's own spender, which runs only where the real client could not spend, to "
+        "say whether the SCRIPT can be spent at all."
     )
 
     outcomes = [run_chain(console, asset, args) for asset in assets]

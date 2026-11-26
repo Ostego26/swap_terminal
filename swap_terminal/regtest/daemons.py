@@ -1,10 +1,11 @@
-"""Find, start, interrogate and stop the two regtest daemons.
+"""Find, start, interrogate and stop the regtest daemons: bitcoind, litecoind, gridcoinresearchd.
 
 Role: submodule (process and connection lifecycle for the harness)
-Reads: the environment variables listed in CHAIN_DEFAULTS below; the daemon
-       binaries on PATH; each daemon's pid file under its datadir
+Reads: the environment variables listed in CHAIN_DEFAULTS and GRC_REGTEST_DEFAULTS
+       below; the daemon binaries on PATH; each daemon's pid file under its datadir
 Writes: starts and stops processes; with --wipe, deletes the `regtest`
-       subdirectory of a datadir
+       subdirectory of a datadir -- or, for Gridcoin, whose conf lives inside
+       it, everything in it except the conf
 Can move funds: no directly. It opens the connections the rest of the harness
        moves regtest coins over, and it is where the refusal to touch any
        chain but regtest lives.
@@ -83,6 +84,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import requests
+from chains import gridcoin_genesis
 from chains.base import RPCAdapter, RPCError
 from chains.credential_match import how_to_settle_a_401
 from chains.daemon_launch import mainnet_datadir_named_by
@@ -111,6 +113,65 @@ CHAIN_DEFAULTS = {
         "conf_name": "litecoin.conf",
         "pid_name": "litecoind.pid",
         "env_prefix": "ST_REGTEST_LTC",
+    },
+}
+
+# GRIDCOIN, FOR THIS HARNESS AND NOTHING ELSE. Added 2026-11-23.
+#
+# A SECOND TABLE RATHER THAN A THIRD ROW ABOVE, AND THE SPLIT IS LOAD-BEARING. Four
+# modules read CHAIN_DEFAULTS as "where this chain's conf sits at the ROOT of its
+# datadir": configure_env.conf_candidates(), chains/daemon_conf, chains/wallet_hint and
+# chain_balances. For Gridcoin that is false -- the conf lives in the `regtest/` net
+# subdirectory (ChainConfig.conf_path) -- so a row up there would hand all four a path
+# that never holds a credential, and tests/test_configure_env.py:1078 pins `"GRC" not in
+# CHAIN_DEFAULTS` for exactly that reason. resolve_chain_config() is the ONE reader of
+# this table, and nothing else may import it.
+#
+# THE DATADIR IS ~/regtest/grc, beside ~/regtest/btc and ~/regtest/ltc, and it is NEVER
+# a Gridcoin wallet's datadir. wipe_datadir() still refuses anything that names the
+# operator's mainnet wallet (chains/daemon_launch.mainnet_datadir_named_by) BEFORE it
+# reads any of these fields, and tests/test_harness_chain_refusals.py pins that with
+# ST_REGTEST_GRC_DATADIR pointed at one.
+#
+# There is no `cli`: the pinned Gridcoin build has no CLI target (docker/grc-desk.
+# Dockerfile copies one binary, and the 2026-11-22 image log confirmed it), and this
+# harness drives every daemon over JSON-RPC anyway. check_binaries() reports the cli as
+# "(none: this chain has no cli binary)" rather than failing on it.
+GRC_REGTEST_DEFAULTS = {
+    "GRC": {
+        "daemon": "gridcoinresearchd",
+        "cli": "",
+        "datadir": "~/regtest/grc",
+        # Gridcoin's OWN regtest RPC port, from src/chainparamsbase.cpp, not a free port
+        # chosen here -- the same 35715 docker-compose.grc-regtest.yml binds.
+        "port": 35715,
+        "conf_name": "gridcoinresearch.conf",
+        "pid_name": "gridcoinresearchd.pid",
+        "env_prefix": "ST_REGTEST_GRC",
+        "conf_in_net_subdir": True,
+        # MEASURED 2026-11-23, and it was two stacked refusals, not the one the
+        # 2026-11-22 record names. src/init.cpp crippling a build whenever
+        # CLIENT_VERSION_BUILD != 0 && !OnTestnet() -- and regtest is not testnet -- so
+        # without this flag the WALLET refuses every send ("The transaction was
+        # rejected") and the stake miner refuses to stake. It is local wallet policy,
+        # not consensus, and it is passed ONLY on a daemon this harness spawns, beside
+        # -regtest, never to an adopted one.
+        #
+        # -staking=0 BECAUSE THE OVERRIDE ALSO UNCRIPPLES THE BACKGROUND STAKER, and the
+        # first harness run on 2026-11-23 measured what that costs: step 8 asked to mine to
+        # height 2020 and the chain stood at 2025 -- five blocks the harness never asked
+        # for, staked by ThreadStakeMiner under the mock clock the harness had just moved.
+        # A locktime test that cannot hold the tip still is not a locktime test. With
+        # -staking=0 (src/miner.cpp:1492) the thread stands down and `generatetoaddress`
+        # still mines on demand: 50 asked, 50 mined, tip unmoved across 5s idle.
+        "spawn_args": ("-devbuild=override", "-staking=0"),
+        "identifies_network_by_genesis": True,
+        "mines_by_stake": True,
+        "tx_carries_ntime": True,
+        # listwallets, loadwallet and createwallet: all "help: unknown command", measured
+        # 2026-11-23. The daemon's one built-in wallet is reached at the bare URL, which is
+        # also what regtest/funding_steps sets for GRC (run.wallet = "").
+        "has_multiwallet": False,
     },
 }
 
@@ -158,6 +219,25 @@ class ChainConfig:
     conf_name: str
     pid_name: str
     extra_args: list[str] = field(default_factory=list)
+    # THE SIX WAYS GRIDCOIN'S REGTEST IS NOT BITCOIN CORE'S, as fields rather than as
+    # `if asset == "GRC"` scattered through two modules. Every default is the Core
+    # behavior, so the BTC and LTC rows in CHAIN_DEFAULTS are untouched by their
+    # existence; only GRC_REGTEST_DEFAULTS below sets them. Each was MEASURED on
+    # 2026-11-23 against Gridcoin 5.5.1.7-30a89f2ab0bb on regtest, and the measurement
+    # sits beside the row that sets it rather than here, so the reason and the value
+    # are read together.
+    #
+    # WHAT IS NOT A FIELD, and why: whether the daemon has `gettxout` and whether its
+    # `sendrawtransaction` takes a maxfeerate are ASKED of the daemon in step 3
+    # (steps.probe_spend_rpcs), because by then there is a daemon to ask. The six below
+    # cannot be: they decide how the daemon is STARTED, which wallet endpoint the run is
+    # built around, or how a transaction is SERIALIZED -- all before the first RPC.
+    conf_in_net_subdir: bool = False
+    spawn_args: tuple[str, ...] = ()
+    identifies_network_by_genesis: bool = False
+    mines_by_stake: bool = False
+    tx_carries_ntime: bool = False
+    has_multiwallet: bool = True
 
     @property
     def base_url(self) -> str:
@@ -165,6 +245,13 @@ class ChainConfig:
 
     @property
     def conf_path(self) -> Path:
+        # GRIDCOIN READS `<datadir>/regtest/gridcoinresearch.conf`, NOT `<datadir>/<conf>`.
+        # Measured 2026-11-22 and again 2026-11-23: a conf at the datadir root supplies no
+        # RPC credentials (the daemon answers 401), and if the net-subdirectory file is
+        # absent the daemon WRITES one with a random password. See
+        # docker-compose.grc-regtest.yml's header, which carries the three-restart version.
+        if self.conf_in_net_subdir:
+            return self.regtest_dir / self.conf_name
         return self.datadir / self.conf_name
 
     @property
@@ -188,37 +275,26 @@ def resolve_chain_config(asset: str, extra_args: list[str] | None = None) -> Cha
     message. Resolving it here would turn a missing binary into a FileNotFound
     raised from somewhere in the middle of step 2.
     """
-    if asset not in CHAIN_DEFAULTS:
+    spec = CHAIN_DEFAULTS.get(asset) or GRC_REGTEST_DEFAULTS.get(asset)
+    if spec is None:
         # A BARE KeyError USED TO COME OUT OF HERE, mid-step-1, reading as a crash rather
         # than as a refusal with a remedy. Measured 2026-11-22: resolve_chain_config("GRC")
-        # raised `KeyError: 'GRC'` with nothing naming the table, the two chains it holds,
-        # or why Gridcoin is not one of them.
+        # raised `KeyError: 'GRC'` with nothing naming the table or the chains it holds.
         #
-        # THE REASON GRC IS ABSENT IS NOT AN OVERSIGHT AND THE MESSAGE SAYS SO. This table
-        # drives a `-regtest` flag, a `regtest` datadir subdirectory and assert_regtest()'s
-        # `chain == "regtest"` check, and Gridcoin's getblockchaininfo has no `chain` key at
-        # any version -- so a GRC row here could not satisfy the assertion it would be
-        # asserted against. There is a GRC-shaped path already written in
-        # regtest/funding_steps.py, and sending the reader there is the whole point of
-        # naming it here (rule 14: the refusal carries the fix).
-        #
-        # AND IT IS A TRIPWIRE AS WELL AS A MESSAGE. tests/test_configure_env.py:1078
-        # asserts `"GRC" not in CHAIN_DEFAULTS` because a row here silently adds the
-        # operator's MAINNET Gridcoin conf as a second credential-read candidate in
-        # configure_env.conf_candidates(), and that loop takes the first file that exists.
+        # GRC RESOLVES SINCE 2026-11-23, and the refusal that stood here until then said it
+        # never could: "Gridcoin has no `chain` field ... so a GRC row could never satisfy
+        # that assertion". The premise held and the conclusion did not -- assert_regtest()
+        # now asks a Gridcoin daemon for its GENESIS HASH instead (chains/gridcoin_genesis),
+        # which names regtest where no boolean can. The superseded sentence is quoted
+        # rather than deleted because it is what a reader who remembers the old refusal
+        # will look for (rule 1).
         raise RegtestSetupError(
-            f"regtest/daemons.CHAIN_DEFAULTS has no entry for {asset!r}; it holds "
-            f"{sorted(CHAIN_DEFAULTS)}. This table is for chains with a Bitcoin-Core-style "
-            f"REGTEST mode: it passes -regtest, keeps state in a `regtest` datadir "
-            f"subdirectory, and is asserted by assert_regtest() demanding "
-            f"getblockchaininfo.chain == 'regtest'. Gridcoin has no `chain` field in that "
-            f"response at any version, so a GRC row could never satisfy that assertion -- "
-            f"the GRC path is regtest/funding_steps.py (resolve_config + "
-            f"assert_test_network), not this table. Adding a row here also changes "
-            f"configure_env.conf_candidates() for that asset, which is what "
-            f"tests/test_configure_env.py:1078 is guarding."
+            f"this harness has no regtest configuration for {asset!r}. It knows "
+            f"{sorted(CHAIN_DEFAULTS)} from regtest/daemons.CHAIN_DEFAULTS and "
+            f"{sorted(GRC_REGTEST_DEFAULTS)} from GRC_REGTEST_DEFAULTS, which is a separate "
+            f"table because Gridcoin keeps its conf in the `regtest/` subdirectory and "
+            f"CHAIN_DEFAULTS' other readers assume the datadir root."
         )
-    spec = CHAIN_DEFAULTS[asset]
     prefix = spec["env_prefix"]
     return ChainConfig(
         asset=asset,
@@ -232,6 +308,12 @@ def resolve_chain_config(asset: str, extra_args: list[str] | None = None) -> Cha
         conf_name=spec["conf_name"],
         pid_name=spec["pid_name"],
         extra_args=list(extra_args or []),
+        conf_in_net_subdir=bool(spec.get("conf_in_net_subdir", False)),
+        spawn_args=tuple(spec.get("spawn_args", ())),
+        identifies_network_by_genesis=bool(spec.get("identifies_network_by_genesis", False)),
+        mines_by_stake=bool(spec.get("mines_by_stake", False)),
+        tx_carries_ntime=bool(spec.get("tx_carries_ntime", False)),
+        has_multiwallet=bool(spec.get("has_multiwallet", True)),
     )
 
 
@@ -245,7 +327,7 @@ def binary_version(path: str) -> str:
     if resolved is None:
         raise RegtestSetupError(
             f"binary {path!r} is not on PATH. "
-            f"Install it, or point the harness at it: ST_REGTEST_<BTC|LTC>_DAEMON=/full/path/to/{path}"
+            f"Install it, or point the harness at it: ST_REGTEST_<BTC|LTC|GRC>_DAEMON=/full/path/to/{path}"
         )
     completed = subprocess.run(  # noqa: S603 -- checked: `resolved` came from shutil.which and the argument list is a literal. No shell, no operator-supplied string in the argv.
         [resolved, "-version"],
@@ -390,13 +472,19 @@ def mweb_override_args(help_text: str) -> tuple[list[str], str]:
 
 def check_binaries(console: ConsoleLike, config: ChainConfig) -> str:
     """Step 1 for one chain: the daemon and the cli exist, and say which build."""
-    console.say(f"looking for {config.daemon_path} and {config.cli_path} on PATH")
+    console.say(f"looking for {config.daemon_path} and {config.cli_path or '(no cli for this chain)'} on PATH")
     # A binary that prints nothing for -version is not a passing check. It is
     # either not the daemon, or not runnable, and reporting OK there would put
     # the real failure three steps later where it is harder to read.
     daemon_version = binary_version(config.daemon_path)
     console.check(f"{config.asset} daemon binary", daemon_version, "a version line",
                   FAIL if daemon_version.startswith("(none") else OK)
+    if not config.cli_path:
+        # GRIDCOIN SHIPS NO CLI AT THE PINNED COMMIT -- see GRC_REGTEST_DEFAULTS. Said in
+        # its own line rather than skipped silently, so a pasted run shows the check was
+        # considered and not forgotten (rule 14). Nothing in this harness invokes a cli.
+        console.say(f"{config.asset}: cli binary: (none: this chain has no cli binary, and the harness uses JSON-RPC)")
+        return daemon_version
     cli_version = binary_version(config.cli_path)
     console.check(f"{config.asset} cli binary", cli_version, "a version line",
                   FAIL if cli_version.startswith("(none") else OK)
@@ -847,6 +935,32 @@ def apply_mweb_override(console: ConsoleLike, config: ChainConfig) -> None:
         )
 
 
+def conf_requirements(config: ChainConfig) -> str:
+    """What the conf must contain, in the words THIS chain's daemon needs. One owner.
+
+    TWO MESSAGES SPELLED THIS SENTENCE, and both were Bitcoin Core's: start_daemon()'s
+    missing-conf refusal and wait_for_rpc()'s timeout. Pointed at Gridcoin they would
+    have told the operator to add `regtest=1` -- and docker-compose.grc-regtest.yml
+    records, measured, that a conf-file `regtest=1` is SILENTLY IGNORED by Gridcoin and
+    the node comes up on MAINNET. A setup hint that steers a reader into starting a
+    mainnet node is the worst sentence this file could print, so the Gridcoin branch says
+    the opposite out loud.
+    """
+    if config.conf_in_net_subdir:
+        return (
+            f"{config.conf_path} must exist BEFORE the first start and carry rpcuser, "
+            f"rpcpassword, rpcport={config.port} and server=1. It goes in the `regtest` "
+            f"SUBDIRECTORY, not the datadir root: a conf at the root supplies no credentials, "
+            f"and if this file is absent the daemon writes one with a RANDOM password. Do NOT "
+            f"put regtest=1 in it -- Gridcoin ignores that line and starts on MAINNET; this "
+            f"harness passes -regtest on the command line, which is the only place it works"
+        )
+    return (
+        f"{config.conf_path} needs regtest=1, server=1, fallbackfee=0.0002 and a [regtest] section with "
+        f"rpcuser/rpcpassword/rpcport={config.port}"
+    )
+
+
 def start_daemon(console: ConsoleLike, config: ChainConfig) -> bool:
     """Start the daemon if nothing is answering yet. Returns True if we spawned it.
 
@@ -869,16 +983,24 @@ def start_daemon(console: ConsoleLike, config: ChainConfig) -> bool:
         )
     if not config.conf_path.exists():
         raise RegtestSetupError(
-            f"{config.asset} config {config.conf_path} does not exist. "
-            f"The harness needs regtest=1, server=1, fallbackfee=0.0002 and a [regtest] section with "
-            f"rpcuser/rpcpassword/rpcport={config.port}."
+            f"{config.asset} config {config.conf_path} does not exist. {conf_requirements(config)}."
         )
 
     resolved = shutil.which(config.daemon_path)
     if resolved is None:
         raise RegtestSetupError(f"{config.daemon_path} vanished between step 1 and step 2; not on PATH")
 
-    base_argv = [resolved, f"-datadir={config.datadir}", "-regtest", "-daemon", *REFUSAL_LOGGING]
+    # spawn_args BELONG TO base_argv AND NOT TO extra_args, and the difference is the retry
+    # below. extra_args are options the harness DISCOVERED (the MWEB override) and is
+    # willing to drop if the daemon refuses them. -devbuild=override is not optional on
+    # Gridcoin regtest: without it every wallet send is refused, so a retry that silently
+    # dropped it would start a daemon on which step 6 cannot fund anything, and report
+    # that three steps later as a funding failure.
+    #
+    # REFUSAL_LOGGING's two categories are Bitcoin Core's names. Gridcoin accepts
+    # `-debug=<category>` too; it was started with exactly these on 2026-11-23 and came up,
+    # and -devbuild=override additionally turns its VERBOSE category on.
+    base_argv = [resolved, f"-datadir={config.datadir}", "-regtest", "-daemon", *config.spawn_args, *REFUSAL_LOGGING]
     completed = _spawn(console, config, base_argv + config.extra_args)
     if completed.returncode != 0 and config.extra_args:
         # A daemon that will not start because of an option the harness ADDED
@@ -929,15 +1051,17 @@ def wait_for_rpc(console: ConsoleLike, config: ChainConfig) -> None:
     credentials returns a height. Pointed at that daemon, this loop would have spent the
     whole of RPC_READY_TIMEOUT_SECONDS printing `code=-32601 Method not found` and then
     raised a refusal telling the operator to put a `[regtest]` section and an rpcuser in a
-    config file that is already correct, for a daemon that has no regtest mode at all. A
+    config file that is already correct, for a daemon that (as then understood) had no regtest mode. A
     method this family never had, reported as a credential problem: the exact shape the
     LIVENESS_PROBES table above exists to refuse.
 
-    NOT REACHED ON TODAY'S GRC PATH, and that is not a reason to leave it. funding_steps.
-    step_1_reachable() returns before this line for GRC, and fund_testnets.py's GRC branch
-    never enters fund_regtest_chain() -- so this was a live break waiting for the first
-    caller who pointed a readiness wait at Gridcoin, while `rpc_answers()` forty lines up
-    already knew better. Two answers to one question in one file is rule 8 with a delay on
+    REACHED ON THE GRC PATH SINCE 2026-11-23, and the fix below is why it worked first time.
+    This paragraph said "NOT REACHED ON TODAY'S GRC PATH ... a live break waiting for the
+    first caller who pointed a readiness wait at Gridcoin" -- and that caller arrived:
+    `regtest_htlc_verify.py --chain grc` waits here for a Gridcoin regtest daemon, which
+    answers `getblockcount` and not `uptime`. funding_steps.step_1_reachable() and
+    fund_testnets.py's GRC branch still return before this line for TESTNET Gridcoin;
+    `rpc_answers()` forty lines up already knew better. Two answers to one question in one file is rule 8 with a delay on
     it; the second one is deleted here rather than corrected, so there is nothing left to
     drift.
 
@@ -985,9 +1109,8 @@ def wait_for_rpc(console: ConsoleLike, config: ChainConfig) -> None:
         f"{format_duration(RPC_READY_TIMEOUT_SECONDS)} ({attempts} attempts). Last errors, one per probe: "
         f"{'; '.join(last_errors)}. A `code=-32601 Method not found` on ONE probe is that daemon family not "
         f"having it and is not the problem; every probe missing is. "
-        f"Check that {config.conf_path} has server=1 and a [regtest] section with rpcuser={config.rpc_user}, "
-        f"rpcpassword=<yours> and rpcport={config.port}, and that "
-        f"ST_REGTEST_{config.asset}_RPC_USER / _RPC_PASSWORD match it."
+        f"{conf_requirements(config)}, with rpcuser={config.rpc_user}; and "
+        f"ST_REGTEST_{config.asset}_RPC_USER / _RPC_PASSWORD must match it."
     )
 
 
@@ -1004,7 +1127,25 @@ def assert_regtest(console: ConsoleLike, config: ChainConfig, *, we_started_it: 
     daemon's own statement about which network it is on. A port number, a
     datadir name or a config file are all things that can be right while the
     daemon is on a different chain.
+
+    GRIDCOIN HAS NO SUCH FIELD, so for it the statement is the GENESIS HASH. Measured
+    2026-11-22 and again 2026-11-23: getblockchaininfo on Gridcoin regtest carries six
+    keys -- blocks difficulty errors in_sync moneysupply testnet -- and `testnet` reads
+    False, which is exactly what MAINNET says. One boolean cannot name three networks,
+    and the two it conflates are mainnet and regtest. `getblockhash 0` can: it is a
+    consensus constant, and chains/gridcoin_genesis owns the table of the three. That
+    module is reused rather than a fourth copy of a hash being typed here (rule 8);
+    regtest/funding_steps.assert_test_network() asks the same table for the testnet
+    harnesses.
+
+    THE ACCEPT IS NARROWER THAN THAT MODULE'S is_test_network(), deliberately. That
+    function accepts `test` and `regtest`, because the funding harnesses run on Gridcoin
+    testnet. This one MINES AND MOCKS THE CLOCK, which on a testnet daemon would be the
+    operator's desk wallet staking under a fake clock -- so it accepts `regtest` and
+    nothing else, and a testnet genesis is refused with its own name.
     """
+    if config.identifies_network_by_genesis:
+        return _assert_regtest_by_genesis(console, config, we_started_it=we_started_it)
     info = adapter_for(config).call("getblockchaininfo")
     chain = info.get("chain")
     if chain != "regtest":
@@ -1015,6 +1156,49 @@ def assert_regtest(console: ConsoleLike, config: ChainConfig, *, we_started_it: 
             "network, and there is no flag to override this."
         )
     console.check(f"{config.asset} network", chain, "regtest", OK)
+    report_softforks(console, config, info, we_started_it=we_started_it)
+    return info
+
+
+def _assert_regtest_by_genesis(console: ConsoleLike, config: ChainConfig, *, we_started_it: bool) -> dict:
+    """assert_regtest() for a daemon whose only network statement is its genesis block.
+
+    Returns getblockchaininfo with `chain` FILLED IN from the genesis answer, so step 2's
+    `chain=...` line and every later reader of `info["chain"]` see the network that was
+    actually established -- never the word "regtest" unless the hash said it. A daemon
+    that answers getblockhash with anything this table does not hold is refused for LACK
+    of evidence, in words that say so, not as mainnet (gridcoin_genesis.is_mainnet's
+    docstring is the reason the two refusals must read differently).
+    """
+    node = adapter_for(config)
+    genesis = node.call("getblockhash", 0)
+    network = gridcoin_genesis.network_of_genesis(genesis)
+    described = gridcoin_genesis.describe(genesis)
+    if network != "regtest":
+        console.check(f"{config.asset} network (by genesis hash)", described, "Gridcoin regtest", FAIL)
+        why = (
+            "it is MAINNET, whose coins are real"
+            if gridcoin_genesis.is_mainnet(genesis)
+            else f"it is Gridcoin {network!r}, and this harness mines and mocks the clock, which on that "
+                 f"network would be a real desk wallet staking under a fake clock"
+            if network
+            else "the hash is not one this table knows, which is an absence of evidence and is refused as one"
+        )
+        raise RegtestSetupError(
+            f"REFUSING TO RUN: the {config.asset} daemon at {config.base_url} has genesis {described} -- {why}. "
+            "This harness starts daemons, mines and BROADCASTS on regtest only, and there is no flag to "
+            "override this."
+        )
+    console.check(f"{config.asset} network (by genesis hash)", described, "Gridcoin regtest", OK)
+    info = dict(node.call("getblockchaininfo"))
+    # `testnet` is printed beside the verdict BECAUSE it disagrees with it -- False on a
+    # chain just proven to be regtest -- so a reader who knows the old boolean gate sees
+    # why it is not consulted (rule 14: state what the number means, next to it).
+    console.say(
+        f"{config.asset}: getblockchaininfo.testnet={info.get('testnet')} -- NOT consulted: Gridcoin regtest "
+        "reports False here exactly as mainnet does, which is why the genesis hash decides"
+    )
+    info["chain"] = network
     report_softforks(console, config, info, we_started_it=we_started_it)
     return info
 
@@ -1646,14 +1830,12 @@ def wipe_datadir(console: ConsoleLike, config: ChainConfig) -> None:
             f"--wipe REFUSED for {config.asset}: its datadir {config.datadir} names "
             f"{mainnet_segment}, which on this host is the operator's MAINNET Gridcoin wallet "
             f"(OPEN_FINDINGS finding 2, and CLAUDE.md's chain-safety section: it is unlocked for "
-            f"staking and nothing in this tree has its passphrase). Nothing was deleted. This "
-            f"harness has no datadir of its own for that chain -- regtest/funding_steps."
-            f"resolve_config() hardcodes the mainnet datadir and is safe only because none of "
-            f"the wiping paths run for GRC -- so --wipe is not a parameter that chain has, "
-            f"rather than one that happens to be empty. If you want a disposable Gridcoin "
-            f"chain, give it its OWN datadir and point the harness at that; a regtest Gridcoin "
-            f"node keeps its wallet in a mocked in-memory BDB environment and persists nothing "
-            f"across restarts anyway, so there is nothing a wipe would buy."
+            f"staking and nothing in this tree has its passphrase). Nothing was deleted. The "
+            f"regtest harness's own Gridcoin datadir is ~/regtest/grc (regtest/daemons."
+            f"GRC_REGTEST_DEFAULTS); if ST_REGTEST_GRC_DATADIR points here, point it there "
+            f"instead. regtest/funding_steps.resolve_config() still hardcodes the mainnet "
+            f"datadir for the TESTNET harnesses and is safe only because none of the wiping "
+            f"paths run for it."
         )
     if rpc_answers(config):
         raise RegtestSetupError(
@@ -1661,8 +1843,87 @@ def wipe_datadir(console: ConsoleLike, config: ChainConfig) -> None:
             "Stop it first; deleting a live datadir corrupts it."
         )
     target = config.regtest_dir
+    refuse_a_wipe_target_outside_the_datadir(config)
     if not target.exists():
         console.say(f"{config.asset}: nothing to wipe -- {target} does not exist")
         return
+    if config.conf_in_net_subdir:
+        _wipe_keeping_the_conf(console, config)
+        return
     shutil.rmtree(target)
     console.say(f"{config.asset}: wiped {target}")
+
+
+def refuse_a_wipe_target_outside_the_datadir(config: ChainConfig) -> None:
+    """Refuse a `regtest` directory that is a symlink, or that resolves outside the datadir.
+
+    FOUND BY REVIEW ON 2026-11-23, IN A FUNCTION WRITTEN THE SAME DAY, AND REPRODUCED.
+    _wipe_keeping_the_conf() below LISTS regtest_dir and deletes its entries -- and when
+    regtest_dir is itself a symlink, listing it lists the link's DESTINATION. Two
+    independent reviewers built dd/regtest -> victim/ holding a wallet.dat and blocks/,
+    called it, and victim/ came back EMPTY. The mainnet-datadir guard above did not fire
+    (it reads config.datadir's own path segments, never where regtest_dir points), and
+    rpc_answers() probes only the regtest port, so a symlink to another network's net
+    directory -- ~/.GridcoinResearch-desk/testnet, say -- would have lost that wallet.
+
+    THE OLD PATH WAS SAFE BY ACCIDENT, which is why it is refused here for every chain and
+    not only Gridcoin's. shutil.rmtree() refuses a symlinked root ("Cannot call rmtree on a
+    symbolic link") and deletes nothing, so BTC and LTC never had this hole -- but they
+    reported it as a bare OSError, and a guard that holds only because of which delete
+    function happened to be called is the shape this file already paid for once (see the
+    mainnet comment in wipe_datadir).
+
+    BOTH CHECKS, because each misses a case the other catches: is_symlink() catches the
+    link itself, and the resolve() containment catches a regtest_dir whose PARENT path
+    components were swapped for links after the datadir was resolved.
+    """
+    target = config.regtest_dir
+    if target.is_symlink():
+        raise RegtestSetupError(
+            f"--wipe REFUSED for {config.asset}: {target} is a SYMLINK, to {target.readlink()}. Emptying it "
+            "would delete what it points at, not a regtest chain this harness owns. Nothing was deleted. Replace "
+            "the link with a real directory if this datadir is meant to be disposable."
+        )
+    if target.exists() and not target.resolve().is_relative_to(config.datadir.resolve()):
+        raise RegtestSetupError(
+            f"--wipe REFUSED for {config.asset}: {target} resolves to {target.resolve()}, which is outside the "
+            f"datadir {config.datadir.resolve()}. Nothing was deleted."
+        )
+
+
+def _wipe_keeping_the_conf(console: ConsoleLike, config: ChainConfig) -> None:
+    """Empty the `regtest` directory of everything except the daemon's conf.
+
+    WHY A DIFFERENT DELETE AND NOT THE rmtree ABOVE. On Gridcoin the conf lives INSIDE
+    the directory being wiped (ChainConfig.conf_path), so the rmtree would take it, and
+    the next start would find no conf and -- measured 2026-11-22 -- WRITE ONE with a
+    random rpcpassword. The harness would then fail at step 2 with a 401 against a
+    password nobody chose, which reads as a credential typo rather than as --wipe having
+    deleted the file. So this removes each entry beside the conf and leaves the conf.
+
+    ONLY DIRECT CHILDREN ARE VISITED, and a symlinked child is unlinked rather than
+    followed. THAT USED TO BE THE WHOLE CLAIM -- "nothing outside `regtest/` can be
+    reached through this function however that directory was populated" -- and it was
+    false for regtest/ ITSELF being a link, until refuse_a_wipe_target_outside_the_datadir()
+    above was added.
+    """
+    # AGAIN HERE, and not only in wipe_datadir(): this is the function that deletes, and a
+    # second caller that reached it without going through wipe_datadir() would otherwise
+    # inherit the hole the guard exists to close.
+    refuse_a_wipe_target_outside_the_datadir(config)
+    target = config.regtest_dir
+    kept = config.conf_path
+    removed = 0
+    for entry in sorted(target.iterdir()):
+        if entry == kept:
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+        removed += 1
+    console.say(
+        f"{config.asset}: wiped {target} -- {removed} entr{'y' if removed == 1 else 'ies'} removed, "
+        f"{kept.name} KEPT, because the daemon reads it from inside this directory and would replace it "
+        "with a random password if it were gone"
+    )

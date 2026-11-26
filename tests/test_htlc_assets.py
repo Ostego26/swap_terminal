@@ -201,7 +201,7 @@ def test_BTC_to_LTC_names_the_SCRIPT_DRIVER_and_claims_no_run():
     carries. Its first draft was about "script<->script pairs" in general and asserted
     that none had ever completed, on the strength of grepping atomic_swap.py for OK=,
     FAIL= and COMPLETED. The grep was real and found nothing; the claim was false, because
-    the evidence lives in docs/branch_coverage.md:156 and records BTC -> GRC completing
+    the evidence lives in docs/branch_coverage.md:158 and records BTC -> GRC completing
     OK=13 FAIL=0 on 2026-09-30 with six txids. So BTC -> LTC is the pair that genuinely
     has not run, and test_BTC_to_GRC_is_RUN_GREEN... below is the other half.
 
@@ -229,7 +229,7 @@ def test_BTC_to_GRC_is_RUN_GREEN_and_GRC_to_BTC_is_not():
     THIS TEST IS THE CORRECTION ITSELF. The first draft of modules/htlc_assets.py stated
     that no script<->script swap had ever completed, and stated it as a measurement:
     "grepped atomic_swap.py for OK=, FAIL=, COMPLETED and PROVEN". The grep ran and found
-    nothing in that file. docs/branch_coverage.md:156 records BTC -> GRC completing OK=13
+    nothing in that file. docs/branch_coverage.md:158 records BTC -> GRC completing OK=13
     FAIL=0 on 2026-09-30 -- two script chains, both legs P2SH, no XRP and no EscrowFinish
     anywhere, with six txids. The denominator of a grep is the files it searched, which is
     rule 17 at the exact point it is easiest to miss: the measurement was taken and was
