@@ -94,6 +94,21 @@ services:
     container_name: swap-web
     pull_policy: build
 
+    # RUN AS THE OWNER OF SWAP_DB_DIR, the same shape grc-desk and grc-regtest
+    # already use (GRC_DESK_USER, GRC_REGTEST_USER). Measured 2026-11-26 on the
+    # operator's host: the image's `swap` user is uid 1000, the operator is 1001,
+    # and SWAP_DB_DIR was a 700 directory owned by 1001 -- so the entrypoint died in
+    # prepare_database() with `PermissionError: [Errno 13] Permission denied:
+    # '/data/swap_terminal.db'` before any worker or gunicorn started. A bind mount
+    # keeps the HOST's numeric ownership; nothing inside the image can change that.
+    #
+    # THE DEFAULT IS THE IMAGE'S OWN 1000:1000, so a host where uid 1000 owns the
+    # data directory is unchanged. Set SWAP_WEB_USER=<uid>:<gid> in .env to the
+    # owner of SWAP_DB_DIR (`stat -c '%u:%g' <dir>`); ST_RUNTIME_DIR must be
+    # writable by the same uid, which ./runtime/web is when the repository's owner
+    # and SWAP_DB_DIR's owner are one person.
+    user: "${SWAP_WEB_USER:-1000:1000}"
+
     # 127.0.0.1 ON THE HOST SIDE, AND THE CONTAINER SIDE CANNOT BE LOOPBACK.
     # gunicorn.conf.py defaults its bind to 127.0.0.1, which inside a container
     # means the CONTAINER's loopback -- unreachable from the host, so the service

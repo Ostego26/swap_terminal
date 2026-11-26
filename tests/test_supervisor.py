@@ -34,6 +34,7 @@ import sys
 import time
 from pathlib import Path
 
+import config
 import pytest
 import supervisor
 from conftest import poisoned_rpc_table
@@ -1047,6 +1048,14 @@ def test_the_supervisor_banner_carries_the_census_not_just_the_path(tmp_path, mo
     connection.close()
     monkeypatch.setattr(supervisor.Config, "DB_PATH", str(path), raising=False)
     monkeypatch.delenv("SWAP_DB_PATH", raising=False)
+    # THE REAL .env IS ISOLATED TOO, added 2026-11-26. Without this line the banner read
+    # the repository's own .env, so the test passed only on a host whose .env carried no
+    # SWAP_DB_DIR -- and failed the day this host's testnet desk was configured, with the
+    # banner (correctly) crediting the path to `SWAP_DB_DIR/swap_terminal.db`. Same class
+    # as the two test_configure_env.py tests fixed 2026-11-23, and the same remedy
+    # test_database_location_is_derived_once.py already uses: point config.ENV_FILE at a
+    # dotenv that does not exist.
+    monkeypatch.setattr(config, "ENV_FILE", tmp_path / ".env")
 
     lines = supervisor.endpoint_summary()
     database = next(line for line in lines if line.strip().startswith("database"))
