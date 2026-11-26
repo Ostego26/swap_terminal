@@ -42,6 +42,7 @@ forty-seven.
 from __future__ import annotations
 
 import ast
+import io
 import pathlib
 
 import network_target
@@ -2340,3 +2341,25 @@ def test_every_external_port_is_a_test_port_of_the_chain_it_belongs_to():
             f"{port} is both a mainnet port and an external wallet. Mainnet is the more "
             f"dangerous fact and MAINNET_RPC_PORTS is where it belongs."
         )
+
+
+def test_with_no_terminal_an_unanswered_value_is_left_unset_and_DISCOVERED_ones_still_write(
+        tmp_path, env_file, monkeypatch, capsys):
+    """REPRODUCED 2026-11-26 on the operator's host, from a session with no terminal.
+
+    `--apply` discovered values, then crashed at the first prompt with
+    `OSError: [Errno 6] No such device or address: '/dev/tty'` -- and since write_env()
+    runs after the prompts, every DISCOVERED value was dropped with no line saying so.
+    The fix: no terminal means NOT ASKED and left unset, said out loud, and the
+    discovered values are still written. It must NOT read the answer from stdin instead.
+    """
+    monkeypatch.delenv("ST_ANSWERS", raising=False)
+    monkeypatch.setattr(configure_env, "_a_terminal_is_attached", lambda: False)
+    monkeypatch.setattr("sys.stdin", io.StringIO("a-value-that-must-never-be-used\n"))
+
+    assert configure_env.ask("BTC_RPC_USER", "the rpcuser", secret=False) == ""
+    assert configure_env.ask("BTC_RPC_PASS", "the password", secret=True) == ""
+    printed = capsys.readouterr().out
+    assert "BTC_RPC_USER: NOT ASKED -- no terminal" in printed
+    assert "BTC_RPC_PASS: NOT ASKED -- no terminal" in printed
+    assert "a-value-that-must-never-be-used" not in printed

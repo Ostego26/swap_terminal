@@ -786,6 +786,23 @@ def ask(variable: str, what: str, *, secret: bool, default: str = "") -> str:
 
     suffix = f" [{default}]" if default and not secret else ""
     prompt = f"  {variable}{suffix}\n    {what}\n    > "
+    # NO TERMINAL MEANS NOT ASKED, NOT A CRASH. Found 2026-11-26 on the operator's host,
+    # from a session with no controlling terminal: `--apply --read-daemon-confs` had
+    # already DISCOVERED two ports, two endpoints and READ two daemon credentials, then
+    # died here with `OSError: [Errno 6] No such device or address: '/dev/tty'` at the
+    # first prompt -- and because write_env() runs after collect_answers(), every one of
+    # those discovered values was dropped. .env came out holding only the --set values,
+    # and nothing said the rest had been lost.
+    #
+    # The fix keeps the guard and changes only what happens when there is nobody to ask:
+    # the variable is NOT ASKED and left unset, said out loud, exactly as if the operator
+    # had pressed enter past it -- which collect_answers() already reports. It does NOT
+    # fall back to stdin, for the reason this docstring gives: a redirected stdin must
+    # never be able to supply a credential without a prompt being seen.
+    if not _a_terminal_is_attached():
+        print(f"  {variable}: NOT ASKED -- no terminal is attached, so it is left unset "
+              f"(run interactively to answer it)", flush=True)
+        return default
     if secret:
         value = getpass.getpass(f"  {variable} (NOT echoed)\n    {what}\n    > ")
     else:
@@ -793,6 +810,20 @@ def ask(variable: str, what: str, *, secret: bool, default: str = "") -> str:
             print(prompt, end="", flush=True)
             value = tty.readline().strip()
     return value or default
+
+
+def _a_terminal_is_attached() -> bool:
+    """Whether /dev/tty can be opened -- the one question ask() needs answered first.
+
+    Its own function so a test can say "no terminal" without patching pathlib, and so
+    the probe is the same open() the prompt itself does: if this succeeds, the prompt
+    will too.
+    """
+    try:
+        with Path("/dev/tty").open():
+            return True
+    except OSError:
+        return False
 
 
 def write_env(values: dict[str, str]) -> None:
