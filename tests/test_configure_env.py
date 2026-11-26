@@ -2006,7 +2006,7 @@ def test_an_unmanaged_name_is_refused_with_a_suggestion(env_file_with_overlays):
         ["SOL_HOTWALLET=typo"], configure_env.secret_names())
 
     assert values == {}
-    assert any("not a variable this tool manages" in line for line in refusals)
+    assert any("is not in .env.example" in line for line in refusals)
     assert any("SOL_HOT_WALLET" in line for line in refusals), (
         f"the refusal suggests no real name: {refusals}"
     )
@@ -2363,3 +2363,20 @@ def test_with_no_terminal_an_unanswered_value_is_left_unset_and_DISCOVERED_ones_
     assert "BTC_RPC_USER: NOT ASKED -- no terminal" in printed
     assert "BTC_RPC_PASS: NOT ASKED -- no terminal" in printed
     assert "a-value-that-must-never-be-used" not in printed
+
+
+def test_set_accepts_a_template_variable_the_tool_does_not_ask_for_and_still_refuses_a_typo():
+    """REPRODUCED 2026-11-26: `--set BTC_RPC_WALLET=desk_hot` was refused as "nothing reads".
+
+    docker-compose.web.yml passes BTC_RPC_WALLET into the container and config.py reads it
+    as the payout wallet, and on that host each daemon had just gained a second wallet,
+    so leaving it unset would break every wallet call. --set now accepts any non-secret
+    name .env.example lists. The typo it exists to catch is still refused, and the refusal
+    no longer ends in "Did you mean one of: none of them?".
+    """
+    values, refusals = configure_env.set_verdict(
+        ["BTC_RPC_WALLET=desk_hot", "SOL_HOTWALLET=x"], set())
+
+    assert values.get("BTC_RPC_WALLET") == "desk_hot", refusals
+    assert any("SOL_HOTWALLET" in r for r in refusals), refusals
+    assert not any("none of them" in r for r in refusals), refusals

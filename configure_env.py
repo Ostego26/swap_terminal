@@ -609,6 +609,31 @@ def secret_names() -> set[str]:
     return found
 
 
+def template_names() -> set[str]:
+    """Every variable `.env.example` names, commented or not. What `--set` may write.
+
+    ADDED 2026-11-26, because `--set` accepted only every_variable_this_tool_can_set() --
+    the names this tool ASKS for or DISCOVERS -- and refused everything else as "a line in
+    .env that nothing reads". That was false for BTC_RPC_WALLET and LTC_RPC_WALLET:
+    docker-compose.web.yml passes both into the container and config.py reads them as the
+    wallet the payout spends from. It mattered on the day it was found, because the
+    testnet desk had just been given a second wallet per daemon, and with two wallets
+    loaded a wallet call that names none is refused by the daemon. The operator was told
+    to set a variable this tool would then refuse to set.
+
+    THE TEMPLATE IS THE RIGHT LIST because tests/test_env_example_covers_every_compose_
+    variable.py already pins it to cover every variable the compose files read. So a name
+    in it is one something reads, which is the claim the refusal makes, and a typo like
+    SOL_HOTWALLET -- the case the guard exists for -- is still not in it.
+    """
+    found: set[str] = set()
+    for line in ENV_EXAMPLE.read_text().splitlines():
+        match = re.match(r"^#?\s*([A-Z_][A-Z0-9_]*)=", line.strip())
+        if match:
+            found.add(match.group(1))
+    return found
+
+
 def existing_assignments() -> dict[str, str]:
     """The UNCOMMENTED assignments already in .env, name -> value, quotes STRIPPED.
 
@@ -1674,7 +1699,7 @@ def set_verdict(assignments: list[str], secrets: set[str]) -> tuple[dict[str, st
     RETURNS BOTH, so one call answers "what will be written" and "what was refused and
     why" -- a caller cannot report a partial result as a success (rule 13).
     """
-    manageable = set(every_variable_this_tool_can_set())
+    manageable = set(every_variable_this_tool_can_set()) | template_names()
     values: dict[str, str] = {}
     refusals: list[str] = []
     for raw in assignments:
@@ -1691,9 +1716,11 @@ def set_verdict(assignments: list[str], secrets: set[str]) -> tuple[dict[str, st
             )
         elif name not in manageable:
             refusals.append(
-                f"{name} is not a variable this tool manages, so writing it would put a line in "
-                f".env that nothing reads. Did you mean one of: "
-                f"{', '.join(sorted(n for n in manageable if n.startswith(name[:4]))) or 'none of them'}?"
+                f"{name} is not in .env.example, which lists every variable the compose files and "
+                f"config.py read, so writing it would put a line in .env that nothing reads. "
+                + (f"Did you mean one of: {', '.join(close)}?" if (close := sorted(
+                    n for n in manageable if n.startswith(name[:4]))) else
+                   "No listed variable starts the same way.")
             )
         elif not value:
             refusals.append(f"{name} was given no value. To leave it unset, omit it entirely.")
